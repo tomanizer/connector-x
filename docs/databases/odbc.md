@@ -53,6 +53,18 @@ Tuning environment variables:
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
 
+To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
+
+```bash
+scripts/odbc_postgres_bench.sh --sample-size 10 --measurement-time 2 --warm-up-time 1
+```
+
+Useful benchmark controls:
+
+* `ODBC_BENCH_ROWS`: number of rows read from the seeded benchmark table. Defaults to `100000`.
+* `ODBC_BENCH_BATCH_SIZES`: comma-separated `ODBC_BATCH_SIZE` values to compare. Defaults to `1024,4096,8192,16384`.
+* `ODBC_BENCH_QUERY`: custom benchmark query. When set, the benchmark runs only that query.
+
 ## Testing
 
 For the preferred live test, run PostgreSQL through the Rust testcontainer helper and connect to it through psqlODBC:

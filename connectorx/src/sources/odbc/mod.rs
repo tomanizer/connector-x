@@ -222,8 +222,7 @@ pub struct OdbcSourceParser {
     cursor: OdbcBlockCursor,
     rowbuf: Vec<Option<OdbcCell>>,
     ncols: usize,
-    current_col: usize,
-    current_row: usize,
+    current_cell: usize,
     is_finished: bool,
 }
 
@@ -233,19 +232,16 @@ impl OdbcSourceParser {
             cursor,
             rowbuf: Vec::with_capacity(DB_BUFFER_SIZE),
             ncols,
-            current_col: 0,
-            current_row: 0,
+            current_cell: 0,
             is_finished: false,
         }
     }
 
     #[throws(OdbcSourceError)]
     fn next_cell(&mut self) -> Option<&OdbcCell> {
-        let ridx = self.current_row;
-        let cidx = self.current_col;
-        self.current_row += (self.current_col + 1) / self.ncols;
-        self.current_col = (self.current_col + 1) % self.ncols;
-        self.rowbuf[ridx * self.ncols + cidx].as_ref()
+        let cell_index = self.current_cell;
+        self.current_cell += 1;
+        self.rowbuf[cell_index].as_ref()
     }
 
     #[throws(OdbcSourceError)]
@@ -289,10 +285,10 @@ impl PartitionParser<'_> for OdbcSourceParser {
             self.is_finished = true;
             return (0, true);
         }
-        assert!(self.current_col == 0);
-        let remaining_rows = self.rowbuf.len() / self.ncols - self.current_row;
-        if remaining_rows > 0 {
-            return (remaining_rows, self.is_finished);
+        assert!(self.current_cell.is_multiple_of(self.ncols));
+        let remaining_cells = self.rowbuf.len() - self.current_cell;
+        if remaining_cells > 0 {
+            return (remaining_cells / self.ncols, self.is_finished);
         } else if self.is_finished {
             return (0, self.is_finished);
         }
@@ -310,8 +306,7 @@ impl PartitionParser<'_> for OdbcSourceParser {
             self.is_finished = true;
         }
 
-        self.current_row = 0;
-        self.current_col = 0;
+        self.current_cell = 0;
         (self.rowbuf.len() / self.ncols, self.is_finished)
     }
 }

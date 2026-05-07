@@ -212,5 +212,9 @@ harness = false
 name = "db2_odbc"
 harness = false
 
+[[bench]]
+name = "odbc"
+harness = false
+
 [package.metadata.docs.rs]
 features = ["all"]
