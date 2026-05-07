@@ -236,6 +236,17 @@ pub fn get_arrow(
             );
             dispatcher.run()?;
         }
+        #[cfg(feature = "src_odbc")]
+        SourceType::Odbc => {
+            let source = OdbcSource::new(&source_conn.conn[..], queries.len())?;
+            let dispatcher = Dispatcher::<_, _, OdbcArrowTransport>::new(
+                source,
+                &mut destination,
+                queries,
+                origin_query,
+            );
+            dispatcher.run()?;
+        }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
             let source = OracleSource::new(&source_conn.conn[..], queries.len())?;
@@ -496,6 +507,18 @@ pub fn new_record_batch_iter(
         SourceType::Db2 => {
             let source = Db2Source::new(&source_conn.conn[..], queries.len()).unwrap();
             let batch_iter = ArrowBatchIter::<_, Db2ArrowStreamTransport>::new(
+                source,
+                destination,
+                origin_query,
+                queries,
+            )
+            .unwrap();
+            return Box::new(batch_iter);
+        }
+        #[cfg(feature = "src_odbc")]
+        SourceType::Odbc => {
+            let source = OdbcSource::new(&source_conn.conn[..], queries.len()).unwrap();
+            let batch_iter = ArrowBatchIter::<_, OdbcArrowStreamTransport>::new(
                 source,
                 destination,
                 origin_query,

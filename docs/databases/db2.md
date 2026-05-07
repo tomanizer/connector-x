@@ -16,7 +16,7 @@ The `driver` query parameter can be an ODBC driver name from `odbcinst.ini` or a
 conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=%2Fopt%2Fibm%2Fdb2%2Fclidriver%2Flib%2Flibdb2o.so"
 ```
 
-ConnectorX expands this URL into an ODBC connection string using `Driver`, `Hostname`, `Port`, `Protocol`, `Database`, `UID`, and `PWD`. `Protocol` defaults to `TCPIP`. A raw ODBC connection string starting with `Driver=`, `DSN=`, or `Database=` is also accepted.
+ConnectorX expands this URL into an ODBC connection string using `Driver`, `Hostname`, `Port`, `Protocol`, `Database`, `UID`, and `PWD`. `Protocol` defaults to `TCPIP`. Generated values are brace-escaped, including `}` characters. A raw ODBC connection string starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` is also accepted.
 
 Additional URL query parameters are appended to the ODBC connection string, so settings such as `Security=SSL` can be passed through.
 

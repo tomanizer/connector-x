@@ -129,6 +129,7 @@
 //! - [x] Sqlite
 //! - [x] SQL Server
 //! - [x] IBM Db2
+//! - [x] ODBC
 //! - [x] Oracle
 //! - [x] BigQuery
 //!
@@ -138,7 +139,7 @@
 //!
 //! # Feature gates
 //! By default, ConnectorX does not enable any sources / destinations to keep the dependencies minimal.
-//! Instead, we provide following features for you to opt-in: `src_sqlite`, `src_postgres`, `src_mysql`, `src_mssql`, `src_db2`, `src_oracle`, `dst_arrow`, `dst_polars`.
+//! Instead, we provide following features for you to opt-in: `src_sqlite`, `src_postgres`, `src_mysql`, `src_mssql`, `src_db2`, `src_odbc`, `src_oracle`, `dst_arrow`, `dst_polars`.
 //! For example, if you'd like to load data from Postgres to Arrow, you can enable `src_postgres` and `dst_arrow` in `Cargo.toml`.
 //! This will enable [`sources::postgres`], [`destinations::arrow`] and [`transports::PostgresArrowTransport`].
 
@@ -201,6 +202,8 @@ pub mod prelude {
     pub use crate::sources::mssql::MsSQLSource;
     #[cfg(feature = "src_mysql")]
     pub use crate::sources::mysql::MySQLSource;
+    #[cfg(feature = "src_odbc")]
+    pub use crate::sources::odbc::OdbcSource;
     #[cfg(feature = "src_oracle")]
     pub use crate::sources::oracle::OracleSource;
     #[cfg(feature = "src_postgres")]

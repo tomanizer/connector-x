@@ -17,6 +17,7 @@ conn = "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=%2Fopt%2Fhomebrew%2Flib%
 ```
 
 `tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.
+Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
 ## Driver Setup
 

@@ -12,7 +12,10 @@ use crate::{
     constants::DB_BUFFER_SIZE,
     data_order::DataOrder,
     errors::ConnectorXError,
-    sources::{PartitionParser, Produce, Source, SourcePartition},
+    sources::{
+        odbc_common::{is_raw_odbc_conn_string, odbc_conn_value},
+        PartitionParser, Produce, Source, SourcePartition,
+    },
     sql::{count_query, CXQuery},
 };
 use anyhow::anyhow;
@@ -282,6 +285,10 @@ impl PartitionParser<'_> for SybaseSourceParser {
 
     #[throws(SybaseSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        if self.ncols == 0 {
+            self.is_finished = true;
+            return (0, true);
+        }
         assert!(self.current_col == 0);
         let remaining_rows = self.rowbuf.len() - self.current_row;
         if remaining_rows > 0 {
@@ -880,17 +887,9 @@ fn parse_i64_with_ty(bytes: &[u8], ty: &'static str) -> Result<i64, SybaseSource
     Ok(value)
 }
 
-fn odbc_conn_value(value: &str) -> String {
-    format!("{{{}}}", value.replace('}', "}}"))
-}
-
 #[throws(SybaseSourceError)]
 pub fn sybase_conn_string(conn: &str) -> String {
-    if conn
-        .trim_start()
-        .to_ascii_lowercase()
-        .starts_with("driver=")
-    {
+    if is_raw_odbc_conn_string(conn) {
         return conn.to_string();
     }
 

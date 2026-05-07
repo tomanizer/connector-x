@@ -78,6 +78,7 @@ srcs = [
   "connectorx/src_mssql",
   "connectorx/src_sybase",
   "connectorx/src_db2",
+  "connectorx/src_odbc",
   "connectorx/src_oracle",
   "connectorx/src_bigquery",
   "connectorx/src_trino",

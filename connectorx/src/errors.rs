@@ -66,6 +66,10 @@ pub enum ConnectorXOutError {
     #[error(transparent)]
     Db2SourceError(#[from] crate::sources::db2::Db2SourceError),
 
+    #[cfg(feature = "src_odbc")]
+    #[error(transparent)]
+    OdbcSourceError(#[from] crate::sources::odbc::OdbcSourceError),
+
     #[cfg(feature = "src_sqlite")]
     #[error(transparent)]
     SQLiteSourceError(#[from] crate::sources::sqlite::SQLiteSourceError),
@@ -125,6 +129,10 @@ pub enum ConnectorXOutError {
     #[cfg(all(feature = "src_db2", feature = "dst_arrow"))]
     #[error(transparent)]
     Db2ArrowTransportError(#[from] crate::transports::Db2ArrowTransportError),
+
+    #[cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
+    #[error(transparent)]
+    OdbcArrowTransportError(#[from] crate::transports::OdbcArrowTransportError),
 
     #[cfg(all(feature = "src_oracle", feature = "dst_arrow"))]
     #[error(transparent)]
