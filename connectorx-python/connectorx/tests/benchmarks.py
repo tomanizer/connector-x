@@ -31,3 +31,10 @@ def bench_sybase(benchmark):
     if not sybase_url:
         pytest.skip("SYBASE_URL is not set")
     benchmark(read_sql_impl, sybase_url, os.environ["TPCH_TABLE"])
+
+
+def bench_db2(benchmark):
+    db2_url = os.environ.get("DB2_URL")
+    if not db2_url:
+        pytest.skip("DB2_URL is not set")
+    benchmark(read_sql_impl, db2_url, os.environ["TPCH_TABLE"])

@@ -7,6 +7,8 @@ use crate::source_router::{SourceConn, SourceType};
 use crate::sources::bigquery::BigQueryDialect;
 #[cfg(feature = "src_clickhouse")]
 use crate::sources::clickhouse::{ClickHouseSource, ClickHouseSourceError};
+#[cfg(feature = "src_db2")]
+use crate::sources::db2::{db2_conn_string, fetch_i64_pair as db2_fetch_i64_pair};
 #[cfg(feature = "src_mssql")]
 use crate::sources::mssql::{mssql_config, FloatN, IntN, MsSQLTypeSystem};
 #[cfg(feature = "src_mysql")]
@@ -40,6 +42,8 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 #[cfg(feature = "src_clickhouse")]
 use sqlparser::dialect::ClickHouseDialect;
+#[cfg(feature = "src_db2")]
+use sqlparser::dialect::GenericDialect;
 #[cfg(any(feature = "src_mssql", feature = "src_sybase"))]
 use sqlparser::dialect::MsSqlDialect;
 #[cfg(feature = "src_mysql")]
@@ -113,6 +117,8 @@ pub fn get_col_range(source_conn: &SourceConn, query: &str, col: &str) -> OutRes
         SourceType::MsSQL => mssql_get_partition_range(&source_conn.conn, query, col),
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => sybase_get_partition_range(&source_conn.conn, query, col),
+        #[cfg(feature = "src_db2")]
+        SourceType::Db2 => db2_get_partition_range(&source_conn.conn, query, col),
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => oracle_get_partition_range(&source_conn.conn, query, col),
         #[cfg(feature = "src_bigquery")]
@@ -153,6 +159,10 @@ pub fn get_part_query(
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => {
             single_col_partition_query(query, col, lower, upper, &MsSqlDialect {})?
+        }
+        #[cfg(feature = "src_db2")]
+        SourceType::Db2 => {
+            single_col_partition_query(query, col, lower, upper, &GenericDialect {})?
         }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
@@ -479,6 +489,14 @@ fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) 
     let conn = sybase_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &MsSqlDialect {})?;
     sybase_fetch_i64_pair(&conn, range_query.as_str())?
+}
+
+#[cfg(feature = "src_db2")]
+#[throws(ConnectorXOutError)]
+fn db2_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
+    let conn = db2_conn_string(conn.as_str())?;
+    let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
+    db2_fetch_i64_pair(&conn, range_query.as_str())?
 }
 
 #[cfg(feature = "src_oracle")]

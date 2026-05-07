@@ -10,6 +10,10 @@ mod clickhouse_arrow;
 mod clickhouse_arrowstream;
 #[cfg(all(feature = "src_csv", feature = "dst_arrow"))]
 mod csv_arrow;
+#[cfg(all(feature = "src_db2", feature = "dst_arrow"))]
+mod db2_arrow;
+#[cfg(all(feature = "src_db2", feature = "dst_arrow"))]
+mod db2_arrowstream;
 #[cfg(all(feature = "src_dummy", feature = "dst_arrow"))]
 mod dummy_arrow;
 #[cfg(all(feature = "src_dummy", feature = "dst_arrow"))]
@@ -58,6 +62,13 @@ pub use clickhouse_arrowstream::{
 };
 #[cfg(all(feature = "src_csv", feature = "dst_arrow"))]
 pub use csv_arrow::CSVArrowTransport;
+#[cfg(all(feature = "src_db2", feature = "dst_arrow"))]
+pub use db2_arrow::{Db2ArrowTransport, Db2ArrowTransportError};
+#[cfg(all(feature = "src_db2", feature = "dst_arrow"))]
+pub use db2_arrowstream::{
+    Db2ArrowTransport as Db2ArrowStreamTransport,
+    Db2ArrowTransportError as Db2ArrowStreamTransportError,
+};
 #[cfg(all(feature = "src_dummy", feature = "dst_arrow"))]
 pub use dummy_arrow::DummyArrowTransport;
 #[cfg(all(feature = "src_mssql", feature = "dst_arrow"))]
