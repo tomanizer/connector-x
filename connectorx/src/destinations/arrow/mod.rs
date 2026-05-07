@@ -202,6 +202,15 @@ impl ArrowDestination {
         RecordBatch::new_empty(self.arrow_schema.clone())
     }
 
+    #[throws(ArrowDestinationError)]
+    pub(crate) fn push_record_batch(&self, batch: RecordBatch) {
+        let mut guard = self
+            .data
+            .lock()
+            .map_err(|e| anyhow!("mutex poisoned {}", e))?;
+        guard.push(batch);
+    }
+
     pub fn arrow_schema(&self) -> Arc<Schema> {
         self.arrow_schema.clone()
     }

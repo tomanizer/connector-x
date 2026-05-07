@@ -1,5 +1,6 @@
 #![cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
 
+use arrow::util::display::array_value_to_string;
 use connectorx::{
     destinations::arrow::ArrowDestination,
     get_arrow::get_arrow,
@@ -57,6 +58,26 @@ fn assert_expected_rows(batches: &[arrow::record_batch::RecordBatch]) {
         let actual = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
         assert_eq!(actual, expected);
     }
+}
+
+fn assert_postgres_testcontainer_rows(batches: &[arrow::record_batch::RecordBatch]) {
+    let mut rows = Vec::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            rows.push((
+                array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                array_value_to_string(batch.column(2).as_ref(), row).unwrap(),
+            ));
+        }
+    }
+
+    assert_eq!(
+        rows,
+        vec![
+            ("1".to_string(), "alpha".to_string()),
+            ("2".to_string(), "beta".to_string())
+        ]
+    );
 }
 
 #[test]
@@ -120,6 +141,9 @@ fn test_odbc_arrow_route_with_raw_conn() {
     let batches = destination.arrow().unwrap();
     assert!(!batches.is_empty());
     assert_expected_rows(&batches);
+    if use_postgres_testcontainer() {
+        assert_postgres_testcontainer_rows(&batches);
+    }
 }
 
 #[test]
@@ -136,6 +160,9 @@ fn test_odbc_get_arrow_route() {
     let batches = destination.arrow().unwrap();
     assert!(!batches.is_empty());
     assert_expected_rows(&batches);
+    if use_postgres_testcontainer() {
+        assert_postgres_testcontainer_rows(&batches);
+    }
 }
 
 #[test]

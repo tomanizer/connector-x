@@ -19,7 +19,13 @@ use postgres_openssl::MakeTlsConnector;
 #[allow(unused_imports)]
 use std::sync::Arc;
 
-#[allow(unreachable_code, unreachable_patterns, unused_variables, unused_mut)]
+#[allow(
+    unreachable_code,
+    unreachable_patterns,
+    unused_assignments,
+    unused_variables,
+    unused_mut
+)]
 #[throws(ConnectorXOutError)]
 pub fn get_arrow(
     source_conn: &SourceConn,
@@ -238,14 +244,8 @@ pub fn get_arrow(
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
-            let source = OdbcSource::new(&source_conn.conn[..], queries.len())?;
-            let dispatcher = Dispatcher::<_, _, OdbcArrowTransport>::new(
-                source,
-                &mut destination,
-                queries,
-                origin_query,
-            );
-            dispatcher.run()?;
+            destination =
+                crate::sources::odbc::odbc_get_arrow(&source_conn.conn, origin_query, queries)?;
         }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
