@@ -37,6 +37,9 @@ bench-sybase-odbc:
 bench-db2-odbc:
     cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
 
+bench-odbc:
+    cargo bench -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --bench odbc
+
 start-db2-docker:
     #!/usr/bin/env bash
     set -euo pipefail
