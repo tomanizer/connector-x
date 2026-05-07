@@ -55,7 +55,7 @@ jobs:
             echo "Set SYBASE_URL and/or SYBASE_ODBC_CONN repository secrets to run live Sybase tests."
             exit 1
           fi
-          cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow" --test test_sybase -- --nocapture
+          cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow fptr" --test test_sybase -- --nocapture
 
       - name: Run live Db2 tests
         if: inputs.backend == 'db2' || inputs.backend == 'both'
@@ -70,7 +70,7 @@ jobs:
             echo "Set DB2_URL and/or DB2_ODBC_CONN repository secrets to run live Db2 tests."
             exit 1
           fi
-          cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow" --test test_db2 -- --nocapture
+          cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow fptr" --test test_db2 -- --nocapture
 
       - name: Run live generic ODBC tests
         if: inputs.backend == 'odbc' || inputs.backend == 'both'
