@@ -570,6 +570,7 @@ _ServerBackendT = TypeVar(
         "postgresql",
         "mysql",
         "mssql",
+        "sybase",
         "oracle",
         "duckdb",
     ],

@@ -214,6 +214,17 @@ pub fn get_arrow(
             );
             dispatcher.run()?;
         }
+        #[cfg(feature = "src_sybase")]
+        SourceType::Sybase => {
+            let source = SybaseSource::new(&source_conn.conn[..], queries.len())?;
+            let dispatcher = Dispatcher::<_, _, SybaseArrowTransport>::new(
+                source,
+                &mut destination,
+                queries,
+                origin_query,
+            );
+            dispatcher.run()?;
+        }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
             let source = OracleSource::new(&source_conn.conn[..], queries.len())?;
@@ -450,6 +461,18 @@ pub fn new_record_batch_iter(
             let rt = Arc::new(tokio::runtime::Runtime::new().expect("Failed to create runtime"));
             let source = MsSQLSource::new(rt, &source_conn.conn[..], queries.len()).unwrap();
             let batch_iter = ArrowBatchIter::<_, MsSQLArrowStreamTransport>::new(
+                source,
+                destination,
+                origin_query,
+                queries,
+            )
+            .unwrap();
+            return Box::new(batch_iter);
+        }
+        #[cfg(feature = "src_sybase")]
+        SourceType::Sybase => {
+            let source = SybaseSource::new(&source_conn.conn[..], queries.len()).unwrap();
+            let batch_iter = ArrowBatchIter::<_, SybaseArrowStreamTransport>::new(
                 source,
                 destination,
                 origin_query,
