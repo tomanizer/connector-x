@@ -285,7 +285,7 @@ impl PartitionParser<'_> for OdbcSourceParser {
             self.is_finished = true;
             return (0, true);
         }
-        assert!(self.current_cell.is_multiple_of(self.ncols));
+        assert!(matches!(self.current_cell.checked_rem(self.ncols), Some(0)));
         let remaining_cells = self.rowbuf.len() - self.current_cell;
         if remaining_cells > 0 {
             return (remaining_cells / self.ncols, self.is_finished);
