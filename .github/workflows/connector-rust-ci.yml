@@ -1,0 +1,73 @@
+name: connector-rust-ci
+
+on:
+  pull_request:
+    branches:
+      - main
+      - prerelease
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  connector-rust:
+    name: connector-rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux ODBC dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev pkg-config libssl-dev libkrb5-dev libclang-dev
+
+      - name: Install macOS ODBC dependencies
+        if: runner.os == 'macOS'
+        run: brew install unixodbc
+
+      - name: Check formatting
+        if: runner.os == 'Linux'
+        run: cargo fmt --all -- --check
+
+      - name: Check Sybase connector
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'src_sybase' connectorx/Cargo.toml; then
+            echo "src_sybase is not present on this branch; skipping Sybase connector checks."
+            exit 0
+          fi
+
+          cargo check -p connectorx --no-default-features --features "src_sybase dst_arrow"
+          cargo clippy -p connectorx --no-default-features --features "src_sybase dst_arrow" -- -D warnings
+          cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow" --test test_sybase -- --nocapture
+          cargo bench -p connectorx --no-default-features --features "src_sybase dst_arrow" --bench sybase_odbc --no-run
+
+      - name: Check Db2 connector
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'src_db2' connectorx/Cargo.toml; then
+            echo "src_db2 is not present on this branch; skipping Db2 connector checks."
+            exit 0
+          fi
+
+          cargo check -p connectorx --no-default-features --features "src_db2 dst_arrow"
+          cargo clippy -p connectorx --no-default-features --features "src_db2 dst_arrow" -- -D warnings
+          cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow" --test test_db2 -- --nocapture
+          cargo bench -p connectorx --no-default-features --features "src_db2 dst_arrow" --bench db2_odbc --no-run
