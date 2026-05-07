@@ -57,7 +57,11 @@ jobs:
           cargo check -p connectorx --no-default-features --features "$features"
           cargo clippy -p connectorx --no-default-features --features "$features"
           cargo test -p connectorx --no-default-features --features "$features" --test test_sybase -- --nocapture
-          cargo bench -p connectorx --no-default-features --features "$features" --bench sybase_odbc --no-run
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            cargo bench -p connectorx --no-default-features --features "$features" --bench sybase_odbc --no-run
+          else
+            echo "Skipping Sybase benchmark build on Windows because pprof does not compile there."
+          fi
 
       - name: Check Db2 connector
         shell: bash
@@ -72,4 +76,8 @@ jobs:
           cargo check -p connectorx --no-default-features --features "$features"
           cargo clippy -p connectorx --no-default-features --features "$features"
           cargo test -p connectorx --no-default-features --features "$features" --test test_db2 -- --nocapture
-          cargo bench -p connectorx --no-default-features --features "$features" --bench db2_odbc --no-run
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            cargo bench -p connectorx --no-default-features --features "$features" --bench db2_odbc --no-run
+          else
+            echo "Skipping Db2 benchmark build on Windows because pprof does not compile there."
+          fi
