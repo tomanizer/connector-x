@@ -7,6 +7,12 @@ pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
 
 #[cfg(feature = "dst_arrow")]
+use crate::sources::odbc_core::{
+    bit_to_bool, cell_bool, cell_date, cell_f32, cell_f64, cell_i64, cell_time, cell_timestamp,
+    odbc_cell_from_column, odbc_date_to_naive, odbc_time_to_naive, odbc_timestamp_to_naive,
+    parse_decimal, OdbcValue,
+};
+#[cfg(feature = "dst_arrow")]
 use crate::{
     constants::DEFAULT_ARROW_DECIMAL_SCALE,
     destinations::{
@@ -21,11 +27,7 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair},
-        odbc_core::{
-            self, bit_to_bool, cell_bool, cell_date, cell_f32, cell_f64, cell_i64, cell_time,
-            cell_timestamp, odbc_cell_from_column, odbc_date_to_naive, odbc_time_to_naive,
-            odbc_timestamp_to_naive, parse_decimal, OdbcCell, OdbcCoreError, OdbcTypePolicy,
-        },
+        odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
         Source, SourcePartition,
     },
     sql::{count_query, CXQuery},
@@ -33,9 +35,8 @@ use crate::{
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
-use odbc_api::sys::NULL_DATA;
 use odbc_api::{
-    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer},
+    buffers::{BufferDesc, ColumnarAnyBuffer},
     Cursor,
 };
 use rust_decimal::Decimal;
@@ -53,6 +54,7 @@ use {
         datatypes::Schema,
         record_batch::RecordBatch,
     },
+    odbc_api::{buffers::AnySlice, sys::NULL_DATA},
     rayon::prelude::*,
     std::sync::Arc,
 };
@@ -385,7 +387,7 @@ fn validity_from_indicators(
 macro_rules! append_direct_cell {
     ($column:expr, $row:expr, $builder:expr, $nullable:expr, $ty:literal, $parse:expr) => {
         match odbc_cell_from_column($column, $row) {
-            Some(cell) => $builder.append_value(($parse)(&cell)?),
+            Some(cell) => $builder.append_value(($parse)(cell)?),
             None => {
                 require_nullable($nullable, $ty)?;
                 $builder.append_null();
@@ -643,7 +645,9 @@ fn odbc_decimal_array(
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
                         let decimal = match &cell {
-                            OdbcCell::Bytes(bytes) => parse_decimal::<OdbcSourceError>(bytes)?,
+                            OdbcValue::Bytes(bytes) => {
+                                parse_decimal::<OdbcSourceError>(bytes.as_ref())?
+                            }
                             _ => {
                                 parse_decimal::<OdbcSourceError>(cell.to_utf8_string().as_bytes())?
                             }
@@ -814,9 +818,8 @@ fn odbc_date32_array(
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
-                        builder.append_value(naive_date_to_arrow(cell_date::<OdbcSourceError>(
-                            &cell,
-                        )?)?)
+                        builder
+                            .append_value(naive_date_to_arrow(cell_date::<OdbcSourceError>(cell)?)?)
                     }
                     None => {
                         require_nullable(nullable, "NaiveDate")?;
@@ -866,7 +869,7 @@ fn odbc_time64_micro_array(
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
                         builder.append_value(naive_time_to_arrow_micro(
-                            cell_time::<OdbcSourceError>(&cell)?,
+                            cell_time::<OdbcSourceError>(cell)?,
                         ))
                     }
                     None => {
@@ -917,7 +920,7 @@ fn odbc_timestamp_micro_array(
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
                         builder.append_value(
-                            cell_timestamp::<OdbcSourceError>(&cell)?
+                            cell_timestamp::<OdbcSourceError>(cell)?
                                 .and_utc()
                                 .timestamp_micros(),
                         );
