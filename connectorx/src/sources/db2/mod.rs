@@ -6,38 +6,32 @@ mod typesystem;
 pub use self::errors::Db2SourceError;
 pub use self::typesystem::Db2TypeSystem;
 
-use std::convert::TryFrom;
-
 use crate::{
-    constants::DB_BUFFER_SIZE,
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{
         odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, odbc_conn_value},
-        PartitionParser, Produce, Source, SourcePartition,
+        odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
+        Source, SourcePartition,
     },
     sql::{count_query, CXQuery},
 };
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
-use odbc_api::handles::StatementConnection;
-use odbc_api::sys::{Date, Time, Timestamp};
 use odbc_api::{
-    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, TextRowSet},
-    environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl,
-    ResultSetMetadata,
+    buffers::{BufferDesc, ColumnarAnyBuffer},
+    Cursor,
 };
 use rust_decimal::Decimal;
 use sqlparser::dialect::GenericDialect;
 use url::Url;
 use urlencoding::decode;
 
-type Db2Cursor = CursorImpl<StatementConnection<Connection<'static>>>;
-type Db2BlockCursor = BlockCursor<Db2Cursor, ColumnarAnyBuffer>;
-
 const DB2_DEFAULT_BATCH_SIZE: usize = 1024;
 const DB2_DEFAULT_MAX_STR_LEN: usize = 1024;
+
+pub type Db2SourceParser = odbc_core::OdbcParser<Db2TypeSystem, Db2SourceError>;
 
 pub struct Db2Source {
     conn: String,
@@ -58,19 +52,14 @@ impl Db2Source {
             queries: vec![],
             names: vec![],
             schema: vec![],
-            batch_size: env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
-            max_str_len: env_usize("DB2_MAX_STR_LEN").unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize("DB2_MAX_STR_LEN").unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
         }
     }
 
     #[throws(Db2SourceError)]
-    fn execute_query(conn: &str, query: &str) -> Db2Cursor {
-        let env = environment()?;
-        let connection = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
-        connection
-            .into_cursor(query, (), None)
-            .map_err(|e| e.error)?
-            .ok_or_else(|| Db2SourceError::NoResultSet(query.to_string()))?
+    fn execute_query(conn: &str, query: &str) -> odbc_core::OdbcCursor {
+        odbc_core::execute_query::<Db2SourceError>(conn, query)?
     }
 }
 
@@ -103,21 +92,11 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
-        let mut cursor = Self::execute_query(&self.conn, &first_query)?;
-        let ncols = cursor.num_result_cols()?;
-        if ncols < 0 {
-            throw!(anyhow!("ODBC returned negative column count: {}", ncols));
-        }
-
-        let mut names = Vec::with_capacity(ncols as usize);
-        let mut schema = Vec::with_capacity(ncols as usize);
-        for col in 1..=ncols as u16 {
-            names.push(cursor.col_name(col)?);
-            let ty = cursor.col_data_type(col)?;
-            let nullability = cursor.col_nullability(col)?;
-            schema.push(Db2TypeSystem::from_odbc(ty, nullability));
-        }
-
+        let (names, schema) = odbc_core::fetch_metadata::<Db2TypeSystem, Db2SourceError, _>(
+            &self.conn,
+            &first_query,
+            Db2TypeSystem::from_odbc,
+        )?;
         self.names = names;
         self.schema = schema;
     }
@@ -125,7 +104,11 @@ where
     #[throws(Db2SourceError)]
     fn result_rows(&mut self) -> Option<usize> {
         match &self.origin_query {
-            Some(q) => Some(fetch_count(&self.conn, q)?),
+            Some(q) => Some(odbc_core::fetch_count::<Db2SourceError, _>(
+                &self.conn,
+                q,
+                &GenericDialect {},
+            )?),
             None => None,
         }
     }
@@ -193,7 +176,7 @@ impl SourcePartition for Db2SourcePartition {
     #[throws(Db2SourceError)]
     fn result_rows(&mut self) {
         let cquery = count_query(&self.query, &GenericDialect {})?;
-        self.nrows = fetch_count_query(&self.conn, cquery.as_str())?;
+        self.nrows = odbc_core::fetch_count_query::<Db2SourceError>(&self.conn, cquery.as_str())?;
     }
 
     #[throws(Db2SourceError)]
@@ -203,10 +186,10 @@ impl SourcePartition for Db2SourcePartition {
             self.batch_size,
             self.schema
                 .iter()
-                .map(|ty| db2_buffer_desc(*ty, self.max_str_len)),
+                .map(|ty| ty.buffer_desc(self.max_str_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        Db2SourceParser::new(cursor, self.schema.len())
+        Db2SourceParser::new(cursor, self.schema.len(), "Db2")
     }
 
     fn nrows(&self) -> usize {
@@ -218,737 +201,107 @@ impl SourcePartition for Db2SourcePartition {
     }
 }
 
-pub struct Db2SourceParser {
-    cursor: Db2BlockCursor,
-    rowbuf: Vec<Option<Db2Cell>>,
-    ncols: usize,
-    current_col: usize,
-    current_row: usize,
-    is_finished: bool,
-}
-
-impl Db2SourceParser {
-    fn new(cursor: Db2BlockCursor, ncols: usize) -> Self {
-        Self {
-            cursor,
-            rowbuf: Vec::with_capacity(DB_BUFFER_SIZE),
-            ncols,
-            current_col: 0,
-            current_row: 0,
-            is_finished: false,
-        }
+impl OdbcCoreError for Db2SourceError {
+    fn get_nrows_failed() -> Self {
+        Self::GetNRowsFailed
     }
 
-    #[throws(Db2SourceError)]
-    fn next_cell(&mut self) -> Option<&Db2Cell> {
-        let ridx = self.current_row;
-        let cidx = self.current_col;
-        self.current_row += (self.current_col + 1) / self.ncols;
-        self.current_col = (self.current_col + 1) % self.ncols;
-        self.rowbuf[ridx * self.ncols + cidx].as_ref()
+    fn no_result_set(query: String) -> Self {
+        Self::NoResultSet(query)
     }
 
-    #[throws(Db2SourceError)]
-    fn next_bytes(&mut self) -> Option<&[u8]> {
-        match self.next_cell()? {
-            Some(cell) => Some(cell.try_bytes("bytes").ok_or_else(|| {
-                ConnectorXError::cannot_produce::<Vec<u8>>(Some(
-                    "Db2 typed value for byte-only parser".to_string(),
-                ))
-            })?),
-            None => None,
-        }
-    }
-
-    #[throws(Db2SourceError)]
-    fn required_cell(&mut self, ty: &'static str) -> &Db2Cell {
-        let value = self.next_cell()?;
-        value.ok_or_else(|| {
-            ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!("Db2 NULL for non-null {ty}")))
-        })?
-    }
-
-    #[throws(Db2SourceError)]
-    fn required_bytes(&mut self, ty: &'static str) -> &[u8] {
-        let value = self.required_cell(ty)?;
-        value.try_bytes(ty).ok_or_else(|| {
-            ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!(
-                "Db2 typed value for byte-only {ty}"
-            )))
-        })?
+    fn parse_value(value: String, ty: &'static str) -> Self {
+        Self::ParseValue { value, ty }
     }
 }
 
-impl PartitionParser<'_> for Db2SourceParser {
-    type TypeSystem = Db2TypeSystem;
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn fetch_next(&mut self) -> (usize, bool) {
-        if self.ncols == 0 {
-            self.is_finished = true;
-            return (0, true);
-        }
-        assert!(self.current_col == 0);
-        let remaining_rows = self.rowbuf.len() / self.ncols - self.current_row;
-        if remaining_rows > 0 {
-            return (remaining_rows, self.is_finished);
-        } else if self.is_finished {
-            return (0, self.is_finished);
-        }
-
-        self.rowbuf.clear();
-        if let Some(batch) = self.cursor.fetch()? {
-            self.rowbuf.reserve(batch.num_rows() * self.ncols);
-            for row_index in 0..batch.num_rows() {
-                for col_index in 0..batch.num_cols() {
-                    self.rowbuf
-                        .push(db2_cell_from_column(batch.column(col_index), row_index));
-                }
-            }
-        } else {
-            self.is_finished = true;
-        }
-
-        self.current_row = 0;
-        self.current_col = 0;
-        (self.rowbuf.len() / self.ncols, self.is_finished)
-    }
-}
-
-#[derive(Clone, Debug)]
-enum Db2Cell {
-    Bytes(Vec<u8>),
-    U8(u8),
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    Bool(bool),
-    Date(Date),
-    Time(Time),
-    Timestamp(Timestamp),
-}
-
-impl Db2Cell {
-    fn try_bytes(&self, _ty: &'static str) -> Option<&[u8]> {
+impl OdbcTypePolicy for Db2TypeSystem {
+    fn nullable(self) -> bool {
         match self {
-            Db2Cell::Bytes(bytes) => Some(bytes),
-            _ => None,
+            Db2TypeSystem::TinyInt(nullable)
+            | Db2TypeSystem::SmallInt(nullable)
+            | Db2TypeSystem::Int(nullable)
+            | Db2TypeSystem::BigInt(nullable)
+            | Db2TypeSystem::Real(nullable)
+            | Db2TypeSystem::Double(nullable)
+            | Db2TypeSystem::Numeric(nullable)
+            | Db2TypeSystem::Decimal(nullable)
+            | Db2TypeSystem::Bit(nullable)
+            | Db2TypeSystem::Char(nullable)
+            | Db2TypeSystem::Varchar(nullable)
+            | Db2TypeSystem::Text(nullable)
+            | Db2TypeSystem::Binary(nullable)
+            | Db2TypeSystem::Date(nullable)
+            | Db2TypeSystem::Time(nullable)
+            | Db2TypeSystem::Timestamp(nullable) => nullable,
         }
     }
 
-    fn to_utf8_string(&self) -> String {
+    fn buffer_desc(self, max_str_len: usize) -> BufferDesc {
+        let nullable = self.nullable();
         match self {
-            Db2Cell::Bytes(bytes) => bytes_to_string(bytes),
-            Db2Cell::U8(value) => value.to_string(),
-            Db2Cell::I8(value) => value.to_string(),
-            Db2Cell::I16(value) => value.to_string(),
-            Db2Cell::I32(value) => value.to_string(),
-            Db2Cell::I64(value) => value.to_string(),
-            Db2Cell::F32(value) => value.to_string(),
-            Db2Cell::F64(value) => value.to_string(),
-            Db2Cell::Bool(value) => value.to_string(),
-            Db2Cell::Date(value) => {
-                format!("{:04}-{:02}-{:02}", value.year, value.month, value.day)
-            }
-            Db2Cell::Time(value) => {
-                format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second)
-            }
-            Db2Cell::Timestamp(value) => format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-                value.year,
-                value.month,
-                value.day,
-                value.hour,
-                value.minute,
-                value.second,
-                value.fraction
-            ),
+            Db2TypeSystem::TinyInt(_) => BufferDesc::U8 { nullable },
+            Db2TypeSystem::SmallInt(_) => BufferDesc::I16 { nullable },
+            Db2TypeSystem::Int(_) => BufferDesc::I32 { nullable },
+            Db2TypeSystem::BigInt(_) => BufferDesc::I64 { nullable },
+            Db2TypeSystem::Real(_) => BufferDesc::F32 { nullable },
+            Db2TypeSystem::Double(_) => BufferDesc::F64 { nullable },
+            Db2TypeSystem::Bit(_) => BufferDesc::Bit { nullable },
+            Db2TypeSystem::Numeric(_)
+            | Db2TypeSystem::Decimal(_)
+            | Db2TypeSystem::Char(_)
+            | Db2TypeSystem::Varchar(_)
+            | Db2TypeSystem::Text(_) => BufferDesc::Text { max_str_len },
+            Db2TypeSystem::Binary(_) => BufferDesc::Binary {
+                max_bytes: max_str_len,
+            },
+            Db2TypeSystem::Date(_) => BufferDesc::Date { nullable },
+            Db2TypeSystem::Time(_) => BufferDesc::Time { nullable },
+            Db2TypeSystem::Timestamp(_) => BufferDesc::Timestamp { nullable },
         }
     }
 }
 
-fn db2_buffer_desc(ty: Db2TypeSystem, max_str_len: usize) -> BufferDesc {
-    let nullable = db2_nullable(ty);
-    match ty {
-        Db2TypeSystem::TinyInt(_) => BufferDesc::U8 { nullable },
-        Db2TypeSystem::SmallInt(_) => BufferDesc::I16 { nullable },
-        Db2TypeSystem::Int(_) => BufferDesc::I32 { nullable },
-        Db2TypeSystem::BigInt(_) => BufferDesc::I64 { nullable },
-        Db2TypeSystem::Real(_) => BufferDesc::F32 { nullable },
-        Db2TypeSystem::Double(_) => BufferDesc::F64 { nullable },
-        Db2TypeSystem::Bit(_) => BufferDesc::Bit { nullable },
-        Db2TypeSystem::Numeric(_)
-        | Db2TypeSystem::Decimal(_)
-        | Db2TypeSystem::Char(_)
-        | Db2TypeSystem::Varchar(_)
-        | Db2TypeSystem::Text(_) => BufferDesc::Text { max_str_len },
-        Db2TypeSystem::Date(_) | Db2TypeSystem::Time(_) | Db2TypeSystem::Timestamp(_) => {
-            db2_temporal_buffer_desc(ty, nullable)
-        }
-        Db2TypeSystem::Binary(_) => BufferDesc::Binary {
-            max_bytes: max_str_len,
-        },
-    }
-}
-
-fn db2_temporal_buffer_desc(ty: Db2TypeSystem, nullable: bool) -> BufferDesc {
-    match ty {
-        Db2TypeSystem::Date(_) => BufferDesc::Date { nullable },
-        Db2TypeSystem::Time(_) => BufferDesc::Time { nullable },
-        Db2TypeSystem::Timestamp(_) => BufferDesc::Timestamp { nullable },
-        _ => unreachable!("non-temporal Db2 type passed to temporal buffer desc"),
-    }
-}
-
-fn db2_nullable(ty: Db2TypeSystem) -> bool {
-    match ty {
-        Db2TypeSystem::TinyInt(nullable)
-        | Db2TypeSystem::SmallInt(nullable)
-        | Db2TypeSystem::Int(nullable)
-        | Db2TypeSystem::BigInt(nullable)
-        | Db2TypeSystem::Real(nullable)
-        | Db2TypeSystem::Double(nullable)
-        | Db2TypeSystem::Numeric(nullable)
-        | Db2TypeSystem::Decimal(nullable)
-        | Db2TypeSystem::Bit(nullable)
-        | Db2TypeSystem::Char(nullable)
-        | Db2TypeSystem::Varchar(nullable)
-        | Db2TypeSystem::Text(nullable)
-        | Db2TypeSystem::Binary(nullable)
-        | Db2TypeSystem::Date(nullable)
-        | Db2TypeSystem::Time(nullable)
-        | Db2TypeSystem::Timestamp(nullable) => nullable,
-    }
-}
-
-fn db2_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<Db2Cell> {
-    match column {
-        AnySlice::Text(view) => view
-            .get(row_index)
-            .map(|bytes| Db2Cell::Bytes(bytes.to_vec())),
-        AnySlice::WText(view) => view
-            .get(row_index)
-            .map(|chars| Db2Cell::Bytes(String::from_utf16_lossy(chars).into_bytes())),
-        AnySlice::Binary(view) => view
-            .get(row_index)
-            .map(|bytes| Db2Cell::Bytes(bytes.to_vec())),
-        AnySlice::F64(values) => Some(Db2Cell::F64(values[row_index])),
-        AnySlice::F32(values) => Some(Db2Cell::F32(values[row_index])),
-        AnySlice::I8(values) => Some(Db2Cell::I8(values[row_index])),
-        AnySlice::I16(values) => Some(Db2Cell::I16(values[row_index])),
-        AnySlice::I32(values) => Some(Db2Cell::I32(values[row_index])),
-        AnySlice::I64(values) => Some(Db2Cell::I64(values[row_index])),
-        AnySlice::U8(values) => Some(Db2Cell::U8(values[row_index])),
-        AnySlice::Bit(values) => Some(Db2Cell::Bool(bit_to_bool(values[row_index]))),
-        AnySlice::Date(values) => Some(Db2Cell::Date(values[row_index])),
-        AnySlice::Time(values) => Some(Db2Cell::Time(values[row_index])),
-        AnySlice::Timestamp(values) => Some(Db2Cell::Timestamp(values[row_index])),
-        AnySlice::NullableF64(values) => values.get(row_index).copied().map(Db2Cell::F64),
-        AnySlice::NullableF32(values) => values.get(row_index).copied().map(Db2Cell::F32),
-        AnySlice::NullableI8(values) => values.get(row_index).copied().map(Db2Cell::I8),
-        AnySlice::NullableI16(values) => values.get(row_index).copied().map(Db2Cell::I16),
-        AnySlice::NullableI32(values) => values.get(row_index).copied().map(Db2Cell::I32),
-        AnySlice::NullableI64(values) => values.get(row_index).copied().map(Db2Cell::I64),
-        AnySlice::NullableU8(values) => values.get(row_index).copied().map(Db2Cell::U8),
-        AnySlice::NullableBit(values) => values
-            .get(row_index)
-            .copied()
-            .map(bit_to_bool)
-            .map(Db2Cell::Bool),
-        AnySlice::NullableDate(values) => values.get(row_index).copied().map(Db2Cell::Date),
-        AnySlice::NullableTime(values) => values.get(row_index).copied().map(Db2Cell::Time),
-        AnySlice::NullableTimestamp(values) => {
-            values.get(row_index).copied().map(Db2Cell::Timestamp)
-        }
-        AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => None,
-    }
-}
-
-fn bit_to_bool(value: Bit) -> bool {
-    value.0 != 0
-}
-
-macro_rules! impl_parse_from_bytes {
-    ($t:ty, $name:literal, $parse:expr) => {
-        impl<'r> Produce<'r, $t> for Db2SourceParser {
-            type Error = Db2SourceError;
-
-            #[throws(Db2SourceError)]
-            fn produce(&'r mut self) -> $t {
-                let bytes = self.required_bytes($name)?;
-                ($parse)(bytes)?
-            }
-        }
-
-        impl<'r> Produce<'r, Option<$t>> for Db2SourceParser {
-            type Error = Db2SourceError;
-
-            #[throws(Db2SourceError)]
-            fn produce(&'r mut self) -> Option<$t> {
-                match self.next_bytes()? {
-                    Some(bytes) => Some(($parse)(bytes)?),
-                    None => None,
-                }
-            }
-        }
-    };
-}
-
-impl_parse_from_bytes!(Decimal, "Decimal", parse_decimal);
-
-macro_rules! impl_parse_from_cell {
-    ($t:ty, $name:literal, $parse:expr) => {
-        impl<'r> Produce<'r, $t> for Db2SourceParser {
-            type Error = Db2SourceError;
-
-            #[throws(Db2SourceError)]
-            fn produce(&'r mut self) -> $t {
-                let cell = self.required_cell($name)?;
-                ($parse)(cell)?
-            }
-        }
-
-        impl<'r> Produce<'r, Option<$t>> for Db2SourceParser {
-            type Error = Db2SourceError;
-
-            #[throws(Db2SourceError)]
-            fn produce(&'r mut self) -> Option<$t> {
-                match self.next_cell()? {
-                    Some(cell) => Some(($parse)(cell)?),
-                    None => None,
-                }
-            }
-        }
-    };
-}
-
-impl_parse_from_cell!(u8, "u8", cell_u8);
-impl_parse_from_cell!(i16, "i16", cell_i16);
-impl_parse_from_cell!(i32, "i32", cell_i32);
-impl_parse_from_cell!(i64, "i64", cell_i64);
-impl_parse_from_cell!(f32, "f32", cell_f32);
-impl_parse_from_cell!(f64, "f64", cell_f64);
-impl_parse_from_cell!(NaiveDate, "NaiveDate", cell_date);
-impl_parse_from_cell!(NaiveTime, "NaiveTime", cell_time);
-impl_parse_from_cell!(NaiveDateTime, "NaiveDateTime", cell_timestamp);
-
-impl<'r> Produce<'r, bool> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> bool {
-        cell_bool(self.required_cell("bool")?)?
-    }
-}
-
-impl<'r> Produce<'r, Option<bool>> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> Option<bool> {
-        match self.next_cell()? {
-            Some(cell) => Some(cell_bool(cell)?),
-            None => None,
-        }
-    }
-}
-
-impl<'r> Produce<'r, String> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> String {
-        self.required_cell("String")?.to_utf8_string()
-    }
-}
-
-impl<'r> Produce<'r, Option<String>> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> Option<String> {
-        self.next_cell()?.map(Db2Cell::to_utf8_string)
-    }
-}
-
-impl<'r> Produce<'r, Vec<u8>> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> Vec<u8> {
-        self.required_bytes("Vec<u8>")?.to_vec()
-    }
-}
-
-impl<'r> Produce<'r, Option<Vec<u8>>> for Db2SourceParser {
-    type Error = Db2SourceError;
-
-    #[throws(Db2SourceError)]
-    fn produce(&'r mut self) -> Option<Vec<u8>> {
-        self.next_bytes()?.map(|bytes| bytes.to_vec())
-    }
-}
-
-fn parse_bool(bytes: &[u8]) -> Result<bool, Db2SourceError> {
-    match trim_ascii(bytes) {
-        b"1" => Ok(true),
-        b"0" => Ok(false),
-        value if eq_ascii_ignore_case(value, b"true") => Ok(true),
-        value if eq_ascii_ignore_case(value, b"false") => Ok(false),
-        _ => Err(Db2SourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty: "bool",
-        }),
-    }
-}
-
-fn cell_u8(cell: &Db2Cell) -> Result<u8, Db2SourceError> {
-    match cell {
-        Db2Cell::U8(value) => Ok(*value),
-        Db2Cell::I8(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        Db2Cell::I16(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        Db2Cell::I32(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        Db2Cell::I64(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        Db2Cell::Bytes(bytes) => parse_u8(bytes),
-        _ => Err(cell_parse_error(cell, "u8")),
-    }
-}
-
-fn cell_i16(cell: &Db2Cell) -> Result<i16, Db2SourceError> {
-    match cell {
-        Db2Cell::I8(value) => Ok(i16::from(*value)),
-        Db2Cell::U8(value) => Ok(i16::from(*value)),
-        Db2Cell::I16(value) => Ok(*value),
-        Db2Cell::I32(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        Db2Cell::I64(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        Db2Cell::Bytes(bytes) => parse_i16(bytes),
-        _ => Err(cell_parse_error(cell, "i16")),
-    }
-}
-
-fn cell_i32(cell: &Db2Cell) -> Result<i32, Db2SourceError> {
-    match cell {
-        Db2Cell::I8(value) => Ok(i32::from(*value)),
-        Db2Cell::U8(value) => Ok(i32::from(*value)),
-        Db2Cell::I16(value) => Ok(i32::from(*value)),
-        Db2Cell::I32(value) => Ok(*value),
-        Db2Cell::I64(value) => i32::try_from(*value).map_err(|_| cell_parse_error(cell, "i32")),
-        Db2Cell::Bytes(bytes) => parse_i32(bytes),
-        _ => Err(cell_parse_error(cell, "i32")),
-    }
-}
-
-fn cell_i64(cell: &Db2Cell) -> Result<i64, Db2SourceError> {
-    match cell {
-        Db2Cell::I8(value) => Ok(i64::from(*value)),
-        Db2Cell::U8(value) => Ok(i64::from(*value)),
-        Db2Cell::I16(value) => Ok(i64::from(*value)),
-        Db2Cell::I32(value) => Ok(i64::from(*value)),
-        Db2Cell::I64(value) => Ok(*value),
-        Db2Cell::Bytes(bytes) => parse_i64(bytes),
-        _ => Err(cell_parse_error(cell, "i64")),
-    }
-}
-
-fn cell_f32(cell: &Db2Cell) -> Result<f32, Db2SourceError> {
-    match cell {
-        Db2Cell::F32(value) => Ok(*value),
-        Db2Cell::Bytes(bytes) => parse_f32(bytes),
-        _ => Err(cell_parse_error(cell, "f32")),
-    }
-}
-
-fn cell_f64(cell: &Db2Cell) -> Result<f64, Db2SourceError> {
-    match cell {
-        Db2Cell::F32(value) => Ok(f64::from(*value)),
-        Db2Cell::F64(value) => Ok(*value),
-        Db2Cell::Bytes(bytes) => parse_f64(bytes),
-        _ => Err(cell_parse_error(cell, "f64")),
-    }
-}
-
-fn cell_bool(cell: &Db2Cell) -> Result<bool, Db2SourceError> {
-    match cell {
-        Db2Cell::Bool(value) => Ok(*value),
-        Db2Cell::U8(value) => Ok(*value != 0),
-        Db2Cell::I8(value) => Ok(*value != 0),
-        Db2Cell::I16(value) => Ok(*value != 0),
-        Db2Cell::I32(value) => Ok(*value != 0),
-        Db2Cell::I64(value) => Ok(*value != 0),
-        Db2Cell::Bytes(bytes) => parse_bool(bytes),
-        _ => Err(cell_parse_error(cell, "bool")),
-    }
-}
-
-fn cell_date(cell: &Db2Cell) -> Result<NaiveDate, Db2SourceError> {
-    match cell {
-        Db2Cell::Date(value) => odbc_date_to_naive(*value),
-        Db2Cell::Bytes(bytes) => parse_date(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDate")),
-    }
-}
-
-fn cell_time(cell: &Db2Cell) -> Result<NaiveTime, Db2SourceError> {
-    match cell {
-        Db2Cell::Time(value) => odbc_time_to_naive(*value),
-        Db2Cell::Bytes(bytes) => parse_time(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveTime")),
-    }
-}
-
-fn cell_timestamp(cell: &Db2Cell) -> Result<NaiveDateTime, Db2SourceError> {
-    match cell {
-        Db2Cell::Timestamp(value) => odbc_timestamp_to_naive(*value),
-        Db2Cell::Bytes(bytes) => parse_timestamp(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDateTime")),
-    }
-}
-
-fn cell_parse_error(cell: &Db2Cell, ty: &'static str) -> Db2SourceError {
-    Db2SourceError::ParseValue {
-        value: cell.to_utf8_string(),
-        ty,
-    }
-}
-
-fn odbc_date_to_naive(value: Date) -> Result<NaiveDate, Db2SourceError> {
-    NaiveDate::from_ymd_opt(value.year.into(), value.month.into(), value.day.into()).ok_or_else(
-        || Db2SourceError::ParseValue {
-            value: format!("{:04}-{:02}-{:02}", value.year, value.month, value.day),
-            ty: "NaiveDate",
-        },
-    )
-}
-
-fn odbc_time_to_naive(value: Time) -> Result<NaiveTime, Db2SourceError> {
-    NaiveTime::from_hms_opt(value.hour.into(), value.minute.into(), value.second.into()).ok_or_else(
-        || Db2SourceError::ParseValue {
-            value: format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second),
-            ty: "NaiveTime",
-        },
-    )
-}
-
-fn odbc_timestamp_to_naive(value: Timestamp) -> Result<NaiveDateTime, Db2SourceError> {
-    let date = odbc_date_to_naive(Date {
-        year: value.year,
-        month: value.month,
-        day: value.day,
-    })?;
-    date.and_hms_nano_opt(
-        value.hour.into(),
-        value.minute.into(),
-        value.second.into(),
-        value.fraction,
-    )
-    .ok_or_else(|| Db2SourceError::ParseValue {
-        value: format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-            value.year,
-            value.month,
-            value.day,
-            value.hour,
-            value.minute,
-            value.second,
-            value.fraction
-        ),
-        ty: "NaiveDateTime",
-    })
-}
-
-fn parse_u8(bytes: &[u8]) -> Result<u8, Db2SourceError> {
-    let value = parse_i64_with_ty(bytes, "u8")?;
-    u8::try_from(value).map_err(|_| Db2SourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "u8",
-    })
-}
-
-fn parse_i16(bytes: &[u8]) -> Result<i16, Db2SourceError> {
-    let value = parse_i64_with_ty(bytes, "i16")?;
-    i16::try_from(value).map_err(|_| Db2SourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "i16",
-    })
-}
-
-fn parse_i32(bytes: &[u8]) -> Result<i32, Db2SourceError> {
-    let value = parse_i64_with_ty(bytes, "i32")?;
-    i32::try_from(value).map_err(|_| Db2SourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "i32",
-    })
-}
-
-fn parse_i64(bytes: &[u8]) -> Result<i64, Db2SourceError> {
-    parse_i64_with_ty(bytes, "i64")
-}
-
-fn parse_f32(bytes: &[u8]) -> Result<f32, Db2SourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "f32")?.parse::<f32>()?)
-}
-
-fn parse_f64(bytes: &[u8]) -> Result<f64, Db2SourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "f64")?.parse::<f64>()?)
-}
-
-fn parse_decimal(bytes: &[u8]) -> Result<Decimal, Db2SourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "Decimal")?.parse::<Decimal>()?)
-}
-
-fn parse_date(bytes: &[u8]) -> Result<NaiveDate, Db2SourceError> {
-    Ok(NaiveDate::parse_from_str(
-        bytes_to_str(trim_ascii(bytes), "NaiveDate")?,
-        "%Y-%m-%d",
-    )?)
-}
-
-fn parse_time(bytes: &[u8]) -> Result<NaiveTime, Db2SourceError> {
-    let s = bytes_to_str(trim_ascii(bytes), "NaiveTime")?;
-    NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
-        .map_err(Db2SourceError::from)
-}
-
-fn parse_timestamp(bytes: &[u8]) -> Result<NaiveDateTime, Db2SourceError> {
-    let s = bytes_to_str(trim_ascii(bytes), "NaiveDateTime")?;
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
-        .map_err(Db2SourceError::from)
-}
-
-#[throws(Db2SourceError)]
-fn fetch_count(conn: &str, query: &str) -> usize {
-    let cxq = CXQuery::Naked(query.to_string());
-    let cquery = count_query(&cxq, &GenericDialect {})?;
-    fetch_count_query(conn, cquery.as_str())?
-}
-
-#[throws(Db2SourceError)]
-fn fetch_count_query(conn: &str, query: &str) -> usize {
-    let mut cursor = Db2Source::execute_query(conn, query)?;
-    let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(64))?;
-    let mut cursor = cursor.bind_buffer(buffer)?;
-    let batch = cursor.fetch()?.ok_or(Db2SourceError::GetNRowsFailed)?;
-    let value = batch.at(0, 0).ok_or(Db2SourceError::GetNRowsFailed)?;
-    let value = parse_i64_with_ty(value, "usize")?;
-    usize::try_from(value).map_err(|_| Db2SourceError::ParseValue {
-        value: bytes_to_string(batch.at(0, 0).unwrap_or_default()),
-        ty: "usize",
-    })?
-}
-
-#[throws(Db2SourceError)]
-pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> (i64, i64) {
-    let mut cursor = Db2Source::execute_query(conn, query)?;
-    let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(128))?;
-    let mut cursor = cursor.bind_buffer(buffer)?;
-    let batch = cursor.fetch()?.ok_or(Db2SourceError::GetNRowsFailed)?;
-    let min = parse_partition_value(batch.at(0, 0).ok_or(Db2SourceError::GetNRowsFailed)?)?;
-    let max = parse_partition_value(batch.at(1, 0).ok_or(Db2SourceError::GetNRowsFailed)?)?;
-    (min, max)
-}
-
-fn parse_partition_value(value: &[u8]) -> Result<i64, Db2SourceError> {
-    let trimmed = trim_ascii(value);
-    if trimmed.is_empty() {
-        return Ok(0);
-    }
-
-    match parse_i64_with_ty(trimmed, "partition range") {
-        Ok(value) => Ok(value),
-        Err(_) => bytes_to_str(trimmed, "partition range")?
-            .parse::<f64>()
-            .map(|value| value as i64)
-            .map_err(|_| Db2SourceError::ParseValue {
-                value: bytes_to_string(trimmed),
-                ty: "partition range",
-            }),
-    }
-}
-
-fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map(|idx| idx + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
-}
-
-fn bytes_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn bytes_to_str<'a>(bytes: &'a [u8], ty: &'static str) -> Result<&'a str, Db2SourceError> {
-    std::str::from_utf8(bytes).map_err(|_| Db2SourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty,
-    })
-}
-
-fn eq_ascii_ignore_case(left: &[u8], right: &[u8]) -> bool {
-    left.eq_ignore_ascii_case(right)
-}
-
-fn parse_i64_with_ty(bytes: &[u8], ty: &'static str) -> Result<i64, Db2SourceError> {
-    let bytes = trim_ascii(bytes);
-    if bytes.is_empty() {
-        return Err(Db2SourceError::ParseValue {
-            value: String::new(),
-            ty,
-        });
-    }
-
-    let (negative, digits) = match bytes[0] {
-        b'-' => (true, &bytes[1..]),
-        b'+' => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    if digits.is_empty() {
-        return Err(Db2SourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty,
-        });
-    }
-
-    let mut value = 0i64;
-    for &byte in digits {
-        if !byte.is_ascii_digit() {
-            return Err(Db2SourceError::ParseValue {
-                value: bytes_to_string(bytes),
-                ty,
-            });
-        }
-        let digit = i64::from(byte - b'0');
-        value = if negative {
-            value
-                .checked_mul(10)
-                .and_then(|value| value.checked_sub(digit))
-        } else {
-            value
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(digit))
-        }
-        .ok_or_else(|| Db2SourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty,
-        })?;
-    }
-
-    Ok(value)
+odbc_core::impl_parse_from_bytes!(
+    Db2SourceParser,
+    Db2SourceError,
+    Decimal,
+    "Decimal",
+    parse_decimal
+);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, u8, "u8", cell_u8);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, i16, "i16", cell_i16);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, i32, "i32", cell_i32);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, i64, "i64", cell_i64);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, f32, "f32", cell_f32);
+odbc_core::impl_parse_from_cell!(Db2SourceParser, Db2SourceError, f64, "f64", cell_f64);
+odbc_core::impl_parse_from_cell!(
+    Db2SourceParser,
+    Db2SourceError,
+    NaiveDate,
+    "NaiveDate",
+    cell_date
+);
+odbc_core::impl_parse_from_cell!(
+    Db2SourceParser,
+    Db2SourceError,
+    NaiveTime,
+    "NaiveTime",
+    cell_time
+);
+odbc_core::impl_parse_from_cell!(
+    Db2SourceParser,
+    Db2SourceError,
+    NaiveDateTime,
+    "NaiveDateTime",
+    cell_timestamp
+);
+odbc_core::impl_bool_produce!(Db2SourceParser, Db2SourceError);
+odbc_core::impl_string_produce!(Db2SourceParser, Db2SourceError);
+odbc_core::impl_bytes_clone_produce!(Db2SourceParser, Db2SourceError);
+
+pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), Db2SourceError> {
+    odbc_core::fetch_i64_pair::<Db2SourceError>(conn, query)
 }
 
 #[throws(Db2SourceError)]
