@@ -16,7 +16,7 @@ if ! command -v odbcinst >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! odbcinst -q -d | grep -qi "^\[${driver_name}\]$"; then
+if ! odbcinst -q -d | grep -Fqxi "[${driver_name}]"; then
   echo "ODBC driver '${driver_name}' is not registered." >&2
   echo "Registered drivers:" >&2
   odbcinst -q -d >&2 || true
@@ -54,7 +54,8 @@ docker exec -i "${container_name}" \
   < "$(dirname "$0")/odbc_postgres.sql"
 
 export ODBC_CONN="Driver={${driver_name}};Server=127.0.0.1;Port=${postgres_port};Database=connectorx;UID=connectorx;PWD=connectorx;"
-export ODBC_URL="odbc://connectorx:connectorx@127.0.0.1:${postgres_port}/connectorx?driver=$(printf '%s' "${driver_name}" | sed 's/ /%20/g')"
+driver_param="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${driver_name}")"
+export ODBC_URL="odbc://connectorx:connectorx@127.0.0.1:${postgres_port}/connectorx?driver=${driver_param}"
 export ODBC_TEST_QUERY="select id, flag, name from cx_odbc_test order by id"
 export ODBC_PARTITION_QUERY="select id, flag, name from cx_odbc_test"
 export ODBC_PARTITION_COLUMN="id"

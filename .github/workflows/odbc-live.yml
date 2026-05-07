@@ -73,7 +73,7 @@ jobs:
           cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow" --test test_db2 -- --nocapture
 
       - name: Run live generic ODBC tests
-        if: inputs.backend == 'odbc'
+        if: inputs.backend == 'odbc' || inputs.backend == 'both'
         shell: bash
         run: |
           set -euo pipefail

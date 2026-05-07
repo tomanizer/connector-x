@@ -20,7 +20,7 @@ conn = "odbc://username:password@server:1433/database?driver=ODBC%20Driver%2018%
 
 ConnectorX expands the URL into an ODBC connection string using `Driver` or `DSN`, `Server`, `Port`, `Database`, `UID`, and `PWD`. Additional URL query parameters are appended to the generated ODBC connection string. Use `server_key=Hostname` when a driver expects `Hostname` instead of `Server`.
 
-All generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings are passed through unchanged.
+All generated ODBC values are escaped when required, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
 ## Runtime Dependencies
 
