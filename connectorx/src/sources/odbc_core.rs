@@ -131,12 +131,17 @@ where
 
         self.rowbuf.clear();
         if let Some(batch) = self.cursor.fetch()? {
-            self.rowbuf.reserve(batch.num_rows() * self.ncols);
-            for row_index in 0..batch.num_rows() {
-                for col_index in 0..batch.num_cols() {
-                    self.rowbuf
-                        .push(odbc_cell_from_column(batch.column(col_index), row_index));
-                }
+            let num_rows = batch.num_rows();
+            let num_cols = batch.num_cols();
+            self.rowbuf.resize(num_rows * num_cols, None);
+            for col_index in 0..num_cols {
+                fill_column_cells(
+                    &mut self.rowbuf,
+                    batch.column(col_index),
+                    col_index,
+                    num_cols,
+                    num_rows,
+                );
             }
         } else {
             self.is_finished = true;
@@ -259,11 +264,10 @@ where
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(64))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
     let batch = cursor.fetch()?.ok_or_else(E::get_nrows_failed)?;
-    let value = batch.at(0, 0).ok_or_else(E::get_nrows_failed)?;
-    let value = parse_i64_with_ty::<E>(value, "usize")?;
-    Ok(usize::try_from(value).map_err(|_| {
-        E::parse_value(bytes_to_string(batch.at(0, 0).unwrap_or_default()), "usize")
-    })?)
+    let raw_value = batch.at(0, 0).ok_or_else(E::get_nrows_failed)?;
+    let parsed_value = parse_i64_with_ty::<E>(raw_value, "usize")?;
+    Ok(usize::try_from(parsed_value)
+        .map_err(|_| E::parse_value(bytes_to_string(raw_value), "usize"))?)
 }
 
 pub(crate) fn fetch_i64_pair<E>(conn: &str, query: &str) -> Result<(i64, i64), E>
@@ -279,6 +283,7 @@ where
     Ok((min, max))
 }
 
+#[allow(dead_code)]
 pub(crate) fn odbc_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<OdbcCell> {
     match column {
         AnySlice::Text(view) => view
@@ -319,6 +324,175 @@ pub(crate) fn odbc_cell_from_column(column: AnySlice<'_>, row_index: usize) -> O
             values.get(row_index).copied().map(OdbcCell::Timestamp)
         }
         AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => None,
+    }
+}
+
+fn fill_column_cells(
+    rowbuf: &mut [Option<OdbcCell>],
+    column: AnySlice<'_>,
+    col_index: usize,
+    num_cols: usize,
+    num_rows: usize,
+) {
+    let mut set_cell = |row_index: usize, cell: Option<OdbcCell>| {
+        rowbuf[row_index * num_cols + col_index] = cell;
+    };
+
+    match column {
+        AnySlice::Text(view) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    view.get(row_index)
+                        .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
+                );
+            }
+        }
+        AnySlice::WText(view) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    view.get(row_index)
+                        .map(|chars| OdbcCell::Bytes(String::from_utf16_lossy(chars).into_bytes())),
+                );
+            }
+        }
+        AnySlice::Binary(view) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    view.get(row_index)
+                        .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
+                );
+            }
+        }
+        AnySlice::F64(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::F64(value)));
+            }
+        }
+        AnySlice::F32(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::F32(value)));
+            }
+        }
+        AnySlice::I8(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::I8(value)));
+            }
+        }
+        AnySlice::I16(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::I16(value)));
+            }
+        }
+        AnySlice::I32(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::I32(value)));
+            }
+        }
+        AnySlice::I64(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::I64(value)));
+            }
+        }
+        AnySlice::U8(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::U8(value)));
+            }
+        }
+        AnySlice::Bit(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::Bool(bit_to_bool(value))));
+            }
+        }
+        AnySlice::Date(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::Date(value)));
+            }
+        }
+        AnySlice::Time(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::Time(value)));
+            }
+        }
+        AnySlice::Timestamp(values) => {
+            for (row_index, &value) in values[..num_rows].iter().enumerate() {
+                set_cell(row_index, Some(OdbcCell::Timestamp(value)));
+            }
+        }
+        AnySlice::NullableF64(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::F64));
+            }
+        }
+        AnySlice::NullableF32(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::F32));
+            }
+        }
+        AnySlice::NullableI8(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I8));
+            }
+        }
+        AnySlice::NullableI16(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I16));
+            }
+        }
+        AnySlice::NullableI32(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I32));
+            }
+        }
+        AnySlice::NullableI64(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I64));
+            }
+        }
+        AnySlice::NullableU8(values) => {
+            for row_index in 0..num_rows {
+                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::U8));
+            }
+        }
+        AnySlice::NullableBit(values) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    values
+                        .get(row_index)
+                        .copied()
+                        .map(bit_to_bool)
+                        .map(OdbcCell::Bool),
+                );
+            }
+        }
+        AnySlice::NullableDate(values) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    values.get(row_index).copied().map(OdbcCell::Date),
+                );
+            }
+        }
+        AnySlice::NullableTime(values) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    values.get(row_index).copied().map(OdbcCell::Time),
+                );
+            }
+        }
+        AnySlice::NullableTimestamp(values) => {
+            for row_index in 0..num_rows {
+                set_cell(
+                    row_index,
+                    values.get(row_index).copied().map(OdbcCell::Timestamp),
+                );
+            }
+        }
+        AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => {}
     }
 }
 

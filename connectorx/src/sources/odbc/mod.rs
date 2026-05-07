@@ -612,25 +612,73 @@ fn odbc_decimal_array(
 ) -> Result<ArrayRef, OdbcSourceError> {
     let mut builder = Decimal128Builder::with_capacity(nrows)
         .with_data_type(crate::constants::DEFAULT_ARROW_DECIMAL);
-    for row_index in 0..nrows {
-        match odbc_cell_from_column(column, row_index) {
-            Some(cell) => {
-                let decimal = match &cell {
-                    OdbcCell::Bytes(bytes) => parse_decimal::<OdbcSourceError>(bytes)?,
-                    _ => parse_decimal::<OdbcSourceError>(cell.to_utf8_string().as_bytes())?,
-                };
-                builder.append_value(decimal_to_i128(
-                    decimal,
-                    DEFAULT_ARROW_DECIMAL_SCALE as u32,
-                )?);
+    match column {
+        AnySlice::Text(view) => {
+            for row_index in 0..nrows {
+                match view.get(row_index) {
+                    Some(bytes) => append_decimal_value(&mut builder, bytes)?,
+                    None => {
+                        require_nullable(nullable, "Decimal")?;
+                        builder.append_null();
+                    }
+                }
             }
-            None => {
-                require_nullable(nullable, "Decimal")?;
-                builder.append_null();
+        }
+        AnySlice::WText(view) => {
+            for row_index in 0..nrows {
+                match view.get(row_index) {
+                    Some(chars) => {
+                        let value = String::from_utf16_lossy(chars);
+                        append_decimal_value(&mut builder, value.as_bytes())?;
+                    }
+                    None => {
+                        require_nullable(nullable, "Decimal")?;
+                        builder.append_null();
+                    }
+                }
+            }
+        }
+        other => {
+            for row_index in 0..nrows {
+                match odbc_cell_from_column(other, row_index) {
+                    Some(cell) => {
+                        let decimal = match &cell {
+                            OdbcCell::Bytes(bytes) => parse_decimal::<OdbcSourceError>(bytes)?,
+                            _ => {
+                                parse_decimal::<OdbcSourceError>(cell.to_utf8_string().as_bytes())?
+                            }
+                        };
+                        append_decimal(&mut builder, decimal)?;
+                    }
+                    None => {
+                        require_nullable(nullable, "Decimal")?;
+                        builder.append_null();
+                    }
+                }
             }
         }
     }
     Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+fn append_decimal_value(
+    builder: &mut Decimal128Builder,
+    bytes: &[u8],
+) -> Result<(), OdbcSourceError> {
+    append_decimal(builder, parse_decimal::<OdbcSourceError>(bytes)?)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn append_decimal(
+    builder: &mut Decimal128Builder,
+    decimal: Decimal,
+) -> Result<(), OdbcSourceError> {
+    builder.append_value(decimal_to_i128(
+        decimal,
+        DEFAULT_ARROW_DECIMAL_SCALE as u32,
+    )?);
+    Ok(())
 }
 
 #[cfg(feature = "dst_arrow")]
