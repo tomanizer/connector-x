@@ -55,7 +55,7 @@ Tuning environment variables:
 
 ## Testing
 
-For the preferred live test, run PostgreSQL in Docker and connect to it through psqlODBC:
+For the preferred live test, run PostgreSQL through the Rust testcontainer helper and connect to it through psqlODBC:
 
 ```bash
 scripts/odbc_postgres_live.sh
@@ -71,6 +71,13 @@ On Ubuntu, install the local ODBC dependencies with:
 
 ```bash
 sudo apt-get install unixodbc unixodbc-dev odbc-postgresql
+```
+
+The same testcontainer-backed path can be run directly with:
+
+```bash
+CONNECTORX_ODBC_TESTCONTAINER=1 \
+cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc
 ```
 
 Generic ODBC integration tests are also environment-gated and can be pointed at any ODBC backend:
