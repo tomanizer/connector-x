@@ -1,0 +1,66 @@
+name: odbc-live
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: "ODBC backend to test"
+        required: true
+        type: choice
+        options:
+          - sybase
+          - db2
+          - both
+
+jobs:
+  live-odbc:
+    runs-on: ubuntu-latest
+    env:
+      SYBASE_URL: ${{ secrets.SYBASE_URL }}
+      SYBASE_ODBC_CONN: ${{ secrets.SYBASE_ODBC_CONN }}
+      DB2_URL: ${{ secrets.DB2_URL }}
+      DB2_ODBC_CONN: ${{ secrets.DB2_ODBC_CONN }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ODBC dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev pkg-config libssl-dev libkrb5-dev libclang-dev
+
+      - name: Run live Sybase tests
+        if: inputs.backend == 'sybase' || inputs.backend == 'both'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'src_sybase' connectorx/Cargo.toml; then
+            echo "src_sybase is not present on this branch; skipping."
+            exit 0
+          fi
+          if [ -z "${SYBASE_URL:-}" ] && [ -z "${SYBASE_ODBC_CONN:-}" ]; then
+            echo "Set SYBASE_URL and/or SYBASE_ODBC_CONN repository secrets to run live Sybase tests."
+            exit 1
+          fi
+          cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow" --test test_sybase -- --nocapture
+
+      - name: Run live Db2 tests
+        if: inputs.backend == 'db2' || inputs.backend == 'both'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'src_db2' connectorx/Cargo.toml; then
+            echo "src_db2 is not present on this branch; skipping."
+            exit 0
+          fi
+          if [ -z "${DB2_URL:-}" ] && [ -z "${DB2_ODBC_CONN:-}" ]; then
+            echo "Set DB2_URL and/or DB2_ODBC_CONN repository secrets to run live Db2 tests."
+            exit 1
+          fi
+          cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow" --test test_db2 -- --nocapture
