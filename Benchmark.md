@@ -54,6 +54,29 @@ psql -h localhost -U postgres -d tpch -c "\copy LINEITEM FROM '$YOUR_TPCH_DIR/tp
 psql -h localhost -U postgres -d tpch -c "CREATE INDEX lineitem_l_orderkey_idx ON LINEITEM USING btree (l_orderkey);"
 ```
 
+## Sybase ODBC Microbenchmark
+
+The Sybase connector has a Criterion benchmark for the current ODBC implementation. It is intentionally keyed by backend name (`odbc_get_arrow`) so a future native TDS/CT-Lib backend can be added to the same `sybase` benchmark group and compared on the same query.
+
+```bash
+SYBASE_URL="sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=%2Fpath%2Fto%2Flibtdsodbc.so" \
+SYBASE_BENCH_QUERY="select * from dbo.cx_sybase_test" \
+SYBASE_BENCH_ROWS=10000 \
+cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
+```
+
+Without `SYBASE_BENCH_QUERY`, the benchmark runs both the mixed default projection and a primitive-only projection (`odbc_get_arrow_primitives`) to track the typed ODBC buffer path independently.
+
+The ODBC path uses typed ODBC buffers for primitive Sybase columns and text buffers for decimal, date/time, text, and binary values. It also supports runtime fetch tuning through `SYBASE_BATCH_SIZE` and `SYBASE_MAX_STR_LEN`. Use those variables in benchmark runs when comparing batch sizes or maximum bound cell width.
+
+For Python benchmark runs, set `SYBASE_URL` and reuse the existing `TPCH_TABLE` environment variable:
+
+```bash
+SYBASE_URL="sybase://user:password@server:5000/database?driver=FreeTDS" \
+TPCH_TABLE=lineitem \
+poetry run pytest connectorx/tests/benchmarks.py --benchmark-json ../benchmark.json
+```
+
 ## Redshift: Upload TPC-H
 > Note: For Redshift, AWS has already hosted TPC-H data in public s3. We borrow the uploading script from [amazon-redshift-utils](https://github.com/awslabs/amazon-redshift-utils/blob/master/src/CloudDataWarehouseBenchmark/Cloud-DWB-Derived-from-TPCH/3TB/ddl.sql). We only modified `LINEITEM`'s sortkey from `(l_shipdate,l_orderkey)` to `(l_orderkey)`.
 

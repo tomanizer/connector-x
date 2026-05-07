@@ -34,6 +34,10 @@ mod postgres_arrowstream;
 mod sqlite_arrow;
 #[cfg(all(feature = "src_sqlite", feature = "dst_arrow"))]
 mod sqlite_arrowstream;
+#[cfg(all(feature = "src_sybase", feature = "dst_arrow"))]
+mod sybase_arrow;
+#[cfg(all(feature = "src_sybase", feature = "dst_arrow"))]
+mod sybase_arrowstream;
 #[cfg(all(feature = "src_trino", feature = "dst_arrow"))]
 mod trino_arrow;
 #[cfg(all(feature = "src_trino", feature = "dst_arrow"))]
@@ -90,6 +94,13 @@ pub use sqlite_arrow::{SQLiteArrowTransport, SQLiteArrowTransportError};
 pub use sqlite_arrowstream::{
     SQLiteArrowTransport as SQLiteArrowStreamTransport,
     SQLiteArrowTransportError as SQLiteArrowStreamTransportError,
+};
+#[cfg(all(feature = "src_sybase", feature = "dst_arrow"))]
+pub use sybase_arrow::{SybaseArrowTransport, SybaseArrowTransportError};
+#[cfg(all(feature = "src_sybase", feature = "dst_arrow"))]
+pub use sybase_arrowstream::{
+    SybaseArrowTransport as SybaseArrowStreamTransport,
+    SybaseArrowTransportError as SybaseArrowStreamTransportError,
 };
 #[cfg(all(feature = "src_trino", feature = "dst_arrow"))]
 pub use trino_arrow::{TrinoArrowTransport, TrinoArrowTransportError};

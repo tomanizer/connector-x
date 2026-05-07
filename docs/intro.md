@@ -87,6 +87,7 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] Clickhouse
 - [x] SQL Server
 - [x] Azure SQL Database (through mssql protocol)
+- [x] Sybase ASE (through ODBC)
 - [x] Oracle
 - [x] Big Query
 - [ ] ODBC (WIP)
