@@ -6,18 +6,6 @@ mod typesystem;
 pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
 
-use std::convert::TryFrom;
-
-use crate::{
-    constants::DB_BUFFER_SIZE,
-    data_order::DataOrder,
-    errors::ConnectorXError,
-    sources::{
-        odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair},
-        PartitionParser, Produce, Source, SourcePartition,
-    },
-    sql::{count_query, CXQuery},
-};
 #[cfg(feature = "dst_arrow")]
 use crate::{
     constants::DEFAULT_ARROW_DECIMAL_SCALE,
@@ -28,15 +16,27 @@ use crate::{
     errors::OutResult,
     utils::decimal_to_i128,
 };
+use crate::{
+    data_order::DataOrder,
+    errors::ConnectorXError,
+    sources::{
+        odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair},
+        odbc_core::{
+            self, bit_to_bool, cell_bool, cell_date, cell_f32, cell_f64, cell_i64, cell_time,
+            cell_timestamp, odbc_cell_from_column, odbc_date_to_naive, odbc_time_to_naive,
+            odbc_timestamp_to_naive, parse_decimal, OdbcCell, OdbcCoreError, OdbcTypePolicy,
+        },
+        Source, SourcePartition,
+    },
+    sql::{count_query, CXQuery},
+};
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
-use odbc_api::handles::StatementConnection;
-use odbc_api::sys::{Date, Time, Timestamp, NULL_DATA};
+use odbc_api::sys::NULL_DATA;
 use odbc_api::{
-    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, TextRowSet},
-    environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl,
-    ResultSetMetadata,
+    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer},
+    Cursor,
 };
 use rust_decimal::Decimal;
 use sqlparser::dialect::GenericDialect;
@@ -57,11 +57,10 @@ use {
     std::sync::Arc,
 };
 
-type OdbcCursor = CursorImpl<StatementConnection<Connection<'static>>>;
-type OdbcBlockCursor = BlockCursor<OdbcCursor, ColumnarAnyBuffer>;
-
 const ODBC_DEFAULT_BATCH_SIZE: usize = 1024;
 const ODBC_DEFAULT_MAX_STR_LEN: usize = 1024;
+
+pub type OdbcSourceParser = odbc_core::OdbcParser<OdbcTypeSystem, OdbcSourceError>;
 
 pub struct OdbcSource {
     conn: String,
@@ -82,19 +81,15 @@ impl OdbcSource {
             queries: vec![],
             names: vec![],
             schema: vec![],
-            batch_size: env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
-            max_str_len: env_usize("ODBC_MAX_STR_LEN").unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+            batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize("ODBC_MAX_STR_LEN")
+                .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
         }
     }
 
     #[throws(OdbcSourceError)]
-    fn execute_query(conn: &str, query: &str) -> OdbcCursor {
-        let env = environment()?;
-        let connection = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
-        connection
-            .into_cursor(query, (), None)
-            .map_err(|e| e.error)?
-            .ok_or_else(|| OdbcSourceError::NoResultSet(query.to_string()))?
+    fn execute_query(conn: &str, query: &str) -> odbc_core::OdbcCursor {
+        odbc_core::execute_query::<OdbcSourceError>(conn, query)?
     }
 }
 
@@ -127,21 +122,11 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
-        let mut cursor = Self::execute_query(&self.conn, &first_query)?;
-        let ncols = cursor.num_result_cols()?;
-        if ncols < 0 {
-            throw!(anyhow!("ODBC returned negative column count: {}", ncols));
-        }
-
-        let mut names = Vec::with_capacity(ncols as usize);
-        let mut schema = Vec::with_capacity(ncols as usize);
-        for col in 1..=ncols as u16 {
-            names.push(cursor.col_name(col)?);
-            let ty = cursor.col_data_type(col)?;
-            let nullability = cursor.col_nullability(col)?;
-            schema.push(OdbcTypeSystem::from_odbc(ty, nullability));
-        }
-
+        let (names, schema) = odbc_core::fetch_metadata::<OdbcTypeSystem, OdbcSourceError, _>(
+            &self.conn,
+            &first_query,
+            OdbcTypeSystem::from_odbc,
+        )?;
         self.names = names;
         self.schema = schema;
     }
@@ -149,7 +134,11 @@ where
     #[throws(OdbcSourceError)]
     fn result_rows(&mut self) -> Option<usize> {
         match &self.origin_query {
-            Some(q) => Some(fetch_count(&self.conn, q)?),
+            Some(q) => Some(odbc_core::fetch_count::<OdbcSourceError, _>(
+                &self.conn,
+                q,
+                &GenericDialect {},
+            )?),
             None => None,
         }
     }
@@ -217,7 +206,7 @@ impl SourcePartition for OdbcSourcePartition {
     #[throws(OdbcSourceError)]
     fn result_rows(&mut self) {
         let cquery = count_query(&self.query, &GenericDialect {})?;
-        self.nrows = fetch_count_query(&self.conn, cquery.as_str())?;
+        self.nrows = odbc_core::fetch_count_query::<OdbcSourceError>(&self.conn, cquery.as_str())?;
     }
 
     #[throws(OdbcSourceError)]
@@ -227,10 +216,10 @@ impl SourcePartition for OdbcSourcePartition {
             self.batch_size,
             self.schema
                 .iter()
-                .map(|ty| odbc_buffer_desc(*ty, self.max_str_len)),
+                .map(|ty| ty.buffer_desc(self.max_str_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        OdbcSourceParser::new(cursor, self.schema.len())
+        OdbcSourceParser::new(cursor, self.schema.len(), "Odbc")
     }
 
     fn nrows(&self) -> usize {
@@ -277,7 +266,7 @@ pub(crate) fn odbc_get_arrow(
 
 #[cfg(feature = "dst_arrow")]
 fn odbc_arrow_type(ty: OdbcTypeSystem) -> ArrowTypeSystem {
-    let nullable = odbc_nullable(ty);
+    let nullable = (ty).nullable();
     match ty {
         OdbcTypeSystem::TinyInt(_)
         | OdbcTypeSystem::SmallInt(_)
@@ -311,7 +300,7 @@ fn odbc_partition_record_batches(
         partition
             .schema
             .iter()
-            .map(|ty| odbc_buffer_desc(*ty, partition.max_str_len)),
+            .map(|ty| ty.buffer_desc(partition.max_str_len)),
     )?;
     let mut cursor = cursor.bind_buffer(buffer)?;
 
@@ -344,22 +333,20 @@ fn odbc_arrow_array(
         OdbcTypeSystem::TinyInt(_)
         | OdbcTypeSystem::SmallInt(_)
         | OdbcTypeSystem::Int(_)
-        | OdbcTypeSystem::BigInt(_) => odbc_int64_array(column, nrows, odbc_nullable(ty)),
-        OdbcTypeSystem::Real(_) => odbc_float32_array(column, nrows, odbc_nullable(ty)),
-        OdbcTypeSystem::Double(_) => odbc_float64_array(column, nrows, odbc_nullable(ty)),
+        | OdbcTypeSystem::BigInt(_) => odbc_int64_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Real(_) => odbc_float32_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Double(_) => odbc_float64_array(column, nrows, (ty).nullable()),
         OdbcTypeSystem::Numeric(_) | OdbcTypeSystem::Decimal(_) => {
-            odbc_decimal_array(column, nrows, odbc_nullable(ty))
+            odbc_decimal_array(column, nrows, (ty).nullable())
         }
-        OdbcTypeSystem::Bit(_) => odbc_bool_array(column, nrows, odbc_nullable(ty)),
+        OdbcTypeSystem::Bit(_) => odbc_bool_array(column, nrows, (ty).nullable()),
         OdbcTypeSystem::Char(_) | OdbcTypeSystem::Varchar(_) | OdbcTypeSystem::Text(_) => {
-            odbc_string_array(column, nrows, odbc_nullable(ty))
+            odbc_string_array(column, nrows, (ty).nullable())
         }
-        OdbcTypeSystem::Binary(_) => odbc_binary_array(column, nrows, odbc_nullable(ty)),
-        OdbcTypeSystem::Date(_) => odbc_date32_array(column, nrows, odbc_nullable(ty)),
-        OdbcTypeSystem::Time(_) => odbc_time64_micro_array(column, nrows, odbc_nullable(ty)),
-        OdbcTypeSystem::Timestamp(_) => {
-            odbc_timestamp_micro_array(column, nrows, odbc_nullable(ty))
-        }
+        OdbcTypeSystem::Binary(_) => odbc_binary_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Date(_) => odbc_date32_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Time(_) => odbc_time64_micro_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Timestamp(_) => odbc_timestamp_micro_array(column, nrows, (ty).nullable()),
     }
 }
 
@@ -487,7 +474,14 @@ fn odbc_int64_array(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell!(other, row_index, builder, nullable, "i64", cell_i64);
+                append_direct_cell!(
+                    other,
+                    row_index,
+                    builder,
+                    nullable,
+                    "i64",
+                    cell_i64::<OdbcSourceError>
+                );
             }
         }
     }
@@ -510,7 +504,14 @@ fn odbc_float32_array(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell!(other, row_index, builder, nullable, "f32", cell_f32);
+                append_direct_cell!(
+                    other,
+                    row_index,
+                    builder,
+                    nullable,
+                    "f32",
+                    cell_f32::<OdbcSourceError>
+                );
             }
         }
     }
@@ -549,7 +550,14 @@ fn odbc_float64_array(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell!(other, row_index, builder, nullable, "f64", cell_f64);
+                append_direct_cell!(
+                    other,
+                    row_index,
+                    builder,
+                    nullable,
+                    "f64",
+                    cell_f64::<OdbcSourceError>
+                );
             }
         }
     }
@@ -582,7 +590,14 @@ fn odbc_bool_array(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell!(other, row_index, builder, nullable, "bool", cell_bool);
+                append_direct_cell!(
+                    other,
+                    row_index,
+                    builder,
+                    nullable,
+                    "bool",
+                    cell_bool::<OdbcSourceError>
+                );
             }
         }
     }
@@ -601,8 +616,8 @@ fn odbc_decimal_array(
         match odbc_cell_from_column(column, row_index) {
             Some(cell) => {
                 let decimal = match &cell {
-                    OdbcCell::Bytes(bytes) => parse_decimal(bytes)?,
-                    _ => parse_decimal(cell.to_utf8_string().as_bytes())?,
+                    OdbcCell::Bytes(bytes) => parse_decimal::<OdbcSourceError>(bytes)?,
+                    _ => parse_decimal::<OdbcSourceError>(cell.to_utf8_string().as_bytes())?,
                 };
                 builder.append_value(decimal_to_i128(
                     decimal,
@@ -699,13 +714,11 @@ fn odbc_binary_array(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => {
-                        builder.append_value(cell.try_bytes("Vec<u8>").ok_or_else(|| {
-                            ConnectorXError::cannot_produce::<Vec<u8>>(Some(
-                                "Odbc typed value for byte-only Vec<u8>".to_string(),
-                            ))
-                        })?)
-                    }
+                    Some(cell) => builder.append_value(cell.try_bytes().ok_or_else(|| {
+                        ConnectorXError::cannot_produce::<Vec<u8>>(Some(
+                            "Odbc typed value for byte-only Vec<u8>".to_string(),
+                        ))
+                    })?),
                     None => {
                         require_nullable(nullable, "Vec<u8>")?;
                         builder.append_null();
@@ -727,14 +740,20 @@ fn odbc_date32_array(
     match column {
         AnySlice::Date(values) => {
             for &value in &values[..nrows] {
-                builder.append_value(naive_date_to_arrow(odbc_date_to_naive(value)?)?);
+                builder.append_value(naive_date_to_arrow(odbc_date_to_naive::<OdbcSourceError>(
+                    value,
+                )?)?);
             }
         }
         AnySlice::NullableDate(values) => {
             for value in values.take(nrows) {
                 match value {
                     Some(&value) => {
-                        builder.append_value(naive_date_to_arrow(odbc_date_to_naive(value)?)?);
+                        builder.append_value(naive_date_to_arrow(odbc_date_to_naive::<
+                            OdbcSourceError,
+                        >(
+                            value
+                        )?)?);
                     }
                     None => {
                         require_nullable(nullable, "NaiveDate")?;
@@ -746,7 +765,11 @@ fn odbc_date32_array(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => builder.append_value(naive_date_to_arrow(cell_date(&cell)?)?),
+                    Some(cell) => {
+                        builder.append_value(naive_date_to_arrow(cell_date::<OdbcSourceError>(
+                            &cell,
+                        )?)?)
+                    }
                     None => {
                         require_nullable(nullable, "NaiveDate")?;
                         builder.append_null();
@@ -768,14 +791,20 @@ fn odbc_time64_micro_array(
     match column {
         AnySlice::Time(values) => {
             for &value in &values[..nrows] {
-                builder.append_value(naive_time_to_arrow_micro(odbc_time_to_naive(value)?));
+                builder.append_value(naive_time_to_arrow_micro(odbc_time_to_naive::<
+                    OdbcSourceError,
+                >(value)?));
             }
         }
         AnySlice::NullableTime(values) => {
             for value in values.take(nrows) {
                 match value {
                     Some(&value) => {
-                        builder.append_value(naive_time_to_arrow_micro(odbc_time_to_naive(value)?));
+                        builder.append_value(naive_time_to_arrow_micro(odbc_time_to_naive::<
+                            OdbcSourceError,
+                        >(
+                            value
+                        )?));
                     }
                     None => {
                         require_nullable(nullable, "NaiveTime")?;
@@ -788,7 +817,9 @@ fn odbc_time64_micro_array(
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
-                        builder.append_value(naive_time_to_arrow_micro(cell_time(&cell)?))
+                        builder.append_value(naive_time_to_arrow_micro(
+                            cell_time::<OdbcSourceError>(&cell)?,
+                        ))
                     }
                     None => {
                         require_nullable(nullable, "NaiveTime")?;
@@ -811,14 +842,21 @@ fn odbc_timestamp_micro_array(
     match column {
         AnySlice::Timestamp(values) => {
             for &value in &values[..nrows] {
-                builder.append_value(odbc_timestamp_to_naive(value)?.and_utc().timestamp_micros());
+                builder.append_value(
+                    odbc_timestamp_to_naive::<OdbcSourceError>(value)?
+                        .and_utc()
+                        .timestamp_micros(),
+                );
             }
         }
         AnySlice::NullableTimestamp(values) => {
             for value in values.take(nrows) {
                 match value {
-                    Some(&value) => builder
-                        .append_value(odbc_timestamp_to_naive(value)?.and_utc().timestamp_micros()),
+                    Some(&value) => builder.append_value(
+                        odbc_timestamp_to_naive::<OdbcSourceError>(value)?
+                            .and_utc()
+                            .timestamp_micros(),
+                    ),
                     None => {
                         require_nullable(nullable, "NaiveDateTime")?;
                         builder.append_null();
@@ -830,7 +868,11 @@ fn odbc_timestamp_micro_array(
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
                     Some(cell) => {
-                        builder.append_value(cell_timestamp(&cell)?.and_utc().timestamp_micros());
+                        builder.append_value(
+                            cell_timestamp::<OdbcSourceError>(&cell)?
+                                .and_utc()
+                                .timestamp_micros(),
+                        );
                     }
                     None => {
                         require_nullable(nullable, "NaiveDateTime")?;
@@ -861,732 +903,107 @@ fn naive_time_to_arrow_micro(value: NaiveTime) -> i64 {
     value.num_seconds_from_midnight() as i64 * 1_000_000 + (value.nanosecond() as i64) / 1000
 }
 
-pub struct OdbcSourceParser {
-    cursor: OdbcBlockCursor,
-    rowbuf: Vec<Option<OdbcCell>>,
-    ncols: usize,
-    current_cell: usize,
-    is_finished: bool,
-}
-
-impl OdbcSourceParser {
-    fn new(cursor: OdbcBlockCursor, ncols: usize) -> Self {
-        Self {
-            cursor,
-            rowbuf: Vec::with_capacity(DB_BUFFER_SIZE),
-            ncols,
-            current_cell: 0,
-            is_finished: false,
-        }
+impl OdbcCoreError for OdbcSourceError {
+    fn get_nrows_failed() -> Self {
+        Self::GetNRowsFailed
     }
 
-    #[throws(OdbcSourceError)]
-    fn next_cell(&mut self) -> Option<&OdbcCell> {
-        let cell_index = self.current_cell;
-        self.current_cell += 1;
-        self.rowbuf[cell_index].as_ref()
+    fn no_result_set(query: String) -> Self {
+        Self::NoResultSet(query)
     }
 
-    #[throws(OdbcSourceError)]
-    fn next_bytes(&mut self) -> Option<&[u8]> {
-        match self.next_cell()? {
-            Some(cell) => Some(cell.try_bytes("bytes").ok_or_else(|| {
-                ConnectorXError::cannot_produce::<Vec<u8>>(Some(
-                    "Odbc typed value for byte-only parser".to_string(),
-                ))
-            })?),
-            None => None,
-        }
-    }
-
-    #[throws(OdbcSourceError)]
-    fn required_cell(&mut self, ty: &'static str) -> &OdbcCell {
-        let value = self.next_cell()?;
-        value.ok_or_else(|| {
-            ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!("Odbc NULL for non-null {ty}")))
-        })?
-    }
-
-    #[throws(OdbcSourceError)]
-    fn required_bytes(&mut self, ty: &'static str) -> &[u8] {
-        let value = self.required_cell(ty)?;
-        value.try_bytes(ty).ok_or_else(|| {
-            ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!(
-                "Odbc typed value for byte-only {ty}"
-            )))
-        })?
+    fn parse_value(value: String, ty: &'static str) -> Self {
+        Self::ParseValue { value, ty }
     }
 }
 
-impl PartitionParser<'_> for OdbcSourceParser {
-    type TypeSystem = OdbcTypeSystem;
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn fetch_next(&mut self) -> (usize, bool) {
-        if self.ncols == 0 {
-            self.is_finished = true;
-            return (0, true);
-        }
-        assert!(matches!(self.current_cell.checked_rem(self.ncols), Some(0)));
-        let remaining_cells = self.rowbuf.len() - self.current_cell;
-        if remaining_cells > 0 {
-            return (remaining_cells / self.ncols, self.is_finished);
-        } else if self.is_finished {
-            return (0, self.is_finished);
-        }
-
-        self.rowbuf.clear();
-        if let Some(batch) = self.cursor.fetch()? {
-            self.rowbuf.reserve(batch.num_rows() * self.ncols);
-            for row_index in 0..batch.num_rows() {
-                for col_index in 0..batch.num_cols() {
-                    self.rowbuf
-                        .push(odbc_cell_from_column(batch.column(col_index), row_index));
-                }
-            }
-        } else {
-            self.is_finished = true;
-        }
-
-        self.current_cell = 0;
-        (self.rowbuf.len() / self.ncols, self.is_finished)
-    }
-}
-
-#[derive(Clone, Debug)]
-enum OdbcCell {
-    Bytes(Vec<u8>),
-    U8(u8),
-    I8(i8),
-    I16(i16),
-    I32(i32),
-    I64(i64),
-    F32(f32),
-    F64(f64),
-    Bool(bool),
-    Date(Date),
-    Time(Time),
-    Timestamp(Timestamp),
-}
-
-impl OdbcCell {
-    fn try_bytes(&self, _ty: &'static str) -> Option<&[u8]> {
+impl OdbcTypePolicy for OdbcTypeSystem {
+    fn nullable(self) -> bool {
         match self {
-            OdbcCell::Bytes(bytes) => Some(bytes),
-            _ => None,
+            OdbcTypeSystem::TinyInt(nullable)
+            | OdbcTypeSystem::SmallInt(nullable)
+            | OdbcTypeSystem::Int(nullable)
+            | OdbcTypeSystem::BigInt(nullable)
+            | OdbcTypeSystem::Real(nullable)
+            | OdbcTypeSystem::Double(nullable)
+            | OdbcTypeSystem::Numeric(nullable)
+            | OdbcTypeSystem::Decimal(nullable)
+            | OdbcTypeSystem::Bit(nullable)
+            | OdbcTypeSystem::Char(nullable)
+            | OdbcTypeSystem::Varchar(nullable)
+            | OdbcTypeSystem::Text(nullable)
+            | OdbcTypeSystem::Binary(nullable)
+            | OdbcTypeSystem::Date(nullable)
+            | OdbcTypeSystem::Time(nullable)
+            | OdbcTypeSystem::Timestamp(nullable) => nullable,
         }
     }
 
-    fn to_utf8_string(&self) -> String {
+    fn buffer_desc(self, max_str_len: usize) -> BufferDesc {
+        let nullable = self.nullable();
         match self {
-            OdbcCell::Bytes(bytes) => bytes_to_string(bytes),
-            OdbcCell::U8(value) => value.to_string(),
-            OdbcCell::I8(value) => value.to_string(),
-            OdbcCell::I16(value) => value.to_string(),
-            OdbcCell::I32(value) => value.to_string(),
-            OdbcCell::I64(value) => value.to_string(),
-            OdbcCell::F32(value) => value.to_string(),
-            OdbcCell::F64(value) => value.to_string(),
-            OdbcCell::Bool(value) => value.to_string(),
-            OdbcCell::Date(value) => {
-                format!("{:04}-{:02}-{:02}", value.year, value.month, value.day)
-            }
-            OdbcCell::Time(value) => {
-                format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second)
-            }
-            OdbcCell::Timestamp(value) => format!(
-                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-                value.year,
-                value.month,
-                value.day,
-                value.hour,
-                value.minute,
-                value.second,
-                value.fraction
-            ),
+            OdbcTypeSystem::TinyInt(_) => BufferDesc::U8 { nullable },
+            OdbcTypeSystem::SmallInt(_) => BufferDesc::I16 { nullable },
+            OdbcTypeSystem::Int(_) => BufferDesc::I32 { nullable },
+            OdbcTypeSystem::BigInt(_) => BufferDesc::I64 { nullable },
+            OdbcTypeSystem::Real(_) => BufferDesc::F32 { nullable },
+            OdbcTypeSystem::Double(_) => BufferDesc::F64 { nullable },
+            OdbcTypeSystem::Bit(_) => BufferDesc::Bit { nullable },
+            OdbcTypeSystem::Numeric(_)
+            | OdbcTypeSystem::Decimal(_)
+            | OdbcTypeSystem::Char(_)
+            | OdbcTypeSystem::Varchar(_)
+            | OdbcTypeSystem::Text(_) => BufferDesc::Text { max_str_len },
+            OdbcTypeSystem::Binary(_) => BufferDesc::Binary {
+                max_bytes: max_str_len,
+            },
+            OdbcTypeSystem::Date(_) => BufferDesc::Date { nullable },
+            OdbcTypeSystem::Time(_) => BufferDesc::Time { nullable },
+            OdbcTypeSystem::Timestamp(_) => BufferDesc::Timestamp { nullable },
         }
     }
 }
 
-fn odbc_buffer_desc(ty: OdbcTypeSystem, max_str_len: usize) -> BufferDesc {
-    let nullable = odbc_nullable(ty);
-    match ty {
-        OdbcTypeSystem::TinyInt(_) => BufferDesc::U8 { nullable },
-        OdbcTypeSystem::SmallInt(_) => BufferDesc::I16 { nullable },
-        OdbcTypeSystem::Int(_) => BufferDesc::I32 { nullable },
-        OdbcTypeSystem::BigInt(_) => BufferDesc::I64 { nullable },
-        OdbcTypeSystem::Real(_) => BufferDesc::F32 { nullable },
-        OdbcTypeSystem::Double(_) => BufferDesc::F64 { nullable },
-        OdbcTypeSystem::Bit(_) => BufferDesc::Bit { nullable },
-        OdbcTypeSystem::Numeric(_)
-        | OdbcTypeSystem::Decimal(_)
-        | OdbcTypeSystem::Char(_)
-        | OdbcTypeSystem::Varchar(_)
-        | OdbcTypeSystem::Text(_) => BufferDesc::Text { max_str_len },
-        OdbcTypeSystem::Date(_) | OdbcTypeSystem::Time(_) | OdbcTypeSystem::Timestamp(_) => {
-            odbc_temporal_buffer_desc(ty, nullable)
-        }
-        OdbcTypeSystem::Binary(_) => BufferDesc::Binary {
-            max_bytes: max_str_len,
-        },
-    }
-}
-
-fn odbc_temporal_buffer_desc(ty: OdbcTypeSystem, nullable: bool) -> BufferDesc {
-    match ty {
-        OdbcTypeSystem::Date(_) => BufferDesc::Date { nullable },
-        OdbcTypeSystem::Time(_) => BufferDesc::Time { nullable },
-        OdbcTypeSystem::Timestamp(_) => BufferDesc::Timestamp { nullable },
-        _ => unreachable!("non-temporal Odbc type passed to temporal buffer desc"),
-    }
-}
-
-fn odbc_nullable(ty: OdbcTypeSystem) -> bool {
-    match ty {
-        OdbcTypeSystem::TinyInt(nullable)
-        | OdbcTypeSystem::SmallInt(nullable)
-        | OdbcTypeSystem::Int(nullable)
-        | OdbcTypeSystem::BigInt(nullable)
-        | OdbcTypeSystem::Real(nullable)
-        | OdbcTypeSystem::Double(nullable)
-        | OdbcTypeSystem::Numeric(nullable)
-        | OdbcTypeSystem::Decimal(nullable)
-        | OdbcTypeSystem::Bit(nullable)
-        | OdbcTypeSystem::Char(nullable)
-        | OdbcTypeSystem::Varchar(nullable)
-        | OdbcTypeSystem::Text(nullable)
-        | OdbcTypeSystem::Binary(nullable)
-        | OdbcTypeSystem::Date(nullable)
-        | OdbcTypeSystem::Time(nullable)
-        | OdbcTypeSystem::Timestamp(nullable) => nullable,
-    }
-}
-
-fn odbc_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<OdbcCell> {
-    match column {
-        AnySlice::Text(view) => view
-            .get(row_index)
-            .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-        AnySlice::WText(view) => view
-            .get(row_index)
-            .map(|chars| OdbcCell::Bytes(String::from_utf16_lossy(chars).into_bytes())),
-        AnySlice::Binary(view) => view
-            .get(row_index)
-            .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-        AnySlice::F64(values) => Some(OdbcCell::F64(values[row_index])),
-        AnySlice::F32(values) => Some(OdbcCell::F32(values[row_index])),
-        AnySlice::I8(values) => Some(OdbcCell::I8(values[row_index])),
-        AnySlice::I16(values) => Some(OdbcCell::I16(values[row_index])),
-        AnySlice::I32(values) => Some(OdbcCell::I32(values[row_index])),
-        AnySlice::I64(values) => Some(OdbcCell::I64(values[row_index])),
-        AnySlice::U8(values) => Some(OdbcCell::U8(values[row_index])),
-        AnySlice::Bit(values) => Some(OdbcCell::Bool(bit_to_bool(values[row_index]))),
-        AnySlice::Date(values) => Some(OdbcCell::Date(values[row_index])),
-        AnySlice::Time(values) => Some(OdbcCell::Time(values[row_index])),
-        AnySlice::Timestamp(values) => Some(OdbcCell::Timestamp(values[row_index])),
-        AnySlice::NullableF64(values) => values.get(row_index).copied().map(OdbcCell::F64),
-        AnySlice::NullableF32(values) => values.get(row_index).copied().map(OdbcCell::F32),
-        AnySlice::NullableI8(values) => values.get(row_index).copied().map(OdbcCell::I8),
-        AnySlice::NullableI16(values) => values.get(row_index).copied().map(OdbcCell::I16),
-        AnySlice::NullableI32(values) => values.get(row_index).copied().map(OdbcCell::I32),
-        AnySlice::NullableI64(values) => values.get(row_index).copied().map(OdbcCell::I64),
-        AnySlice::NullableU8(values) => values.get(row_index).copied().map(OdbcCell::U8),
-        AnySlice::NullableBit(values) => values
-            .get(row_index)
-            .copied()
-            .map(bit_to_bool)
-            .map(OdbcCell::Bool),
-        AnySlice::NullableDate(values) => values.get(row_index).copied().map(OdbcCell::Date),
-        AnySlice::NullableTime(values) => values.get(row_index).copied().map(OdbcCell::Time),
-        AnySlice::NullableTimestamp(values) => {
-            values.get(row_index).copied().map(OdbcCell::Timestamp)
-        }
-        AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => None,
-    }
-}
-
-fn bit_to_bool(value: Bit) -> bool {
-    value.0 != 0
-}
-
-macro_rules! impl_parse_from_bytes {
-    ($t:ty, $name:literal, $parse:expr) => {
-        impl<'r> Produce<'r, $t> for OdbcSourceParser {
-            type Error = OdbcSourceError;
-
-            #[throws(OdbcSourceError)]
-            fn produce(&'r mut self) -> $t {
-                let bytes = self.required_bytes($name)?;
-                ($parse)(bytes)?
-            }
-        }
-
-        impl<'r> Produce<'r, Option<$t>> for OdbcSourceParser {
-            type Error = OdbcSourceError;
-
-            #[throws(OdbcSourceError)]
-            fn produce(&'r mut self) -> Option<$t> {
-                match self.next_bytes()? {
-                    Some(bytes) => Some(($parse)(bytes)?),
-                    None => None,
-                }
-            }
-        }
-    };
-}
-
-impl_parse_from_bytes!(Decimal, "Decimal", parse_decimal);
-
-macro_rules! impl_parse_from_cell {
-    ($t:ty, $name:literal, $parse:expr) => {
-        impl<'r> Produce<'r, $t> for OdbcSourceParser {
-            type Error = OdbcSourceError;
-
-            #[throws(OdbcSourceError)]
-            fn produce(&'r mut self) -> $t {
-                let cell = self.required_cell($name)?;
-                ($parse)(cell)?
-            }
-        }
-
-        impl<'r> Produce<'r, Option<$t>> for OdbcSourceParser {
-            type Error = OdbcSourceError;
-
-            #[throws(OdbcSourceError)]
-            fn produce(&'r mut self) -> Option<$t> {
-                match self.next_cell()? {
-                    Some(cell) => Some(($parse)(cell)?),
-                    None => None,
-                }
-            }
-        }
-    };
-}
-
-impl_parse_from_cell!(u8, "u8", cell_u8);
-impl_parse_from_cell!(i16, "i16", cell_i16);
-impl_parse_from_cell!(i32, "i32", cell_i32);
-impl_parse_from_cell!(i64, "i64", cell_i64);
-impl_parse_from_cell!(f32, "f32", cell_f32);
-impl_parse_from_cell!(f64, "f64", cell_f64);
-impl_parse_from_cell!(NaiveDate, "NaiveDate", cell_date);
-impl_parse_from_cell!(NaiveTime, "NaiveTime", cell_time);
-impl_parse_from_cell!(NaiveDateTime, "NaiveDateTime", cell_timestamp);
-
-impl<'r> Produce<'r, bool> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> bool {
-        cell_bool(self.required_cell("bool")?)?
-    }
-}
-
-impl<'r> Produce<'r, Option<bool>> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> Option<bool> {
-        match self.next_cell()? {
-            Some(cell) => Some(cell_bool(cell)?),
-            None => None,
-        }
-    }
-}
-
-impl<'r> Produce<'r, String> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> String {
-        self.required_cell("String")?.to_utf8_string()
-    }
-}
-
-impl<'r> Produce<'r, Option<String>> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> Option<String> {
-        self.next_cell()?.map(OdbcCell::to_utf8_string)
-    }
-}
-
-impl<'r> Produce<'r, Vec<u8>> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> Vec<u8> {
-        self.required_bytes("Vec<u8>")?.to_vec()
-    }
-}
-
-impl<'r> Produce<'r, Option<Vec<u8>>> for OdbcSourceParser {
-    type Error = OdbcSourceError;
-
-    #[throws(OdbcSourceError)]
-    fn produce(&'r mut self) -> Option<Vec<u8>> {
-        self.next_bytes()?.map(|bytes| bytes.to_vec())
-    }
-}
-
-fn parse_bool(bytes: &[u8]) -> Result<bool, OdbcSourceError> {
-    match trim_ascii(bytes) {
-        b"1" => Ok(true),
-        b"0" => Ok(false),
-        value if eq_ascii_ignore_case(value, b"true") => Ok(true),
-        value if eq_ascii_ignore_case(value, b"false") => Ok(false),
-        _ => Err(OdbcSourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty: "bool",
-        }),
-    }
-}
-
-fn cell_u8(cell: &OdbcCell) -> Result<u8, OdbcSourceError> {
-    match cell {
-        OdbcCell::U8(value) => Ok(*value),
-        OdbcCell::I8(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I16(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I32(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I64(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::Bytes(bytes) => parse_u8(bytes),
-        _ => Err(cell_parse_error(cell, "u8")),
-    }
-}
-
-fn cell_i16(cell: &OdbcCell) -> Result<i16, OdbcSourceError> {
-    match cell {
-        OdbcCell::I8(value) => Ok(i16::from(*value)),
-        OdbcCell::U8(value) => Ok(i16::from(*value)),
-        OdbcCell::I16(value) => Ok(*value),
-        OdbcCell::I32(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        OdbcCell::I64(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        OdbcCell::Bytes(bytes) => parse_i16(bytes),
-        _ => Err(cell_parse_error(cell, "i16")),
-    }
-}
-
-fn cell_i32(cell: &OdbcCell) -> Result<i32, OdbcSourceError> {
-    match cell {
-        OdbcCell::I8(value) => Ok(i32::from(*value)),
-        OdbcCell::U8(value) => Ok(i32::from(*value)),
-        OdbcCell::I16(value) => Ok(i32::from(*value)),
-        OdbcCell::I32(value) => Ok(*value),
-        OdbcCell::I64(value) => i32::try_from(*value).map_err(|_| cell_parse_error(cell, "i32")),
-        OdbcCell::Bytes(bytes) => parse_i32(bytes),
-        _ => Err(cell_parse_error(cell, "i32")),
-    }
-}
-
-fn cell_i64(cell: &OdbcCell) -> Result<i64, OdbcSourceError> {
-    match cell {
-        OdbcCell::I8(value) => Ok(i64::from(*value)),
-        OdbcCell::U8(value) => Ok(i64::from(*value)),
-        OdbcCell::I16(value) => Ok(i64::from(*value)),
-        OdbcCell::I32(value) => Ok(i64::from(*value)),
-        OdbcCell::I64(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_i64(bytes),
-        _ => Err(cell_parse_error(cell, "i64")),
-    }
-}
-
-fn cell_f32(cell: &OdbcCell) -> Result<f32, OdbcSourceError> {
-    match cell {
-        OdbcCell::F32(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_f32(bytes),
-        _ => Err(cell_parse_error(cell, "f32")),
-    }
-}
-
-fn cell_f64(cell: &OdbcCell) -> Result<f64, OdbcSourceError> {
-    match cell {
-        OdbcCell::F32(value) => Ok(f64::from(*value)),
-        OdbcCell::F64(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_f64(bytes),
-        _ => Err(cell_parse_error(cell, "f64")),
-    }
-}
-
-fn cell_bool(cell: &OdbcCell) -> Result<bool, OdbcSourceError> {
-    match cell {
-        OdbcCell::Bool(value) => Ok(*value),
-        OdbcCell::U8(value) => Ok(*value != 0),
-        OdbcCell::I8(value) => Ok(*value != 0),
-        OdbcCell::I16(value) => Ok(*value != 0),
-        OdbcCell::I32(value) => Ok(*value != 0),
-        OdbcCell::I64(value) => Ok(*value != 0),
-        OdbcCell::Bytes(bytes) => parse_bool(bytes),
-        _ => Err(cell_parse_error(cell, "bool")),
-    }
-}
-
-fn cell_date(cell: &OdbcCell) -> Result<NaiveDate, OdbcSourceError> {
-    match cell {
-        OdbcCell::Date(value) => odbc_date_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_date(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDate")),
-    }
-}
-
-fn cell_time(cell: &OdbcCell) -> Result<NaiveTime, OdbcSourceError> {
-    match cell {
-        OdbcCell::Time(value) => odbc_time_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_time(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveTime")),
-    }
-}
-
-fn cell_timestamp(cell: &OdbcCell) -> Result<NaiveDateTime, OdbcSourceError> {
-    match cell {
-        OdbcCell::Timestamp(value) => odbc_timestamp_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_timestamp(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDateTime")),
-    }
-}
-
-fn cell_parse_error(cell: &OdbcCell, ty: &'static str) -> OdbcSourceError {
-    OdbcSourceError::ParseValue {
-        value: cell.to_utf8_string(),
-        ty,
-    }
-}
-
-fn odbc_date_to_naive(value: Date) -> Result<NaiveDate, OdbcSourceError> {
-    NaiveDate::from_ymd_opt(value.year.into(), value.month.into(), value.day.into()).ok_or_else(
-        || OdbcSourceError::ParseValue {
-            value: format!("{:04}-{:02}-{:02}", value.year, value.month, value.day),
-            ty: "NaiveDate",
-        },
-    )
-}
-
-fn odbc_time_to_naive(value: Time) -> Result<NaiveTime, OdbcSourceError> {
-    NaiveTime::from_hms_opt(value.hour.into(), value.minute.into(), value.second.into()).ok_or_else(
-        || OdbcSourceError::ParseValue {
-            value: format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second),
-            ty: "NaiveTime",
-        },
-    )
-}
-
-fn odbc_timestamp_to_naive(value: Timestamp) -> Result<NaiveDateTime, OdbcSourceError> {
-    let date = odbc_date_to_naive(Date {
-        year: value.year,
-        month: value.month,
-        day: value.day,
-    })?;
-    date.and_hms_nano_opt(
-        value.hour.into(),
-        value.minute.into(),
-        value.second.into(),
-        value.fraction,
-    )
-    .ok_or_else(|| OdbcSourceError::ParseValue {
-        value: format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-            value.year,
-            value.month,
-            value.day,
-            value.hour,
-            value.minute,
-            value.second,
-            value.fraction
-        ),
-        ty: "NaiveDateTime",
-    })
-}
-
-fn parse_u8(bytes: &[u8]) -> Result<u8, OdbcSourceError> {
-    let value = parse_i64_with_ty(bytes, "u8")?;
-    u8::try_from(value).map_err(|_| OdbcSourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "u8",
-    })
-}
-
-fn parse_i16(bytes: &[u8]) -> Result<i16, OdbcSourceError> {
-    let value = parse_i64_with_ty(bytes, "i16")?;
-    i16::try_from(value).map_err(|_| OdbcSourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "i16",
-    })
-}
-
-fn parse_i32(bytes: &[u8]) -> Result<i32, OdbcSourceError> {
-    let value = parse_i64_with_ty(bytes, "i32")?;
-    i32::try_from(value).map_err(|_| OdbcSourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty: "i32",
-    })
-}
-
-fn parse_i64(bytes: &[u8]) -> Result<i64, OdbcSourceError> {
-    parse_i64_with_ty(bytes, "i64")
-}
-
-fn parse_f32(bytes: &[u8]) -> Result<f32, OdbcSourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "f32")?.parse::<f32>()?)
-}
-
-fn parse_f64(bytes: &[u8]) -> Result<f64, OdbcSourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "f64")?.parse::<f64>()?)
-}
-
-fn parse_decimal(bytes: &[u8]) -> Result<Decimal, OdbcSourceError> {
-    Ok(bytes_to_str(trim_ascii(bytes), "Decimal")?.parse::<Decimal>()?)
-}
-
-fn parse_date(bytes: &[u8]) -> Result<NaiveDate, OdbcSourceError> {
-    Ok(NaiveDate::parse_from_str(
-        bytes_to_str(trim_ascii(bytes), "NaiveDate")?,
-        "%Y-%m-%d",
-    )?)
-}
-
-fn parse_time(bytes: &[u8]) -> Result<NaiveTime, OdbcSourceError> {
-    let s = bytes_to_str(trim_ascii(bytes), "NaiveTime")?;
-    NaiveTime::parse_from_str(s, "%H:%M:%S%.f")
-        .or_else(|_| NaiveTime::parse_from_str(s, "%H:%M:%S"))
-        .map_err(OdbcSourceError::from)
-}
-
-fn parse_timestamp(bytes: &[u8]) -> Result<NaiveDateTime, OdbcSourceError> {
-    let s = bytes_to_str(trim_ascii(bytes), "NaiveDateTime")?;
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
-        .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
-        .map_err(OdbcSourceError::from)
-}
-
-#[throws(OdbcSourceError)]
-fn fetch_count(conn: &str, query: &str) -> usize {
-    let cxq = CXQuery::Naked(query.to_string());
-    let cquery = count_query(&cxq, &GenericDialect {})?;
-    fetch_count_query(conn, cquery.as_str())?
-}
-
-#[throws(OdbcSourceError)]
-fn fetch_count_query(conn: &str, query: &str) -> usize {
-    let mut cursor = OdbcSource::execute_query(conn, query)?;
-    let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(64))?;
-    let mut cursor = cursor.bind_buffer(buffer)?;
-    let batch = cursor.fetch()?.ok_or(OdbcSourceError::GetNRowsFailed)?;
-    let value = batch.at(0, 0).ok_or(OdbcSourceError::GetNRowsFailed)?;
-    let value = parse_i64_with_ty(value, "usize")?;
-    usize::try_from(value).map_err(|_| OdbcSourceError::ParseValue {
-        value: bytes_to_string(batch.at(0, 0).unwrap_or_default()),
-        ty: "usize",
-    })?
-}
-
-#[throws(OdbcSourceError)]
-pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> (i64, i64) {
-    let mut cursor = OdbcSource::execute_query(conn, query)?;
-    let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(128))?;
-    let mut cursor = cursor.bind_buffer(buffer)?;
-    let batch = cursor.fetch()?.ok_or(OdbcSourceError::GetNRowsFailed)?;
-    let min = parse_partition_value(batch.at(0, 0).ok_or(OdbcSourceError::GetNRowsFailed)?)?;
-    let max = parse_partition_value(batch.at(1, 0).ok_or(OdbcSourceError::GetNRowsFailed)?)?;
-    (min, max)
-}
-
-fn parse_partition_value(value: &[u8]) -> Result<i64, OdbcSourceError> {
-    let trimmed = trim_ascii(value);
-    if trimmed.is_empty() {
-        return Ok(0);
-    }
-
-    match parse_i64_with_ty(trimmed, "partition range") {
-        Ok(value) => Ok(value),
-        Err(_) => bytes_to_str(trimmed, "partition range")?
-            .parse::<f64>()
-            .map(|value| value as i64)
-            .map_err(|_| OdbcSourceError::ParseValue {
-                value: bytes_to_string(trimmed),
-                ty: "partition range",
-            }),
-    }
-}
-
-fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.parse().ok()
-}
-
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .map(|idx| idx + 1)
-        .unwrap_or(start);
-    &bytes[start..end]
-}
-
-fn bytes_to_string(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn bytes_to_str<'a>(bytes: &'a [u8], ty: &'static str) -> Result<&'a str, OdbcSourceError> {
-    std::str::from_utf8(bytes).map_err(|_| OdbcSourceError::ParseValue {
-        value: bytes_to_string(bytes),
-        ty,
-    })
-}
-
-fn eq_ascii_ignore_case(left: &[u8], right: &[u8]) -> bool {
-    left.eq_ignore_ascii_case(right)
-}
-
-fn parse_i64_with_ty(bytes: &[u8], ty: &'static str) -> Result<i64, OdbcSourceError> {
-    let bytes = trim_ascii(bytes);
-    if bytes.is_empty() {
-        return Err(OdbcSourceError::ParseValue {
-            value: String::new(),
-            ty,
-        });
-    }
-
-    let (negative, digits) = match bytes[0] {
-        b'-' => (true, &bytes[1..]),
-        b'+' => (false, &bytes[1..]),
-        _ => (false, bytes),
-    };
-    if digits.is_empty() {
-        return Err(OdbcSourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty,
-        });
-    }
-
-    let mut value = 0i64;
-    for &byte in digits {
-        if !byte.is_ascii_digit() {
-            return Err(OdbcSourceError::ParseValue {
-                value: bytes_to_string(bytes),
-                ty,
-            });
-        }
-        let digit = i64::from(byte - b'0');
-        value = if negative {
-            value
-                .checked_mul(10)
-                .and_then(|value| value.checked_sub(digit))
-        } else {
-            value
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(digit))
-        }
-        .ok_or_else(|| OdbcSourceError::ParseValue {
-            value: bytes_to_string(bytes),
-            ty,
-        })?;
-    }
-
-    Ok(value)
+odbc_core::impl_parse_from_bytes!(
+    OdbcSourceParser,
+    OdbcSourceError,
+    Decimal,
+    "Decimal",
+    parse_decimal
+);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, u8, "u8", cell_u8);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, i16, "i16", cell_i16);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, i32, "i32", cell_i32);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, i64, "i64", cell_i64);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, f32, "f32", cell_f32);
+odbc_core::impl_parse_from_cell!(OdbcSourceParser, OdbcSourceError, f64, "f64", cell_f64);
+odbc_core::impl_parse_from_cell!(
+    OdbcSourceParser,
+    OdbcSourceError,
+    NaiveDate,
+    "NaiveDate",
+    cell_date
+);
+odbc_core::impl_parse_from_cell!(
+    OdbcSourceParser,
+    OdbcSourceError,
+    NaiveTime,
+    "NaiveTime",
+    cell_time
+);
+odbc_core::impl_parse_from_cell!(
+    OdbcSourceParser,
+    OdbcSourceError,
+    NaiveDateTime,
+    "NaiveDateTime",
+    cell_timestamp
+);
+odbc_core::impl_bool_produce!(OdbcSourceParser, OdbcSourceError);
+odbc_core::impl_string_produce!(OdbcSourceParser, OdbcSourceError);
+odbc_core::impl_bytes_clone_produce!(OdbcSourceParser, OdbcSourceError);
+
+pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), OdbcSourceError> {
+    odbc_core::fetch_i64_pair::<OdbcSourceError>(conn, query)
 }
 
 #[throws(OdbcSourceError)]
