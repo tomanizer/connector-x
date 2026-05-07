@@ -25,7 +25,8 @@ pub const RECORD_BATCH_SIZE: usize = 64 * KILO;
     feature = "src_mysql",
     feature = "src_oracle",
     feature = "src_mssql",
-    feature = "src_sybase"
+    feature = "src_sybase",
+    feature = "src_db2"
 ))]
 pub const DB_BUFFER_SIZE: usize = 32;
 

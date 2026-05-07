@@ -77,6 +77,27 @@ TPCH_TABLE=lineitem \
 poetry run pytest connectorx/tests/benchmarks.py --benchmark-json ../benchmark.json
 ```
 
+## IBM Db2 ODBC Microbenchmark
+
+The Db2 connector has a Criterion benchmark for the current ODBC implementation so the mixed projection and primitive typed-buffer path can be tracked separately.
+
+```bash
+DB2_URL="db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER" \
+DB2_BENCH_QUERY="select * from cx_db2_test" \
+DB2_BENCH_ROWS=10000 \
+cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
+```
+
+Without `DB2_BENCH_QUERY`, the benchmark runs both the mixed default projection and a primitive-only projection (`odbc_get_arrow_primitives`) to track the typed ODBC buffer path independently.
+
+For Python benchmark runs, set `DB2_URL` and reuse the existing `TPCH_TABLE` environment variable:
+
+```bash
+DB2_URL="db2://user:password@server:50000/database?driver=IBM%20DB2%20ODBC%20DRIVER" \
+TPCH_TABLE=lineitem \
+poetry run pytest connectorx/tests/benchmarks.py --benchmark-json ../benchmark.json
+```
+
 ## Redshift: Upload TPC-H
 > Note: For Redshift, AWS has already hosted TPC-H data in public s3. We borrow the uploading script from [amazon-redshift-utils](https://github.com/awslabs/amazon-redshift-utils/blob/master/src/CloudDataWarehouseBenchmark/Cloud-DWB-Derived-from-TPCH/3TB/ddl.sql). We only modified `LINEITEM`'s sortkey from `(l_shipdate,l_orderkey)` to `(l_orderkey)`.
 

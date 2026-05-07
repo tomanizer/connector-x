@@ -571,6 +571,7 @@ _ServerBackendT = TypeVar(
         "mysql",
         "mssql",
         "sybase",
+        "db2",
         "oracle",
         "duckdb",
     ],

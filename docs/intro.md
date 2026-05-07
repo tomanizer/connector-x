@@ -88,6 +88,7 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] SQL Server
 - [x] Azure SQL Database (through mssql protocol)
 - [x] Sybase ASE (through ODBC)
+- [x] IBM Db2 (through ODBC)
 - [x] Oracle
 - [x] Big Query
 - [ ] ODBC (WIP)

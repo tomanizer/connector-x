@@ -10,6 +10,7 @@ chapters:
   - file: databases
     sections:
     - file: databases/bigquery
+    - file: databases/db2
     - file: databases/mssql
     - file: databases/mysql
     - file: databases/oracle
