@@ -100,6 +100,36 @@ check-db2-linux-odbc:
         printf 'select count(*) from cx_db2_test;\n' | isql -v -k \"Driver=/opt/ibm/db2/clidriver/lib/libdb2.so;Hostname=$host;Port=$port;Protocol=TCPIP;Database=$db;UID=db2inst1;PWD=$password;\"
     "
 
+test-db2-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    container="${DB2_CONTAINER:-connectorx-db2}"
+    db="${DB2_DB:-testdb}"
+    password="${DB2_PASSWORD:-connectorx1}"
+    src_dir="${DB2_TEST_SRC_DIR:-/tmp/connectorx-src}"
+    git ls-files -z --cached --others --exclude-standard \
+        | COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --format=ustar --no-recursion --null -T - -cf - \
+        | docker exec -i "$container" bash -lc "rm -rf '$src_dir' && mkdir -p '$src_dir' && tar -xf - -C '$src_dir'"
+    docker exec "$container" bash -lc "
+        set -euo pipefail
+        dnf install -y gcc gcc-c++ make pkgconf-pkg-config unixODBC unixODBC-devel openssl-devel ca-certificates perl >/tmp/connectorx-dnf.log 2>&1
+        if [ ! -x /root/.cargo/bin/cargo ]; then
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+        fi
+        if [ -f /database/config/db2inst1/sqllib/db2profile ]; then
+            . /database/config/db2inst1/sqllib/db2profile
+        else
+            . /opt/ibm/db2/V12.1/cfg/db2profile
+        fi
+        export PATH=/root/.cargo/bin:\$PATH
+        export LD_LIBRARY_PATH=/opt/ibm/db2/V12.1/lib64:\${LD_LIBRARY_PATH:-}
+        export CARGO_TARGET_DIR=/tmp/connectorx-db2-target
+        cd '$src_dir'
+        DB2_ODBC_CONN=\"Driver=/opt/ibm/db2/V12.1/lib64/libdb2o.so;Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;Database=$db;UID=db2inst1;PWD=$password;\" \
+        DB2_URL=\"db2://db2inst1:$password@127.0.0.1:50000/$db?driver=%2Fopt%2Fibm%2Fdb2%2FV12.1%2Flib64%2Flibdb2o.so\" \
+        cargo test -p connectorx --features 'src_db2 dst_arrow' --test test_db2 -- --nocapture
+    "
+
 cleanup:
     cargo clean
     cd connectorx-python && cargo clean

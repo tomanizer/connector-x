@@ -60,14 +60,14 @@ Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be report
 
 ## Performance Tuning
 
-The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal, date/time, and text columns use text buffers for driver compatibility.
+The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, temporal, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal and text columns use text buffers for driver compatibility.
 
 The defaults are tuned for throughput over small memory use:
 
 * `DB2_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
 
-Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Increase `DB2_MAX_STR_LEN` when selected character, decimal, date/time, or binary columns can exceed the default bound.
+Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound.
 
 ## Testing And Benchmarking
 
@@ -91,7 +91,13 @@ Verify that a Linux amd64 ODBC client can reach the container and read the seede
 just check-db2-linux-odbc
 ```
 
-On macOS arm64, the IBM `macarm64_odbc_cli` package can validate Db2 CLI connectivity, but it does not currently include the `libdb2o` library IBM documents for 64-bit unixODBC driver managers. In practice, that can surface as `SQLLEN` conversion failures in Rust ODBC clients. Use a Linux x64 environment with a compatible Db2 ODBC library for ConnectorX integration tests until that client-driver path is resolved.
+Run the ConnectorX Db2 integration tests inside the Db2 container with IBM's full Db2 client stack:
+
+```bash
+just test-db2-docker
+```
+
+This path uses `/opt/ibm/db2/V12.1/lib64/libdb2o.so` from the full Db2 image and sources the initialized Db2 profile before running Rust tests. On macOS arm64, the IBM `macarm64_odbc_cli` package can validate Db2 CLI connectivity, but it does not currently include the `libdb2o` library IBM documents for 64-bit unixODBC driver managers. In practice, that can surface as `SQLLEN` conversion failures in Rust ODBC clients.
 
 A Db2 ODBC connection can be tested with:
 

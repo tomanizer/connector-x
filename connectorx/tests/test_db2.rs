@@ -29,9 +29,11 @@ fn db2_url() -> Option<String> {
 
 fn basic_type_query() -> CXQuery<String> {
     CXQuery::naked(
-        "select cast(1 as integer) as id, cast(1 as smallint) as flag, cast('alpha' as varchar(16)) as name from sysibm.sysdummy1 \
-         union all \
-         select cast(2 as integer) as id, cast(0 as smallint) as flag, cast('beta' as varchar(16)) as name from sysibm.sysdummy1",
+        "select id, flag, name from ( \
+             select cast(1 as integer) as id, cast(1 as smallint) as flag, cast('alpha' as varchar(16)) as name from sysibm.sysdummy1 \
+             union all \
+             select cast(2 as integer) as id, cast(0 as smallint) as flag, cast('beta' as varchar(16)) as name from sysibm.sysdummy1 \
+         ) q order by id",
     )
 }
 

@@ -19,6 +19,7 @@ use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
 use odbc_api::handles::StatementConnection;
+use odbc_api::sys::{Date, Time, Timestamp};
 use odbc_api::{
     buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, TextRowSet},
     environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl,
@@ -216,7 +217,7 @@ impl SourcePartition for Db2SourcePartition {
 
 pub struct Db2SourceParser {
     cursor: Db2BlockCursor,
-    rowbuf: Vec<Vec<Option<Db2Cell>>>,
+    rowbuf: Vec<Option<Db2Cell>>,
     ncols: usize,
     current_col: usize,
     current_row: usize,
@@ -241,7 +242,7 @@ impl Db2SourceParser {
         let cidx = self.current_col;
         self.current_row += (self.current_col + 1) / self.ncols;
         self.current_col = (self.current_col + 1) % self.ncols;
-        self.rowbuf[ridx][cidx].as_ref()
+        self.rowbuf[ridx * self.ncols + cidx].as_ref()
     }
 
     #[throws(Db2SourceError)]
@@ -282,7 +283,7 @@ impl PartitionParser<'_> for Db2SourceParser {
     #[throws(Db2SourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
         assert!(self.current_col == 0);
-        let remaining_rows = self.rowbuf.len() - self.current_row;
+        let remaining_rows = self.rowbuf.len() / self.ncols - self.current_row;
         if remaining_rows > 0 {
             return (remaining_rows, self.is_finished);
         } else if self.is_finished {
@@ -291,11 +292,12 @@ impl PartitionParser<'_> for Db2SourceParser {
 
         self.rowbuf.clear();
         if let Some(batch) = self.cursor.fetch()? {
+            self.rowbuf.reserve(batch.num_rows() * self.ncols);
             for row_index in 0..batch.num_rows() {
-                let row = (0..batch.num_cols())
-                    .map(|col_index| db2_cell_from_column(batch.column(col_index), row_index))
-                    .collect::<Vec<_>>();
-                self.rowbuf.push(row);
+                for col_index in 0..batch.num_cols() {
+                    self.rowbuf
+                        .push(db2_cell_from_column(batch.column(col_index), row_index));
+                }
             }
         } else {
             self.is_finished = true;
@@ -303,7 +305,7 @@ impl PartitionParser<'_> for Db2SourceParser {
 
         self.current_row = 0;
         self.current_col = 0;
-        (self.rowbuf.len(), self.is_finished)
+        (self.rowbuf.len() / self.ncols, self.is_finished)
     }
 }
 
@@ -318,6 +320,9 @@ enum Db2Cell {
     F32(f32),
     F64(f64),
     Bool(bool),
+    Date(Date),
+    Time(Time),
+    Timestamp(Timestamp),
 }
 
 impl Db2Cell {
@@ -339,6 +344,22 @@ impl Db2Cell {
             Db2Cell::F32(value) => value.to_string(),
             Db2Cell::F64(value) => value.to_string(),
             Db2Cell::Bool(value) => value.to_string(),
+            Db2Cell::Date(value) => {
+                format!("{:04}-{:02}-{:02}", value.year, value.month, value.day)
+            }
+            Db2Cell::Time(value) => {
+                format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second)
+            }
+            Db2Cell::Timestamp(value) => format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
+                value.year,
+                value.month,
+                value.day,
+                value.hour,
+                value.minute,
+                value.second,
+                value.fraction
+            ),
         }
     }
 }
@@ -357,13 +378,22 @@ fn db2_buffer_desc(ty: Db2TypeSystem, max_str_len: usize) -> BufferDesc {
         | Db2TypeSystem::Decimal(_)
         | Db2TypeSystem::Char(_)
         | Db2TypeSystem::Varchar(_)
-        | Db2TypeSystem::Text(_)
-        | Db2TypeSystem::Date(_)
-        | Db2TypeSystem::Time(_)
-        | Db2TypeSystem::Timestamp(_) => BufferDesc::Text { max_str_len },
+        | Db2TypeSystem::Text(_) => BufferDesc::Text { max_str_len },
+        Db2TypeSystem::Date(_) | Db2TypeSystem::Time(_) | Db2TypeSystem::Timestamp(_) => {
+            db2_temporal_buffer_desc(ty, nullable)
+        }
         Db2TypeSystem::Binary(_) => BufferDesc::Binary {
             max_bytes: max_str_len,
         },
+    }
+}
+
+fn db2_temporal_buffer_desc(ty: Db2TypeSystem, nullable: bool) -> BufferDesc {
+    match ty {
+        Db2TypeSystem::Date(_) => BufferDesc::Date { nullable },
+        Db2TypeSystem::Time(_) => BufferDesc::Time { nullable },
+        Db2TypeSystem::Timestamp(_) => BufferDesc::Timestamp { nullable },
+        _ => unreachable!("non-temporal Db2 type passed to temporal buffer desc"),
     }
 }
 
@@ -407,6 +437,9 @@ fn db2_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<Db2Cel
         AnySlice::I64(values) => Some(Db2Cell::I64(values[row_index])),
         AnySlice::U8(values) => Some(Db2Cell::U8(values[row_index])),
         AnySlice::Bit(values) => Some(Db2Cell::Bool(bit_to_bool(values[row_index]))),
+        AnySlice::Date(values) => Some(Db2Cell::Date(values[row_index])),
+        AnySlice::Time(values) => Some(Db2Cell::Time(values[row_index])),
+        AnySlice::Timestamp(values) => Some(Db2Cell::Timestamp(values[row_index])),
         AnySlice::NullableF64(values) => values.get(row_index).copied().map(Db2Cell::F64),
         AnySlice::NullableF32(values) => values.get(row_index).copied().map(Db2Cell::F32),
         AnySlice::NullableI8(values) => values.get(row_index).copied().map(Db2Cell::I8),
@@ -419,14 +452,12 @@ fn db2_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<Db2Cel
             .copied()
             .map(bit_to_bool)
             .map(Db2Cell::Bool),
-        AnySlice::Date(_)
-        | AnySlice::Time(_)
-        | AnySlice::Timestamp(_)
-        | AnySlice::Numeric(_)
-        | AnySlice::NullableDate(_)
-        | AnySlice::NullableTime(_)
-        | AnySlice::NullableTimestamp(_)
-        | AnySlice::NullableNumeric(_) => None,
+        AnySlice::NullableDate(values) => values.get(row_index).copied().map(Db2Cell::Date),
+        AnySlice::NullableTime(values) => values.get(row_index).copied().map(Db2Cell::Time),
+        AnySlice::NullableTimestamp(values) => {
+            values.get(row_index).copied().map(Db2Cell::Timestamp)
+        }
+        AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => None,
     }
 }
 
@@ -461,9 +492,6 @@ macro_rules! impl_parse_from_bytes {
 }
 
 impl_parse_from_bytes!(Decimal, "Decimal", parse_decimal);
-impl_parse_from_bytes!(NaiveDate, "NaiveDate", parse_date);
-impl_parse_from_bytes!(NaiveTime, "NaiveTime", parse_time);
-impl_parse_from_bytes!(NaiveDateTime, "NaiveDateTime", parse_timestamp);
 
 macro_rules! impl_parse_from_cell {
     ($t:ty, $name:literal, $parse:expr) => {
@@ -497,6 +525,9 @@ impl_parse_from_cell!(i32, "i32", cell_i32);
 impl_parse_from_cell!(i64, "i64", cell_i64);
 impl_parse_from_cell!(f32, "f32", cell_f32);
 impl_parse_from_cell!(f64, "f64", cell_f64);
+impl_parse_from_cell!(NaiveDate, "NaiveDate", cell_date);
+impl_parse_from_cell!(NaiveTime, "NaiveTime", cell_time);
+impl_parse_from_cell!(NaiveDateTime, "NaiveDateTime", cell_timestamp);
 
 impl<'r> Produce<'r, bool> for Db2SourceParser {
     type Error = Db2SourceError;
@@ -646,11 +677,80 @@ fn cell_bool(cell: &Db2Cell) -> Result<bool, Db2SourceError> {
     }
 }
 
+fn cell_date(cell: &Db2Cell) -> Result<NaiveDate, Db2SourceError> {
+    match cell {
+        Db2Cell::Date(value) => odbc_date_to_naive(*value),
+        Db2Cell::Bytes(bytes) => parse_date(bytes),
+        _ => Err(cell_parse_error(cell, "NaiveDate")),
+    }
+}
+
+fn cell_time(cell: &Db2Cell) -> Result<NaiveTime, Db2SourceError> {
+    match cell {
+        Db2Cell::Time(value) => odbc_time_to_naive(*value),
+        Db2Cell::Bytes(bytes) => parse_time(bytes),
+        _ => Err(cell_parse_error(cell, "NaiveTime")),
+    }
+}
+
+fn cell_timestamp(cell: &Db2Cell) -> Result<NaiveDateTime, Db2SourceError> {
+    match cell {
+        Db2Cell::Timestamp(value) => odbc_timestamp_to_naive(*value),
+        Db2Cell::Bytes(bytes) => parse_timestamp(bytes),
+        _ => Err(cell_parse_error(cell, "NaiveDateTime")),
+    }
+}
+
 fn cell_parse_error(cell: &Db2Cell, ty: &'static str) -> Db2SourceError {
     Db2SourceError::ParseValue {
         value: cell.to_utf8_string(),
         ty,
     }
+}
+
+fn odbc_date_to_naive(value: Date) -> Result<NaiveDate, Db2SourceError> {
+    NaiveDate::from_ymd_opt(value.year.into(), value.month.into(), value.day.into()).ok_or_else(
+        || Db2SourceError::ParseValue {
+            value: format!("{:04}-{:02}-{:02}", value.year, value.month, value.day),
+            ty: "NaiveDate",
+        },
+    )
+}
+
+fn odbc_time_to_naive(value: Time) -> Result<NaiveTime, Db2SourceError> {
+    NaiveTime::from_hms_opt(value.hour.into(), value.minute.into(), value.second.into()).ok_or_else(
+        || Db2SourceError::ParseValue {
+            value: format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second),
+            ty: "NaiveTime",
+        },
+    )
+}
+
+fn odbc_timestamp_to_naive(value: Timestamp) -> Result<NaiveDateTime, Db2SourceError> {
+    let date = odbc_date_to_naive(Date {
+        year: value.year,
+        month: value.month,
+        day: value.day,
+    })?;
+    date.and_hms_nano_opt(
+        value.hour.into(),
+        value.minute.into(),
+        value.second.into(),
+        value.fraction,
+    )
+    .ok_or_else(|| Db2SourceError::ParseValue {
+        value: format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.fraction
+        ),
+        ty: "NaiveDateTime",
+    })
 }
 
 fn parse_u8(bytes: &[u8]) -> Result<u8, Db2SourceError> {
