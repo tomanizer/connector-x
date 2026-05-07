@@ -113,6 +113,7 @@ all = [
   "src_mysql",
   "src_mssql",
   "src_sybase",
+  "src_db2",
   "src_oracle",
   "src_bigquery",
   "src_csv",
@@ -130,6 +131,7 @@ dst_arrow = ["arrow", "rust_decimal"]
 dst_polars = ["dst_arrow", "polars", "polars-arrow"]
 fptr = []
 sybase_odbc_spike = ["odbc-api"]
+db2_odbc_spike = ["odbc-api"]
 src_bigquery = ["gcp-bigquery-client", "tokio"]
 src_csv = ["csv", "regex"]
 src_dummy = ["num-traits"]
@@ -146,6 +148,7 @@ src_mssql = [
   "urlencoding",
 ]
 src_sybase = ["odbc-api", "rust_decimal", "num-traits", "urlencoding"]
+src_db2 = ["odbc-api", "rust_decimal", "num-traits", "urlencoding"]
 src_mysql = ["r2d2_mysql", "mysql_common", "rust_decimal", "num-traits", "r2d2"]
 src_oracle = ["oracle", "r2d2-oracle", "r2d2", "urlencoding", "rust_decimal"]
 src_postgres = [
@@ -199,6 +202,10 @@ integrated-auth-gssapi = ["tiberius/integrated-auth-gssapi"]
 
 [[bench]]
 name = "sybase_odbc"
+harness = false
+
+[[bench]]
+name = "db2_odbc"
 harness = false
 
 [package.metadata.docs.rs]

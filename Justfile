@@ -24,6 +24,7 @@ test-feature-gate:
     cargo c --features src_mysql
     cargo c --features src_mssql
     cargo c --features src_sybase
+    cargo c --features src_db2
     cargo c --features src_sqlite
     cargo c --features src_oracle
     cargo c --features src_trino
@@ -32,6 +33,72 @@ test-feature-gate:
 
 bench-sybase-odbc:
     cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
+
+bench-db2-odbc:
+    cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
+
+start-db2-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    container="${DB2_CONTAINER:-connectorx-db2}"
+    port="${DB2_PORT:-50000}"
+    db="${DB2_DB:-testdb}"
+    password="${DB2_PASSWORD:-connectorx1}"
+    data_volume="${DB2_DATA_VOLUME:-connectorx-db2-data}"
+    image="${DB2_IMAGE:-icr.io/db2_community/db2:latest}"
+    platform="${DB2_DOCKER_PLATFORM:-linux/amd64}"
+    if [ -n "${DB2_DATA_DIR:-}" ]; then
+        mkdir -p "$DB2_DATA_DIR"
+        data_mount="$DB2_DATA_DIR:/database"
+    else
+        docker volume create "$data_volume" >/dev/null
+        data_mount="$data_volume:/database"
+    fi
+    if docker ps -a --format '{{ "{{" }}.Names{{ "}}" }}' | grep -qx "$container"; then
+        docker start "$container"
+    else
+        docker run -d \
+            --name "$container" \
+            --platform "$platform" \
+            --privileged=true \
+            -p "$port:50000" \
+            -e LICENSE=accept \
+            -e DB2INST1_PASSWORD="$password" \
+            -e DBNAME="$db" \
+            -v "$data_mount" \
+            "$image"
+    fi
+    echo "DB2_URL=db2://db2inst1:$password@127.0.0.1:$port/$db?driver=IBM%20DB2%20ODBC%20DRIVER"
+    echo "DB2_ODBC_CONN=Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=$port;Protocol=TCPIP;Database=$db;UID=db2inst1;PWD=$password;"
+
+logs-db2-docker:
+    docker logs -f ${DB2_CONTAINER:-connectorx-db2}
+
+seed-db2-docker:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    container="${DB2_CONTAINER:-connectorx-db2}"
+    db="${DB2_DB:-testdb}"
+    docker cp scripts/db2.sql "$container:/tmp/connectorx-db2.sql"
+    docker exec "$container" bash -lc "su - db2inst1 -c 'db2 connect to $db && db2 -td@ -vf /tmp/connectorx-db2.sql'"
+
+check-db2-linux-odbc:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="${DB2_HOST:-host.docker.internal}"
+    port="${DB2_PORT:-50000}"
+    db="${DB2_DB:-testdb}"
+    password="${DB2_PASSWORD:-connectorx1}"
+    docker run --rm --platform linux/amd64 -e DEBIAN_FRONTEND=noninteractive debian:bookworm-slim bash -lc "
+        set -euo pipefail
+        apt-get update >/dev/null
+        apt-get install -y --no-install-recommends ca-certificates curl tar gzip unixodbc libxml2 libstdc++6 libaio1 >/dev/null
+        mkdir -p /opt/ibm/db2
+        curl -fsSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz -o /tmp/linuxx64_odbc_cli.tar.gz
+        tar -xzf /tmp/linuxx64_odbc_cli.tar.gz -C /opt/ibm/db2
+        export LD_LIBRARY_PATH=/opt/ibm/db2/clidriver/lib:\${LD_LIBRARY_PATH:-}
+        printf 'select count(*) from cx_db2_test;\n' | isql -v -k \"Driver=/opt/ibm/db2/clidriver/lib/libdb2.so;Hostname=$host;Port=$port;Protocol=TCPIP;Database=$db;UID=db2inst1;PWD=$password;\"
+    "
 
 cleanup:
     cargo clean
