@@ -2,9 +2,9 @@
 //!
 //! Backends provide connection-string handling, SQL dialects, error conversion, and
 //! buffer/type policy. This module owns the common ODBC execution, metadata,
-//! row-buffer parsing, primitive conversion, count, and partition helpers.
+//! columnar batch parsing, primitive conversion, count, and partition helpers.
 
-use std::{convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError};
+use std::{borrow::Cow, convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError};
 
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -19,7 +19,6 @@ use rust_decimal::{Decimal, Error as DecimalParseError};
 use sqlparser::dialect::Dialect;
 
 use crate::{
-    constants::DB_BUFFER_SIZE,
     errors::ConnectorXError,
     sources::PartitionParser,
     sql::{count_query, CXQuery},
@@ -51,7 +50,7 @@ pub(crate) trait OdbcTypePolicy: TypeSystem + Copy {
 
 pub struct OdbcParser<TS, E> {
     cursor: OdbcBlockCursor,
-    rowbuf: Vec<Option<OdbcCell>>,
+    batch: OdbcBatch,
     ncols: usize,
     current_cell: usize,
     is_finished: bool,
@@ -66,7 +65,7 @@ where
     pub(crate) fn new(cursor: OdbcBlockCursor, ncols: usize, source_name: &'static str) -> Self {
         Self {
             cursor,
-            rowbuf: Vec::with_capacity(DB_BUFFER_SIZE),
+            batch: OdbcBatch::with_capacity(ncols),
             ncols,
             current_cell: 0,
             is_finished: false,
@@ -75,25 +74,30 @@ where
         }
     }
 
-    pub(crate) fn next_cell(&mut self) -> Option<&OdbcCell> {
+    fn next_position(&mut self) -> (usize, usize) {
         let cell_index = self.current_cell;
         self.current_cell += 1;
-        self.rowbuf[cell_index].as_ref()
+        (cell_index / self.ncols, cell_index % self.ncols)
+    }
+
+    pub(crate) fn next_cell(&mut self) -> Option<OdbcValue<'_>> {
+        let (row_index, col_index) = self.next_position();
+        self.batch.cell(row_index, col_index)
     }
 
     pub(crate) fn next_bytes<T>(&mut self) -> Result<Option<&[u8]>, E> {
         let source_name = self.source_name;
-        match self.next_cell() {
-            Some(cell) => Ok(Some(cell.try_bytes().ok_or_else(|| {
-                ConnectorXError::cannot_produce::<T>(Some(format!(
-                    "{source_name} typed value for byte-only parser"
-                )))
-            })?)),
-            None => Ok(None),
+        let (row_index, col_index) = self.next_position();
+        match self.batch.bytes(row_index, col_index) {
+            Some(bytes) => Ok(bytes),
+            None => Err(ConnectorXError::cannot_produce::<T>(Some(format!(
+                "{source_name} typed value for byte-only parser"
+            )))
+            .into()),
         }
     }
 
-    pub(crate) fn required_cell<T>(&mut self, ty: &'static str) -> Result<&OdbcCell, E> {
+    pub(crate) fn required_cell<T>(&mut self, ty: &'static str) -> Result<OdbcValue<'_>, E> {
         let source_name = self.source_name;
         let value = self.next_cell();
         Ok(value.ok_or_else(|| {
@@ -105,10 +109,10 @@ where
 
     pub(crate) fn required_bytes<T>(&mut self, ty: &'static str) -> Result<&[u8], E> {
         let source_name = self.source_name;
-        let value = self.required_cell::<T>(ty)?;
-        Ok(value.try_bytes().ok_or_else(|| {
+        let value = self.next_bytes::<T>()?;
+        Ok(value.ok_or_else(|| {
             ConnectorXError::cannot_produce::<T>(Some(format!(
-                "{source_name} typed value for byte-only {ty}"
+                "{source_name} NULL for non-null {ty}"
             )))
         })?)
     }
@@ -128,39 +132,336 @@ where
             return Ok((0, true));
         }
         assert!(matches!(self.current_cell.checked_rem(self.ncols), Some(0)));
-        let remaining_cells = self.rowbuf.len() - self.current_cell;
+        let remaining_cells = self.batch.nrows * self.ncols - self.current_cell;
         if remaining_cells > 0 {
             return Ok((remaining_cells / self.ncols, self.is_finished));
         } else if self.is_finished {
             return Ok((0, self.is_finished));
         }
 
-        self.rowbuf.clear();
+        self.batch.nrows = 0;
         if let Some(batch) = self.cursor.fetch()? {
             let num_rows = batch.num_rows();
             let num_cols = batch.num_cols();
-            self.rowbuf.resize(num_rows * num_cols, None);
+            self.batch.nrows = num_rows;
             for col_index in 0..num_cols {
-                fill_column_cells(
-                    &mut self.rowbuf,
-                    batch.column(col_index),
-                    col_index,
-                    num_cols,
-                    num_rows,
-                );
+                self.batch
+                    .replace_column(col_index, batch.column(col_index));
             }
+            self.batch.truncate_columns(num_cols);
         } else {
+            self.batch.clear();
             self.is_finished = true;
         }
 
         self.current_cell = 0;
-        Ok((self.rowbuf.len() / self.ncols, self.is_finished))
+        Ok((self.batch.nrows, self.is_finished))
     }
 }
 
+#[derive(Default)]
+struct OdbcBatch {
+    columns: Vec<OdbcColumn>,
+    nrows: usize,
+}
+
+impl OdbcBatch {
+    fn with_capacity(ncols: usize) -> Self {
+        Self {
+            columns: Vec::with_capacity(ncols),
+            nrows: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.columns.clear();
+        self.nrows = 0;
+    }
+
+    fn replace_column(&mut self, col_index: usize, column: AnySlice<'_>) {
+        if col_index == self.columns.len() {
+            self.columns
+                .push(OdbcColumn::from_slice(column, self.nrows));
+        } else {
+            self.columns[col_index].replace_from_slice(column, self.nrows);
+        }
+    }
+
+    fn truncate_columns(&mut self, ncols: usize) {
+        self.columns.truncate(ncols);
+    }
+
+    fn cell(&self, row_index: usize, col_index: usize) -> Option<OdbcValue<'_>> {
+        self.columns[col_index].cell(row_index)
+    }
+
+    fn bytes(&self, row_index: usize, col_index: usize) -> Option<Option<&[u8]>> {
+        self.columns[col_index].bytes(row_index)
+    }
+}
+
+// A fetched ODBC batch cannot be borrowed across `fetch_next`, so the parser
+// keeps a columnar snapshot instead of a row-major `Vec<Option<OdbcCell>>`.
+// Primitive columns are copied compactly once per batch. Text, wide text, and
+// binary values are owned only in their source column until the destination
+// builder requests a `String` or `Vec<u8>`.
+enum OdbcColumn {
+    Bytes(Vec<Option<Vec<u8>>>),
+    U8(Vec<u8>),
+    I8(Vec<i8>),
+    I16(Vec<i16>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    F32(Vec<f32>),
+    F64(Vec<f64>),
+    Bool(Vec<bool>),
+    Date(Vec<Date>),
+    Time(Vec<Time>),
+    Timestamp(Vec<Timestamp>),
+    NullableU8(Vec<Option<u8>>),
+    NullableI8(Vec<Option<i8>>),
+    NullableI16(Vec<Option<i16>>),
+    NullableI32(Vec<Option<i32>>),
+    NullableI64(Vec<Option<i64>>),
+    NullableF32(Vec<Option<f32>>),
+    NullableF64(Vec<Option<f64>>),
+    NullableBool(Vec<Option<bool>>),
+    NullableDate(Vec<Option<Date>>),
+    NullableTime(Vec<Option<Time>>),
+    NullableTimestamp(Vec<Option<Timestamp>>),
+    Unsupported,
+}
+
+macro_rules! ensure_column {
+    ($method:ident, $variant:ident, $value:ty) => {
+        fn $method(&mut self) -> &mut Vec<$value> {
+            if !matches!(self, Self::$variant(_)) {
+                *self = Self::$variant(Vec::new());
+            }
+            match self {
+                Self::$variant(values) => values,
+                _ => unreachable!(),
+            }
+        }
+    };
+}
+
+impl OdbcColumn {
+    fn from_slice(column: AnySlice<'_>, nrows: usize) -> Self {
+        let mut value = Self::Unsupported;
+        value.replace_from_slice(column, nrows);
+        value
+    }
+
+    fn replace_from_slice(&mut self, column: AnySlice<'_>, nrows: usize) {
+        match column {
+            AnySlice::Text(view) => {
+                let values = self.ensure_bytes();
+                fill_byte_column(values, nrows, |row_index| view.get(row_index));
+            }
+            AnySlice::WText(view) => {
+                let values = self.ensure_bytes();
+                values.resize_with(nrows, || None);
+                for row_index in 0..nrows {
+                    match view.get(row_index) {
+                        Some(chars) => {
+                            let slot = values[row_index].get_or_insert_with(Vec::new);
+                            slot.clear();
+                            slot.extend_from_slice(String::from_utf16_lossy(chars).as_bytes());
+                        }
+                        None => values[row_index] = None,
+                    }
+                }
+                values.truncate(nrows);
+            }
+            AnySlice::Binary(view) => {
+                let values = self.ensure_bytes();
+                fill_byte_column(values, nrows, |row_index| view.get(row_index));
+            }
+            AnySlice::F64(values) => copy_slice(self.ensure_f64(), values, nrows),
+            AnySlice::F32(values) => copy_slice(self.ensure_f32(), values, nrows),
+            AnySlice::I8(values) => copy_slice(self.ensure_i8(), values, nrows),
+            AnySlice::I16(values) => copy_slice(self.ensure_i16(), values, nrows),
+            AnySlice::I32(values) => copy_slice(self.ensure_i32(), values, nrows),
+            AnySlice::I64(values) => copy_slice(self.ensure_i64(), values, nrows),
+            AnySlice::U8(values) => copy_slice(self.ensure_u8(), values, nrows),
+            AnySlice::Bit(values) => fill_from_iter(
+                self.ensure_bool(),
+                values[..nrows].iter().copied().map(bit_to_bool),
+            ),
+            AnySlice::Date(values) => copy_slice(self.ensure_date(), values, nrows),
+            AnySlice::Time(values) => copy_slice(self.ensure_time(), values, nrows),
+            AnySlice::Timestamp(values) => copy_slice(self.ensure_timestamp(), values, nrows),
+            AnySlice::NullableF64(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_f64(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableF32(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_f32(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableI8(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_i8(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableI16(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_i16(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableI32(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_i32(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableI64(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_i64(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableU8(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_u8(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableBit(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_bool(),
+                    (0..nrows).map(|row| values.get(row).copied().map(bit_to_bool)),
+                );
+            }
+            AnySlice::NullableDate(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_date(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableTime(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_time(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::NullableTimestamp(values) => {
+                fill_from_iter(
+                    self.ensure_nullable_timestamp(),
+                    (0..nrows).map(|row| values.get(row).copied()),
+                );
+            }
+            AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => *self = Self::Unsupported,
+        }
+    }
+
+    ensure_column!(ensure_bytes, Bytes, Option<Vec<u8>>);
+    ensure_column!(ensure_u8, U8, u8);
+    ensure_column!(ensure_i8, I8, i8);
+    ensure_column!(ensure_i16, I16, i16);
+    ensure_column!(ensure_i32, I32, i32);
+    ensure_column!(ensure_i64, I64, i64);
+    ensure_column!(ensure_f32, F32, f32);
+    ensure_column!(ensure_f64, F64, f64);
+    ensure_column!(ensure_bool, Bool, bool);
+    ensure_column!(ensure_date, Date, Date);
+    ensure_column!(ensure_time, Time, Time);
+    ensure_column!(ensure_timestamp, Timestamp, Timestamp);
+    ensure_column!(ensure_nullable_u8, NullableU8, Option<u8>);
+    ensure_column!(ensure_nullable_i8, NullableI8, Option<i8>);
+    ensure_column!(ensure_nullable_i16, NullableI16, Option<i16>);
+    ensure_column!(ensure_nullable_i32, NullableI32, Option<i32>);
+    ensure_column!(ensure_nullable_i64, NullableI64, Option<i64>);
+    ensure_column!(ensure_nullable_f32, NullableF32, Option<f32>);
+    ensure_column!(ensure_nullable_f64, NullableF64, Option<f64>);
+    ensure_column!(ensure_nullable_bool, NullableBool, Option<bool>);
+    ensure_column!(ensure_nullable_date, NullableDate, Option<Date>);
+    ensure_column!(ensure_nullable_time, NullableTime, Option<Time>);
+    ensure_column!(
+        ensure_nullable_timestamp,
+        NullableTimestamp,
+        Option<Timestamp>
+    );
+
+    fn cell(&self, row_index: usize) -> Option<OdbcValue<'_>> {
+        match self {
+            Self::Bytes(values) => values[row_index]
+                .as_deref()
+                .map(|bytes| OdbcValue::Bytes(Cow::Borrowed(bytes))),
+            Self::U8(values) => Some(OdbcValue::U8(values[row_index])),
+            Self::I8(values) => Some(OdbcValue::I8(values[row_index])),
+            Self::I16(values) => Some(OdbcValue::I16(values[row_index])),
+            Self::I32(values) => Some(OdbcValue::I32(values[row_index])),
+            Self::I64(values) => Some(OdbcValue::I64(values[row_index])),
+            Self::F32(values) => Some(OdbcValue::F32(values[row_index])),
+            Self::F64(values) => Some(OdbcValue::F64(values[row_index])),
+            Self::Bool(values) => Some(OdbcValue::Bool(values[row_index])),
+            Self::Date(values) => Some(OdbcValue::Date(values[row_index])),
+            Self::Time(values) => Some(OdbcValue::Time(values[row_index])),
+            Self::Timestamp(values) => Some(OdbcValue::Timestamp(values[row_index])),
+            Self::NullableU8(values) => values[row_index].map(OdbcValue::U8),
+            Self::NullableI8(values) => values[row_index].map(OdbcValue::I8),
+            Self::NullableI16(values) => values[row_index].map(OdbcValue::I16),
+            Self::NullableI32(values) => values[row_index].map(OdbcValue::I32),
+            Self::NullableI64(values) => values[row_index].map(OdbcValue::I64),
+            Self::NullableF32(values) => values[row_index].map(OdbcValue::F32),
+            Self::NullableF64(values) => values[row_index].map(OdbcValue::F64),
+            Self::NullableBool(values) => values[row_index].map(OdbcValue::Bool),
+            Self::NullableDate(values) => values[row_index].map(OdbcValue::Date),
+            Self::NullableTime(values) => values[row_index].map(OdbcValue::Time),
+            Self::NullableTimestamp(values) => values[row_index].map(OdbcValue::Timestamp),
+            Self::Unsupported => None,
+        }
+    }
+
+    fn bytes(&self, row_index: usize) -> Option<Option<&[u8]>> {
+        match self {
+            Self::Bytes(values) => Some(values[row_index].as_deref()),
+            Self::Unsupported => Some(None),
+            _ => None,
+        }
+    }
+}
+
+fn copy_slice<T: Copy>(values: &mut Vec<T>, source: &[T], nrows: usize) {
+    values.clear();
+    values.extend_from_slice(&source[..nrows]);
+}
+
+fn fill_from_iter<T>(values: &mut Vec<T>, source: impl IntoIterator<Item = T>) {
+    values.clear();
+    values.extend(source);
+}
+
+fn fill_byte_column<'a>(
+    values: &mut Vec<Option<Vec<u8>>>,
+    nrows: usize,
+    mut get: impl FnMut(usize) -> Option<&'a [u8]>,
+) {
+    values.resize_with(nrows, || None);
+    for row_index in 0..nrows {
+        match get(row_index) {
+            Some(bytes) => {
+                let slot = values[row_index].get_or_insert_with(Vec::new);
+                slot.clear();
+                slot.extend_from_slice(bytes);
+            }
+            None => values[row_index] = None,
+        }
+    }
+    values.truncate(nrows);
+}
+
 #[derive(Clone, Debug)]
-pub(crate) enum OdbcCell {
-    Bytes(Vec<u8>),
+pub(crate) enum OdbcValue<'a> {
+    Bytes(Cow<'a, [u8]>),
     U8(u8),
     I8(i8),
     I16(i16),
@@ -174,32 +475,33 @@ pub(crate) enum OdbcCell {
     Timestamp(Timestamp),
 }
 
-impl OdbcCell {
+impl OdbcValue<'_> {
+    #[allow(dead_code)]
     pub(crate) fn try_bytes(&self) -> Option<&[u8]> {
         match self {
-            OdbcCell::Bytes(bytes) => Some(bytes),
+            OdbcValue::Bytes(bytes) => Some(bytes.as_ref()),
             _ => None,
         }
     }
 
     pub(crate) fn to_utf8_string(&self) -> String {
         match self {
-            OdbcCell::Bytes(bytes) => bytes_to_string(bytes),
-            OdbcCell::U8(value) => value.to_string(),
-            OdbcCell::I8(value) => value.to_string(),
-            OdbcCell::I16(value) => value.to_string(),
-            OdbcCell::I32(value) => value.to_string(),
-            OdbcCell::I64(value) => value.to_string(),
-            OdbcCell::F32(value) => value.to_string(),
-            OdbcCell::F64(value) => value.to_string(),
-            OdbcCell::Bool(value) => value.to_string(),
-            OdbcCell::Date(value) => {
+            OdbcValue::Bytes(bytes) => bytes_to_string(bytes.as_ref()),
+            OdbcValue::U8(value) => value.to_string(),
+            OdbcValue::I8(value) => value.to_string(),
+            OdbcValue::I16(value) => value.to_string(),
+            OdbcValue::I32(value) => value.to_string(),
+            OdbcValue::I64(value) => value.to_string(),
+            OdbcValue::F32(value) => value.to_string(),
+            OdbcValue::F64(value) => value.to_string(),
+            OdbcValue::Bool(value) => value.to_string(),
+            OdbcValue::Date(value) => {
                 format!("{:04}-{:02}-{:02}", value.year, value.month, value.day)
             }
-            OdbcCell::Time(value) => {
+            OdbcValue::Time(value) => {
                 format!("{:02}:{:02}:{:02}", value.hour, value.minute, value.second)
             }
-            OdbcCell::Timestamp(value) => format!(
+            OdbcValue::Timestamp(value) => format!(
                 "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
                 value.year,
                 value.month,
@@ -296,215 +598,49 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn odbc_cell_from_column(column: AnySlice<'_>, row_index: usize) -> Option<OdbcCell> {
+pub(crate) fn odbc_cell_from_column(
+    column: AnySlice<'_>,
+    row_index: usize,
+) -> Option<OdbcValue<'_>> {
     match column {
         AnySlice::Text(view) => view
             .get(row_index)
-            .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-        AnySlice::WText(view) => view
-            .get(row_index)
-            .map(|chars| OdbcCell::Bytes(String::from_utf16_lossy(chars).into_bytes())),
+            .map(|bytes| OdbcValue::Bytes(Cow::Borrowed(bytes))),
+        AnySlice::WText(view) => view.get(row_index).map(|chars| {
+            OdbcValue::Bytes(Cow::Owned(String::from_utf16_lossy(chars).into_bytes()))
+        }),
         AnySlice::Binary(view) => view
             .get(row_index)
-            .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-        AnySlice::F64(values) => Some(OdbcCell::F64(values[row_index])),
-        AnySlice::F32(values) => Some(OdbcCell::F32(values[row_index])),
-        AnySlice::I8(values) => Some(OdbcCell::I8(values[row_index])),
-        AnySlice::I16(values) => Some(OdbcCell::I16(values[row_index])),
-        AnySlice::I32(values) => Some(OdbcCell::I32(values[row_index])),
-        AnySlice::I64(values) => Some(OdbcCell::I64(values[row_index])),
-        AnySlice::U8(values) => Some(OdbcCell::U8(values[row_index])),
-        AnySlice::Bit(values) => Some(OdbcCell::Bool(bit_to_bool(values[row_index]))),
-        AnySlice::Date(values) => Some(OdbcCell::Date(values[row_index])),
-        AnySlice::Time(values) => Some(OdbcCell::Time(values[row_index])),
-        AnySlice::Timestamp(values) => Some(OdbcCell::Timestamp(values[row_index])),
-        AnySlice::NullableF64(values) => values.get(row_index).copied().map(OdbcCell::F64),
-        AnySlice::NullableF32(values) => values.get(row_index).copied().map(OdbcCell::F32),
-        AnySlice::NullableI8(values) => values.get(row_index).copied().map(OdbcCell::I8),
-        AnySlice::NullableI16(values) => values.get(row_index).copied().map(OdbcCell::I16),
-        AnySlice::NullableI32(values) => values.get(row_index).copied().map(OdbcCell::I32),
-        AnySlice::NullableI64(values) => values.get(row_index).copied().map(OdbcCell::I64),
-        AnySlice::NullableU8(values) => values.get(row_index).copied().map(OdbcCell::U8),
+            .map(|bytes| OdbcValue::Bytes(Cow::Borrowed(bytes))),
+        AnySlice::F64(values) => Some(OdbcValue::F64(values[row_index])),
+        AnySlice::F32(values) => Some(OdbcValue::F32(values[row_index])),
+        AnySlice::I8(values) => Some(OdbcValue::I8(values[row_index])),
+        AnySlice::I16(values) => Some(OdbcValue::I16(values[row_index])),
+        AnySlice::I32(values) => Some(OdbcValue::I32(values[row_index])),
+        AnySlice::I64(values) => Some(OdbcValue::I64(values[row_index])),
+        AnySlice::U8(values) => Some(OdbcValue::U8(values[row_index])),
+        AnySlice::Bit(values) => Some(OdbcValue::Bool(bit_to_bool(values[row_index]))),
+        AnySlice::Date(values) => Some(OdbcValue::Date(values[row_index])),
+        AnySlice::Time(values) => Some(OdbcValue::Time(values[row_index])),
+        AnySlice::Timestamp(values) => Some(OdbcValue::Timestamp(values[row_index])),
+        AnySlice::NullableF64(values) => values.get(row_index).copied().map(OdbcValue::F64),
+        AnySlice::NullableF32(values) => values.get(row_index).copied().map(OdbcValue::F32),
+        AnySlice::NullableI8(values) => values.get(row_index).copied().map(OdbcValue::I8),
+        AnySlice::NullableI16(values) => values.get(row_index).copied().map(OdbcValue::I16),
+        AnySlice::NullableI32(values) => values.get(row_index).copied().map(OdbcValue::I32),
+        AnySlice::NullableI64(values) => values.get(row_index).copied().map(OdbcValue::I64),
+        AnySlice::NullableU8(values) => values.get(row_index).copied().map(OdbcValue::U8),
         AnySlice::NullableBit(values) => values
             .get(row_index)
             .copied()
             .map(bit_to_bool)
-            .map(OdbcCell::Bool),
-        AnySlice::NullableDate(values) => values.get(row_index).copied().map(OdbcCell::Date),
-        AnySlice::NullableTime(values) => values.get(row_index).copied().map(OdbcCell::Time),
+            .map(OdbcValue::Bool),
+        AnySlice::NullableDate(values) => values.get(row_index).copied().map(OdbcValue::Date),
+        AnySlice::NullableTime(values) => values.get(row_index).copied().map(OdbcValue::Time),
         AnySlice::NullableTimestamp(values) => {
-            values.get(row_index).copied().map(OdbcCell::Timestamp)
+            values.get(row_index).copied().map(OdbcValue::Timestamp)
         }
         AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => None,
-    }
-}
-
-fn fill_column_cells(
-    rowbuf: &mut [Option<OdbcCell>],
-    column: AnySlice<'_>,
-    col_index: usize,
-    num_cols: usize,
-    num_rows: usize,
-) {
-    let mut set_cell = |row_index: usize, cell: Option<OdbcCell>| {
-        rowbuf[row_index * num_cols + col_index] = cell;
-    };
-
-    match column {
-        AnySlice::Text(view) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    view.get(row_index)
-                        .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-                );
-            }
-        }
-        AnySlice::WText(view) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    view.get(row_index)
-                        .map(|chars| OdbcCell::Bytes(String::from_utf16_lossy(chars).into_bytes())),
-                );
-            }
-        }
-        AnySlice::Binary(view) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    view.get(row_index)
-                        .map(|bytes| OdbcCell::Bytes(bytes.to_vec())),
-                );
-            }
-        }
-        AnySlice::F64(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::F64(value)));
-            }
-        }
-        AnySlice::F32(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::F32(value)));
-            }
-        }
-        AnySlice::I8(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::I8(value)));
-            }
-        }
-        AnySlice::I16(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::I16(value)));
-            }
-        }
-        AnySlice::I32(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::I32(value)));
-            }
-        }
-        AnySlice::I64(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::I64(value)));
-            }
-        }
-        AnySlice::U8(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::U8(value)));
-            }
-        }
-        AnySlice::Bit(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::Bool(bit_to_bool(value))));
-            }
-        }
-        AnySlice::Date(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::Date(value)));
-            }
-        }
-        AnySlice::Time(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::Time(value)));
-            }
-        }
-        AnySlice::Timestamp(values) => {
-            for (row_index, &value) in values[..num_rows].iter().enumerate() {
-                set_cell(row_index, Some(OdbcCell::Timestamp(value)));
-            }
-        }
-        AnySlice::NullableF64(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::F64));
-            }
-        }
-        AnySlice::NullableF32(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::F32));
-            }
-        }
-        AnySlice::NullableI8(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I8));
-            }
-        }
-        AnySlice::NullableI16(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I16));
-            }
-        }
-        AnySlice::NullableI32(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I32));
-            }
-        }
-        AnySlice::NullableI64(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::I64));
-            }
-        }
-        AnySlice::NullableU8(values) => {
-            for row_index in 0..num_rows {
-                set_cell(row_index, values.get(row_index).copied().map(OdbcCell::U8));
-            }
-        }
-        AnySlice::NullableBit(values) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    values
-                        .get(row_index)
-                        .copied()
-                        .map(bit_to_bool)
-                        .map(OdbcCell::Bool),
-                );
-            }
-        }
-        AnySlice::NullableDate(values) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    values.get(row_index).copied().map(OdbcCell::Date),
-                );
-            }
-        }
-        AnySlice::NullableTime(values) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    values.get(row_index).copied().map(OdbcCell::Time),
-                );
-            }
-        }
-        AnySlice::NullableTimestamp(values) => {
-            for row_index in 0..num_rows {
-                set_cell(
-                    row_index,
-                    values.get(row_index).copied().map(OdbcCell::Timestamp),
-                );
-            }
-        }
-        AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => {}
     }
 }
 
@@ -525,142 +661,142 @@ where
     }
 }
 
-pub(crate) fn cell_u8<E>(cell: &OdbcCell) -> Result<u8, E>
+pub(crate) fn cell_u8<E>(cell: OdbcValue<'_>) -> Result<u8, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::U8(value) => Ok(*value),
-        OdbcCell::I8(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I16(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I32(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::I64(value) => u8::try_from(*value).map_err(|_| cell_parse_error(cell, "u8")),
-        OdbcCell::Bytes(bytes) => parse_u8(bytes),
-        _ => Err(cell_parse_error(cell, "u8")),
+    match &cell {
+        OdbcValue::U8(value) => Ok(*value),
+        OdbcValue::I8(value) => u8::try_from(*value).map_err(|_| cell_parse_error(&cell, "u8")),
+        OdbcValue::I16(value) => u8::try_from(*value).map_err(|_| cell_parse_error(&cell, "u8")),
+        OdbcValue::I32(value) => u8::try_from(*value).map_err(|_| cell_parse_error(&cell, "u8")),
+        OdbcValue::I64(value) => u8::try_from(*value).map_err(|_| cell_parse_error(&cell, "u8")),
+        OdbcValue::Bytes(bytes) => parse_u8(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "u8")),
     }
 }
 
-pub(crate) fn cell_i16<E>(cell: &OdbcCell) -> Result<i16, E>
+pub(crate) fn cell_i16<E>(cell: OdbcValue<'_>) -> Result<i16, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::I8(value) => Ok(i16::from(*value)),
-        OdbcCell::U8(value) => Ok(i16::from(*value)),
-        OdbcCell::I16(value) => Ok(*value),
-        OdbcCell::I32(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        OdbcCell::I64(value) => i16::try_from(*value).map_err(|_| cell_parse_error(cell, "i16")),
-        OdbcCell::Bytes(bytes) => parse_i16(bytes),
-        _ => Err(cell_parse_error(cell, "i16")),
+    match &cell {
+        OdbcValue::I8(value) => Ok(i16::from(*value)),
+        OdbcValue::U8(value) => Ok(i16::from(*value)),
+        OdbcValue::I16(value) => Ok(*value),
+        OdbcValue::I32(value) => i16::try_from(*value).map_err(|_| cell_parse_error(&cell, "i16")),
+        OdbcValue::I64(value) => i16::try_from(*value).map_err(|_| cell_parse_error(&cell, "i16")),
+        OdbcValue::Bytes(bytes) => parse_i16(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "i16")),
     }
 }
 
-pub(crate) fn cell_i32<E>(cell: &OdbcCell) -> Result<i32, E>
+pub(crate) fn cell_i32<E>(cell: OdbcValue<'_>) -> Result<i32, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::I8(value) => Ok(i32::from(*value)),
-        OdbcCell::U8(value) => Ok(i32::from(*value)),
-        OdbcCell::I16(value) => Ok(i32::from(*value)),
-        OdbcCell::I32(value) => Ok(*value),
-        OdbcCell::I64(value) => i32::try_from(*value).map_err(|_| cell_parse_error(cell, "i32")),
-        OdbcCell::Bytes(bytes) => parse_i32(bytes),
-        _ => Err(cell_parse_error(cell, "i32")),
+    match &cell {
+        OdbcValue::I8(value) => Ok(i32::from(*value)),
+        OdbcValue::U8(value) => Ok(i32::from(*value)),
+        OdbcValue::I16(value) => Ok(i32::from(*value)),
+        OdbcValue::I32(value) => Ok(*value),
+        OdbcValue::I64(value) => i32::try_from(*value).map_err(|_| cell_parse_error(&cell, "i32")),
+        OdbcValue::Bytes(bytes) => parse_i32(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "i32")),
     }
 }
 
-pub(crate) fn cell_i64<E>(cell: &OdbcCell) -> Result<i64, E>
+pub(crate) fn cell_i64<E>(cell: OdbcValue<'_>) -> Result<i64, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::I8(value) => Ok(i64::from(*value)),
-        OdbcCell::U8(value) => Ok(i64::from(*value)),
-        OdbcCell::I16(value) => Ok(i64::from(*value)),
-        OdbcCell::I32(value) => Ok(i64::from(*value)),
-        OdbcCell::I64(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_i64(bytes),
-        _ => Err(cell_parse_error(cell, "i64")),
+    match &cell {
+        OdbcValue::I8(value) => Ok(i64::from(*value)),
+        OdbcValue::U8(value) => Ok(i64::from(*value)),
+        OdbcValue::I16(value) => Ok(i64::from(*value)),
+        OdbcValue::I32(value) => Ok(i64::from(*value)),
+        OdbcValue::I64(value) => Ok(*value),
+        OdbcValue::Bytes(bytes) => parse_i64(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "i64")),
     }
 }
 
-pub(crate) fn cell_f32<E>(cell: &OdbcCell) -> Result<f32, E>
+pub(crate) fn cell_f32<E>(cell: OdbcValue<'_>) -> Result<f32, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::F32(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_f32(bytes),
-        _ => Err(cell_parse_error(cell, "f32")),
+    match &cell {
+        OdbcValue::F32(value) => Ok(*value),
+        OdbcValue::Bytes(bytes) => parse_f32(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "f32")),
     }
 }
 
-pub(crate) fn cell_f64<E>(cell: &OdbcCell) -> Result<f64, E>
+pub(crate) fn cell_f64<E>(cell: OdbcValue<'_>) -> Result<f64, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::F32(value) => Ok(f64::from(*value)),
-        OdbcCell::F64(value) => Ok(*value),
-        OdbcCell::Bytes(bytes) => parse_f64(bytes),
-        _ => Err(cell_parse_error(cell, "f64")),
+    match &cell {
+        OdbcValue::F32(value) => Ok(f64::from(*value)),
+        OdbcValue::F64(value) => Ok(*value),
+        OdbcValue::Bytes(bytes) => parse_f64(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "f64")),
     }
 }
 
-pub(crate) fn cell_bool<E>(cell: &OdbcCell) -> Result<bool, E>
+pub(crate) fn cell_bool<E>(cell: OdbcValue<'_>) -> Result<bool, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::Bool(value) => Ok(*value),
-        OdbcCell::U8(value) => Ok(*value != 0),
-        OdbcCell::I8(value) => Ok(*value != 0),
-        OdbcCell::I16(value) => Ok(*value != 0),
-        OdbcCell::I32(value) => Ok(*value != 0),
-        OdbcCell::I64(value) => Ok(*value != 0),
-        OdbcCell::Bytes(bytes) => parse_bool(bytes),
-        _ => Err(cell_parse_error(cell, "bool")),
-    }
-}
-
-#[allow(dead_code)]
-pub(crate) fn cell_date<E>(cell: &OdbcCell) -> Result<NaiveDate, E>
-where
-    E: OdbcCoreError,
-{
-    match cell {
-        OdbcCell::Date(value) => odbc_date_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_date(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDate")),
+    match &cell {
+        OdbcValue::Bool(value) => Ok(*value),
+        OdbcValue::U8(value) => Ok(*value != 0),
+        OdbcValue::I8(value) => Ok(*value != 0),
+        OdbcValue::I16(value) => Ok(*value != 0),
+        OdbcValue::I32(value) => Ok(*value != 0),
+        OdbcValue::I64(value) => Ok(*value != 0),
+        OdbcValue::Bytes(bytes) => parse_bool(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "bool")),
     }
 }
 
 #[allow(dead_code)]
-pub(crate) fn cell_time<E>(cell: &OdbcCell) -> Result<NaiveTime, E>
+pub(crate) fn cell_date<E>(cell: OdbcValue<'_>) -> Result<NaiveDate, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::Time(value) => odbc_time_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_time(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveTime")),
+    match &cell {
+        OdbcValue::Date(value) => odbc_date_to_naive(*value),
+        OdbcValue::Bytes(bytes) => parse_date(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "NaiveDate")),
     }
 }
 
 #[allow(dead_code)]
-pub(crate) fn cell_timestamp<E>(cell: &OdbcCell) -> Result<NaiveDateTime, E>
+pub(crate) fn cell_time<E>(cell: OdbcValue<'_>) -> Result<NaiveTime, E>
 where
     E: OdbcCoreError,
 {
-    match cell {
-        OdbcCell::Timestamp(value) => odbc_timestamp_to_naive(*value),
-        OdbcCell::Bytes(bytes) => parse_timestamp(bytes),
-        _ => Err(cell_parse_error(cell, "NaiveDateTime")),
+    match &cell {
+        OdbcValue::Time(value) => odbc_time_to_naive(*value),
+        OdbcValue::Bytes(bytes) => parse_time(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "NaiveTime")),
     }
 }
 
-fn cell_parse_error<E>(cell: &OdbcCell, ty: &'static str) -> E
+#[allow(dead_code)]
+pub(crate) fn cell_timestamp<E>(cell: OdbcValue<'_>) -> Result<NaiveDateTime, E>
+where
+    E: OdbcCoreError,
+{
+    match &cell {
+        OdbcValue::Timestamp(value) => odbc_timestamp_to_naive(*value),
+        OdbcValue::Bytes(bytes) => parse_timestamp(bytes.as_ref()),
+        _ => Err(cell_parse_error(&cell, "NaiveDateTime")),
+    }
+}
+
+fn cell_parse_error<E>(cell: &OdbcValue<'_>, ty: &'static str) -> E
 where
     E: OdbcCoreError,
 {
@@ -1046,10 +1182,13 @@ mod tests {
 
     #[test]
     fn formats_cells_as_strings() {
-        assert_eq!(OdbcCell::Bytes(b"hello".to_vec()).to_utf8_string(), "hello");
-        assert_eq!(OdbcCell::U8(7).to_utf8_string(), "7");
         assert_eq!(
-            OdbcCell::Date(Date {
+            OdbcValue::Bytes(Cow::Borrowed(b"hello")).to_utf8_string(),
+            "hello"
+        );
+        assert_eq!(OdbcValue::U8(7).to_utf8_string(), "7");
+        assert_eq!(
+            OdbcValue::Date(Date {
                 year: 2026,
                 month: 5,
                 day: 7,
@@ -1058,7 +1197,7 @@ mod tests {
             "2026-05-07"
         );
         assert_eq!(
-            OdbcCell::Time(Time {
+            OdbcValue::Time(Time {
                 hour: 12,
                 minute: 34,
                 second: 56,
@@ -1067,7 +1206,7 @@ mod tests {
             "12:34:56"
         );
         assert_eq!(
-            OdbcCell::Timestamp(Timestamp {
+            OdbcValue::Timestamp(Timestamp {
                 year: 2026,
                 month: 5,
                 day: 7,
@@ -1079,6 +1218,23 @@ mod tests {
             .to_utf8_string(),
             "2026-05-07 12:34:56.123456789"
         );
+    }
+
+    #[test]
+    fn columnar_batch_cells_borrow_stored_bytes() {
+        let bytes = OdbcColumn::Bytes(vec![Some(b"abc".to_vec()), None]);
+        assert_eq!(bytes.bytes(0).unwrap().unwrap(), b"abc");
+        assert!(bytes.bytes(1).unwrap().is_none());
+
+        match bytes.cell(0).unwrap() {
+            OdbcValue::Bytes(value) => assert!(matches!(value, Cow::Borrowed(b"abc"))),
+            value => panic!("unexpected value: {:?}", value),
+        }
+
+        let ints = OdbcColumn::NullableI32(vec![Some(42), None]);
+        assert_eq!(cell_i32::<TestError>(ints.cell(0).unwrap()).unwrap(), 42);
+        assert!(ints.cell(1).is_none());
+        assert!(ints.bytes(0).is_none());
     }
 }
 
@@ -1167,9 +1323,7 @@ macro_rules! impl_string_produce {
             type Error = $error;
 
             fn produce(&'r mut self) -> Result<Option<String>, $error> {
-                Ok(self
-                    .next_cell()
-                    .map($crate::sources::odbc_core::OdbcCell::to_utf8_string))
+                Ok(self.next_cell().map(|cell| cell.to_utf8_string()))
             }
         }
     };
