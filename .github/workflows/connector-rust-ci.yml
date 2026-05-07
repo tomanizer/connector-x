@@ -9,6 +9,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      target_os:
+        description: OS runner to use for a manual connector check
+        required: true
+        default: ubuntu-latest
+        type: choice
+        options:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
 
 jobs:
   connector-rust:
@@ -17,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.target_os) || '["ubuntu-latest"]') }}
 
     steps:
       - uses: actions/checkout@v6
