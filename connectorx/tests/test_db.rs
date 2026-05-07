@@ -151,15 +151,15 @@ pub fn postgres_odbc_url() -> String {
             host.as_str()
         };
 
-        set_default_env(
+        env::set_var(
             "ODBC_CONN",
-            &format!(
+            format!(
                 "Driver={{{driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
             ),
         );
-        set_default_env(
+        env::set_var(
             "ODBC_URL",
-            &format!(
+            format!(
                 "odbc://connectorx:connectorx@{host_for_url}:{port}/connectorx?driver={}",
                 urlencoding::encode(&driver)
             ),

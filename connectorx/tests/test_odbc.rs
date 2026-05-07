@@ -18,15 +18,17 @@ fn use_postgres_testcontainer() -> bool {
 }
 
 fn odbc_conn() -> Option<String> {
-    std::env::var("ODBC_CONN")
-        .ok()
-        .or_else(|| use_postgres_testcontainer().then(test_db::postgres_odbc_conn))
+    if use_postgres_testcontainer() {
+        return Some(test_db::postgres_odbc_conn());
+    }
+    std::env::var("ODBC_CONN").ok()
 }
 
 fn odbc_url() -> Option<String> {
-    std::env::var("ODBC_URL")
-        .ok()
-        .or_else(|| use_postgres_testcontainer().then(test_db::postgres_odbc_url))
+    if use_postgres_testcontainer() {
+        return Some(test_db::postgres_odbc_url());
+    }
+    std::env::var("ODBC_URL").ok()
 }
 
 fn odbc_query() -> Option<CXQuery<String>> {
