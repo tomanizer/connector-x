@@ -258,18 +258,16 @@ impl SybaseSourceParser {
     }
 
     #[throws(SybaseSourceError)]
-    fn required_cell(&mut self, ty: &'static str) -> &SybaseCell {
+    fn required_cell<T>(&mut self, ty: &'static str) -> &SybaseCell {
         let value = self.next_cell()?;
         value.ok_or_else(|| {
-            ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!(
-                "Sybase NULL for non-null {ty}"
-            )))
+            ConnectorXError::cannot_produce::<T>(Some(format!("Sybase NULL for non-null {ty}")))
         })?
     }
 
     #[throws(SybaseSourceError)]
     fn required_bytes(&mut self, ty: &'static str) -> &[u8] {
-        let value = self.required_cell(ty)?;
+        let value = self.required_cell::<Vec<u8>>(ty)?;
         value.try_bytes(ty).ok_or_else(|| {
             ConnectorXError::cannot_produce::<Vec<u8>>(Some(format!(
                 "Sybase typed value for byte-only {ty}"
@@ -473,7 +471,7 @@ macro_rules! impl_parse_from_cell {
 
             #[throws(SybaseSourceError)]
             fn produce(&'r mut self) -> $t {
-                let cell = self.required_cell($name)?;
+                let cell = self.required_cell::<$t>($name)?;
                 ($parse)(cell)?
             }
         }
@@ -504,7 +502,7 @@ impl<'r> Produce<'r, bool> for SybaseSourceParser {
 
     #[throws(SybaseSourceError)]
     fn produce(&'r mut self) -> bool {
-        cell_bool(self.required_cell("bool")?)?
+        cell_bool(self.required_cell::<bool>("bool")?)?
     }
 }
 
@@ -525,7 +523,7 @@ impl<'r> Produce<'r, String> for SybaseSourceParser {
 
     #[throws(SybaseSourceError)]
     fn produce(&'r mut self) -> String {
-        self.required_cell("String")?.to_utf8_string()
+        self.required_cell::<String>("String")?.to_utf8_string()
     }
 }
 
