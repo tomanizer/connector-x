@@ -13,7 +13,7 @@ use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{
-        odbc_common::{is_raw_odbc_conn_string, push_odbc_pair},
+        odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair},
         PartitionParser, Produce, Source, SourcePartition,
     },
     sql::{count_query, CXQuery},
@@ -285,6 +285,10 @@ impl PartitionParser<'_> for OdbcSourceParser {
 
     #[throws(OdbcSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        if self.ncols == 0 {
+            self.is_finished = true;
+            return (0, true);
+        }
         assert!(self.current_col == 0);
         let remaining_rows = self.rowbuf.len() / self.ncols - self.current_row;
         if remaining_rows > 0 {
@@ -971,6 +975,11 @@ pub fn odbc_conn_string(conn: &str) -> String {
     let username = decode(url.username())?.into_owned();
     let password = decode(url.password().unwrap_or(""))?.into_owned();
     let server_key = param_value(&params, "server_key").unwrap_or("Server");
+    if !is_valid_odbc_key(server_key) {
+        throw!(anyhow!(
+            "invalid ODBC connection-string key: {server_key:?}"
+        ));
+    }
 
     let mut ret = String::new();
     if let Some(dsn) = dsn {
@@ -998,6 +1007,9 @@ pub fn odbc_conn_string(conn: &str) -> String {
             key.to_ascii_lowercase().as_str(),
             "driver" | "dsn" | "server_key" | "cxprotocol"
         ) {
+            if !is_valid_odbc_key(key) {
+                throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
+            }
             push_odbc_pair(&mut ret, key, value);
         }
     }

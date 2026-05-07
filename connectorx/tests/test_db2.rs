@@ -47,6 +47,14 @@ fn test_db2_url_to_odbc_conn_string_keeps_raw_odbc_string() {
     assert_eq!(db2_conn_string(conn).unwrap(), conn);
 }
 
+#[test]
+fn test_db2_url_to_odbc_conn_string_rejects_invalid_keys() {
+    assert!(db2_conn_string(
+        "db2://user:pass@example.com:50000/db?driver=IBM%20DB2&Bad%3BKey=value"
+    )
+    .is_err());
+}
+
 fn basic_type_query() -> CXQuery<String> {
     CXQuery::naked(
         "select id, flag, name from ( \

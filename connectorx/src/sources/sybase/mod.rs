@@ -285,6 +285,10 @@ impl PartitionParser<'_> for SybaseSourceParser {
 
     #[throws(SybaseSourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        if self.ncols == 0 {
+            self.is_finished = true;
+            return (0, true);
+        }
         assert!(self.current_col == 0);
         let remaining_rows = self.rowbuf.len() - self.current_row;
         if remaining_rows > 0 {

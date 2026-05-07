@@ -9,6 +9,15 @@ pub(crate) fn odbc_conn_value(value: &str) -> String {
     format!("{{{}}}", value.replace('}', "}}"))
 }
 
+#[cfg(any(feature = "src_odbc", feature = "src_db2"))]
+pub(crate) fn is_valid_odbc_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.trim() == key
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b' '))
+}
+
 #[cfg(feature = "src_odbc")]
 pub(crate) fn push_odbc_pair(conn: &mut String, key: &str, value: &str) {
     conn.push_str(key);

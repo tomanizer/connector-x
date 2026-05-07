@@ -66,6 +66,14 @@ fn test_odbc_url_to_odbc_conn_string_requires_driver_or_dsn() {
 }
 
 #[test]
+fn test_odbc_url_to_odbc_conn_string_rejects_invalid_keys() {
+    assert!(odbc_conn_string("odbc://example.com/db?driver=PostgreSQL&Bad%3BKey=value").is_err());
+    assert!(
+        odbc_conn_string("odbc://example.com/db?driver=PostgreSQL&server_key=Host%3Dname").is_err()
+    );
+}
+
+#[test]
 fn test_odbc_url_to_odbc_conn_string_keeps_raw_odbc_string() {
     let conn = "Driver={SQLite3};Database=/tmp/test.db;";
     assert_eq!(odbc_conn_string(conn).unwrap(), conn);

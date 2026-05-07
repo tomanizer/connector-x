@@ -13,7 +13,7 @@ use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{
-        odbc_common::{is_raw_odbc_conn_string, odbc_conn_value},
+        odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, odbc_conn_value},
         PartitionParser, Produce, Source, SourcePartition,
     },
     sql::{count_query, CXQuery},
@@ -285,6 +285,10 @@ impl PartitionParser<'_> for Db2SourceParser {
 
     #[throws(Db2SourceError)]
     fn fetch_next(&mut self) -> (usize, bool) {
+        if self.ncols == 0 {
+            self.is_finished = true;
+            return (0, true);
+        }
         assert!(self.current_col == 0);
         let remaining_rows = self.rowbuf.len() / self.ncols - self.current_row;
         if remaining_rows > 0 {
@@ -991,6 +995,9 @@ pub fn db2_conn_string(conn: &str) -> String {
             key.as_str(),
             "driver" | "Driver" | "protocol" | "Protocol" | "cxprotocol"
         ) {
+            if !is_valid_odbc_key(&key) {
+                throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
+            }
             ret.push_str(&format!("{}={};", key, odbc_conn_value(&value)));
         }
     }
