@@ -1,3 +1,9 @@
+//! Shared ODBC source machinery for generic ODBC, Db2, and Sybase.
+//!
+//! Backends provide connection-string handling, SQL dialects, error conversion, and
+//! buffer/type policy. This module owns the common ODBC execution, metadata,
+//! row-buffer parsing, primitive conversion, count, and partition helpers.
+
 use std::{convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError};
 
 use anyhow::anyhow;
@@ -69,15 +75,15 @@ where
         }
     }
 
-    pub(crate) fn next_cell(&mut self) -> Result<Option<&OdbcCell>, E> {
+    pub(crate) fn next_cell(&mut self) -> Option<&OdbcCell> {
         let cell_index = self.current_cell;
         self.current_cell += 1;
-        Ok(self.rowbuf[cell_index].as_ref())
+        self.rowbuf[cell_index].as_ref()
     }
 
     pub(crate) fn next_bytes<T>(&mut self) -> Result<Option<&[u8]>, E> {
         let source_name = self.source_name;
-        match self.next_cell()? {
+        match self.next_cell() {
             Some(cell) => Ok(Some(cell.try_bytes().ok_or_else(|| {
                 ConnectorXError::cannot_produce::<T>(Some(format!(
                     "{source_name} typed value for byte-only parser"
@@ -89,7 +95,7 @@ where
 
     pub(crate) fn required_cell<T>(&mut self, ty: &'static str) -> Result<&OdbcCell, E> {
         let source_name = self.source_name;
-        let value = self.next_cell()?;
+        let value = self.next_cell();
         Ok(value.ok_or_else(|| {
             ConnectorXError::cannot_produce::<T>(Some(format!(
                 "{source_name} NULL for non-null {ty}"
@@ -234,9 +240,15 @@ where
         return Err(anyhow!("ODBC returned negative column count: {}", ncols).into());
     }
 
+    let ncols = u16::try_from(ncols).map_err(|_| {
+        anyhow!(
+            "ODBC returned too many columns for u16 metadata index: {}",
+            ncols
+        )
+    })?;
     let mut names = Vec::with_capacity(ncols as usize);
     let mut schema = Vec::with_capacity(ncols as usize);
-    for col in 1..=ncols as u16 {
+    for col in 1..=ncols {
         names.push(cursor.col_name(col)?);
         let ty = cursor.col_data_type(col)?;
         let nullability = cursor.col_nullability(col)?;
@@ -889,6 +901,187 @@ where
     Ok(value)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug)]
+    enum TestError {
+        ParseValue { value: String, ty: &'static str },
+        Other(String),
+    }
+
+    impl OdbcCoreError for TestError {
+        fn get_nrows_failed() -> Self {
+            Self::Other("get nrows failed".to_string())
+        }
+
+        fn no_result_set(query: String) -> Self {
+            Self::Other(format!("no result set: {query}"))
+        }
+
+        fn parse_value(value: String, ty: &'static str) -> Self {
+            Self::ParseValue { value, ty }
+        }
+    }
+
+    impl From<ConnectorXError> for TestError {
+        fn from(value: ConnectorXError) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    impl From<odbc_api::Error> for TestError {
+        fn from(value: odbc_api::Error) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    impl From<anyhow::Error> for TestError {
+        fn from(value: anyhow::Error) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    impl From<ParseFloatError> for TestError {
+        fn from(value: ParseFloatError) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    impl From<DecimalParseError> for TestError {
+        fn from(value: DecimalParseError) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    impl From<chrono::ParseError> for TestError {
+        fn from(value: chrono::ParseError) -> Self {
+            Self::Other(value.to_string())
+        }
+    }
+
+    fn parse_value_error<T>(result: Result<T, TestError>) -> (String, &'static str) {
+        match result {
+            Err(TestError::ParseValue { value, ty }) => (value, ty),
+            Err(TestError::Other(value)) => panic!("unexpected error: {}", value),
+            Ok(_) => panic!("expected parse error"),
+        }
+    }
+
+    #[test]
+    fn trims_ascii_whitespace() {
+        assert_eq!(trim_ascii(b" \t\r\n42 \n"), b"42");
+        assert_eq!(trim_ascii(b" \t "), b"");
+    }
+
+    #[test]
+    fn compares_ascii_case_insensitively() {
+        assert!(eq_ascii_ignore_case(b"TRUE", b"true"));
+        assert!(!eq_ascii_ignore_case(b"truth", b"true"));
+    }
+
+    #[test]
+    fn parses_bool_variants() {
+        assert!(parse_bool::<TestError>(b" true ").unwrap());
+        assert!(parse_bool::<TestError>(b"1").unwrap());
+        assert!(!parse_bool::<TestError>(b"FALSE").unwrap());
+        assert!(!parse_bool::<TestError>(b"0").unwrap());
+
+        let (value, ty) = parse_value_error(parse_bool::<TestError>(b"maybe"));
+        assert_eq!(value, "maybe");
+        assert_eq!(ty, "bool");
+    }
+
+    #[test]
+    fn parses_i64_with_overflow_detection() {
+        assert_eq!(
+            parse_i64_with_ty::<TestError>(b" -42 ", "i64").unwrap(),
+            -42
+        );
+        assert_eq!(parse_i64_with_ty::<TestError>(b"+42", "i64").unwrap(), 42);
+
+        let (_, ty) = parse_value_error(parse_i64_with_ty::<TestError>(
+            b"9223372036854775808",
+            "i64",
+        ));
+        assert_eq!(ty, "i64");
+    }
+
+    #[test]
+    fn parses_numeric_and_temporal_values() {
+        assert_eq!(parse_u8::<TestError>(b"255").unwrap(), 255);
+        assert_eq!(parse_i16::<TestError>(b"-12").unwrap(), -12);
+        assert_eq!(parse_i32::<TestError>(b"1234").unwrap(), 1234);
+        assert_eq!(parse_i64::<TestError>(b"-1234").unwrap(), -1234);
+        assert_eq!(parse_f32::<TestError>(b"1.5").unwrap(), 1.5);
+        assert_eq!(parse_f64::<TestError>(b"1.25").unwrap(), 1.25);
+        assert_eq!(
+            parse_decimal::<TestError>(b"123.45").unwrap(),
+            "123.45".parse::<Decimal>().unwrap()
+        );
+        assert_eq!(
+            parse_date::<TestError>(b"2026-05-07").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 5, 7).unwrap()
+        );
+        assert_eq!(
+            parse_time::<TestError>(b"12:34:56.123456").unwrap(),
+            NaiveTime::from_hms_micro_opt(12, 34, 56, 123456).unwrap()
+        );
+        assert_eq!(
+            parse_timestamp::<TestError>(b"2026-05-07 12:34:56.123456").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 5, 7)
+                .unwrap()
+                .and_hms_micro_opt(12, 34, 56, 123456)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn parses_partition_values() {
+        assert_eq!(parse_partition_value::<TestError>(b"").unwrap(), 0);
+        assert_eq!(parse_partition_value::<TestError>(b"42").unwrap(), 42);
+        assert_eq!(parse_partition_value::<TestError>(b"42.9").unwrap(), 42);
+    }
+
+    #[test]
+    fn formats_cells_as_strings() {
+        assert_eq!(OdbcCell::Bytes(b"hello".to_vec()).to_utf8_string(), "hello");
+        assert_eq!(OdbcCell::U8(7).to_utf8_string(), "7");
+        assert_eq!(
+            OdbcCell::Date(Date {
+                year: 2026,
+                month: 5,
+                day: 7,
+            })
+            .to_utf8_string(),
+            "2026-05-07"
+        );
+        assert_eq!(
+            OdbcCell::Time(Time {
+                hour: 12,
+                minute: 34,
+                second: 56,
+            })
+            .to_utf8_string(),
+            "12:34:56"
+        );
+        assert_eq!(
+            OdbcCell::Timestamp(Timestamp {
+                year: 2026,
+                month: 5,
+                day: 7,
+                hour: 12,
+                minute: 34,
+                second: 56,
+                fraction: 123456789,
+            })
+            .to_utf8_string(),
+            "2026-05-07 12:34:56.123456789"
+        );
+    }
+}
+
 macro_rules! impl_parse_from_bytes {
     ($parser:ty, $error:ty, $t:ty, $name:literal, $parse:ident) => {
         impl<'r> $crate::sources::Produce<'r, $t> for $parser {
@@ -928,7 +1121,7 @@ macro_rules! impl_parse_from_cell {
             type Error = $error;
 
             fn produce(&'r mut self) -> Result<Option<$t>, $error> {
-                match self.next_cell()? {
+                match self.next_cell() {
                     Some(cell) => Ok(Some($crate::sources::odbc_core::$parse::<$error>(cell)?)),
                     None => Ok(None),
                 }
@@ -951,7 +1144,7 @@ macro_rules! impl_bool_produce {
             type Error = $error;
 
             fn produce(&'r mut self) -> Result<Option<bool>, $error> {
-                match self.next_cell()? {
+                match self.next_cell() {
                     Some(cell) => Ok(Some($crate::sources::odbc_core::cell_bool::<$error>(cell)?)),
                     None => Ok(None),
                 }
@@ -975,7 +1168,7 @@ macro_rules! impl_string_produce {
 
             fn produce(&'r mut self) -> Result<Option<String>, $error> {
                 Ok(self
-                    .next_cell()?
+                    .next_cell()
                     .map($crate::sources::odbc_core::OdbcCell::to_utf8_string))
             }
         }

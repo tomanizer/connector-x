@@ -266,7 +266,7 @@ pub(crate) fn odbc_get_arrow(
 
 #[cfg(feature = "dst_arrow")]
 fn odbc_arrow_type(ty: OdbcTypeSystem) -> ArrowTypeSystem {
-    let nullable = (ty).nullable();
+    let nullable = ty.nullable();
     match ty {
         OdbcTypeSystem::TinyInt(_)
         | OdbcTypeSystem::SmallInt(_)
@@ -333,20 +333,20 @@ fn odbc_arrow_array(
         OdbcTypeSystem::TinyInt(_)
         | OdbcTypeSystem::SmallInt(_)
         | OdbcTypeSystem::Int(_)
-        | OdbcTypeSystem::BigInt(_) => odbc_int64_array(column, nrows, (ty).nullable()),
-        OdbcTypeSystem::Real(_) => odbc_float32_array(column, nrows, (ty).nullable()),
-        OdbcTypeSystem::Double(_) => odbc_float64_array(column, nrows, (ty).nullable()),
+        | OdbcTypeSystem::BigInt(_) => odbc_int64_array(column, nrows, ty.nullable()),
+        OdbcTypeSystem::Real(_) => odbc_float32_array(column, nrows, ty.nullable()),
+        OdbcTypeSystem::Double(_) => odbc_float64_array(column, nrows, ty.nullable()),
         OdbcTypeSystem::Numeric(_) | OdbcTypeSystem::Decimal(_) => {
-            odbc_decimal_array(column, nrows, (ty).nullable())
+            odbc_decimal_array(column, nrows, ty.nullable())
         }
-        OdbcTypeSystem::Bit(_) => odbc_bool_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Bit(_) => odbc_bool_array(column, nrows, ty.nullable()),
         OdbcTypeSystem::Char(_) | OdbcTypeSystem::Varchar(_) | OdbcTypeSystem::Text(_) => {
-            odbc_string_array(column, nrows, (ty).nullable())
+            odbc_string_array(column, nrows, ty.nullable())
         }
-        OdbcTypeSystem::Binary(_) => odbc_binary_array(column, nrows, (ty).nullable()),
-        OdbcTypeSystem::Date(_) => odbc_date32_array(column, nrows, (ty).nullable()),
-        OdbcTypeSystem::Time(_) => odbc_time64_micro_array(column, nrows, (ty).nullable()),
-        OdbcTypeSystem::Timestamp(_) => odbc_timestamp_micro_array(column, nrows, (ty).nullable()),
+        OdbcTypeSystem::Binary(_) => odbc_binary_array(column, nrows, ty.nullable()),
+        OdbcTypeSystem::Date(_) => odbc_date32_array(column, nrows, ty.nullable()),
+        OdbcTypeSystem::Time(_) => odbc_time64_micro_array(column, nrows, ty.nullable()),
+        OdbcTypeSystem::Timestamp(_) => odbc_timestamp_micro_array(column, nrows, ty.nullable()),
     }
 }
 
