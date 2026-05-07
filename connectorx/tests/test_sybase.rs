@@ -14,7 +14,7 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::sybase::SybaseSource,
+    sources::sybase::{sybase_conn_string, SybaseSource},
     sql::CXQuery,
     transports::SybaseArrowTransport,
 };
@@ -25,6 +25,38 @@ fn sybase_odbc_conn() -> Option<String> {
 
 fn sybase_url() -> Option<String> {
     std::env::var("SYBASE_URL").ok()
+}
+
+#[test]
+fn test_sybase_url_to_odbc_conn_string_escapes_values() {
+    let conn = sybase_conn_string(
+        "sybase://user%3Bname:pa%3Dss%7Dword@example.com:5000/db%3Bname?driver=Free%7DTDS&tds_version=5.0%3Bfoo",
+    )
+    .unwrap();
+
+    assert_eq!(
+        conn,
+        "Driver={Free}}TDS};Server={example.com};Port=5000;TDS_Version={5.0;foo};UID={user;name};PWD={pa=ss}}word};Database={db;name};"
+    );
+}
+
+#[test]
+fn test_sybase_url_to_odbc_conn_string_keeps_raw_odbc_string() {
+    let conn = "Driver=/opt/libtdsodbc.so;Server=127.0.0.1;Port=5000;UID=sa;PWD=sybase;";
+    assert_eq!(sybase_conn_string(conn).unwrap(), conn);
+}
+
+#[test]
+fn test_sybase_url_to_odbc_conn_string_braces_encoded_driver_path() {
+    let conn = sybase_conn_string(
+        "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=%2Fopt%2Fhomebrew%2Flib%2Flibtdsodbc.so",
+    )
+    .unwrap();
+
+    assert_eq!(
+        conn,
+        "Driver={/opt/homebrew/lib/libtdsodbc.so};Server={127.0.0.1};Port=5000;TDS_Version={5.0};UID={sa};PWD={sybase};Database={tempdb};"
+    );
 }
 
 fn basic_type_query() -> CXQuery<String> {

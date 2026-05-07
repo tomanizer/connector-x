@@ -882,6 +882,10 @@ fn parse_i64_with_ty(bytes: &[u8], ty: &'static str) -> Result<i64, SybaseSource
     Ok(value)
 }
 
+fn odbc_conn_value(value: &str) -> String {
+    format!("{{{}}}", value.replace('}', "}}"))
+}
+
 #[throws(SybaseSourceError)]
 pub fn sybase_conn_string(conn: &str) -> String {
     if conn
@@ -915,10 +919,15 @@ pub fn sybase_conn_string(conn: &str) -> String {
 
     let mut ret = format!(
         "Driver={};Server={};Port={};TDS_Version={};UID={};PWD={};",
-        driver, host, port, tds_version, username, password
+        odbc_conn_value(&driver),
+        odbc_conn_value(&host),
+        port,
+        odbc_conn_value(&tds_version),
+        odbc_conn_value(&username),
+        odbc_conn_value(&password)
     );
     if !database.is_empty() {
-        ret.push_str(&format!("Database={};", database));
+        ret.push_str(&format!("Database={};", odbc_conn_value(&database)));
     }
     ret
 }
