@@ -74,20 +74,25 @@ where
         }
     }
 
-    fn next_position(&mut self) -> (usize, usize) {
+    fn next_position(&mut self) -> Option<(usize, usize)> {
+        if self.ncols == 0 {
+            return None;
+        }
         let cell_index = self.current_cell;
         self.current_cell += 1;
-        (cell_index / self.ncols, cell_index % self.ncols)
+        Some((cell_index / self.ncols, cell_index % self.ncols))
     }
 
     pub(crate) fn next_cell(&mut self) -> Option<OdbcValue<'_>> {
-        let (row_index, col_index) = self.next_position();
+        let (row_index, col_index) = self.next_position()?;
         self.batch.cell(row_index, col_index)
     }
 
     pub(crate) fn next_bytes<T>(&mut self) -> Result<Option<&[u8]>, E> {
         let source_name = self.source_name;
-        let (row_index, col_index) = self.next_position();
+        let Some((row_index, col_index)) = self.next_position() else {
+            return Ok(None);
+        };
         match self.batch.bytes(row_index, col_index) {
             Some(bytes) => Ok(bytes),
             None => Err(ConnectorXError::cannot_produce::<T>(Some(format!(
@@ -267,12 +272,15 @@ impl OdbcColumn {
                         Some(chars) => {
                             let slot = values[row_index].get_or_insert_with(Vec::new);
                             slot.clear();
-                            slot.extend_from_slice(String::from_utf16_lossy(chars).as_bytes());
+                            for item in std::char::decode_utf16(chars.iter().copied()) {
+                                let ch = item.unwrap_or(std::char::REPLACEMENT_CHARACTER);
+                                let mut bytes = [0; 4];
+                                slot.extend_from_slice(ch.encode_utf8(&mut bytes).as_bytes());
+                            }
                         }
                         None => values[row_index] = None,
                     }
                 }
-                values.truncate(nrows);
             }
             AnySlice::Binary(view) => {
                 let values = self.ensure_bytes();
@@ -392,38 +400,65 @@ impl OdbcColumn {
 
     fn cell(&self, row_index: usize) -> Option<OdbcValue<'_>> {
         match self {
-            Self::Bytes(values) => values[row_index]
-                .as_deref()
+            Self::Bytes(values) => values
+                .get(row_index)
+                .and_then(Option::as_deref)
                 .map(|bytes| OdbcValue::Bytes(Cow::Borrowed(bytes))),
-            Self::U8(values) => Some(OdbcValue::U8(values[row_index])),
-            Self::I8(values) => Some(OdbcValue::I8(values[row_index])),
-            Self::I16(values) => Some(OdbcValue::I16(values[row_index])),
-            Self::I32(values) => Some(OdbcValue::I32(values[row_index])),
-            Self::I64(values) => Some(OdbcValue::I64(values[row_index])),
-            Self::F32(values) => Some(OdbcValue::F32(values[row_index])),
-            Self::F64(values) => Some(OdbcValue::F64(values[row_index])),
-            Self::Bool(values) => Some(OdbcValue::Bool(values[row_index])),
-            Self::Date(values) => Some(OdbcValue::Date(values[row_index])),
-            Self::Time(values) => Some(OdbcValue::Time(values[row_index])),
-            Self::Timestamp(values) => Some(OdbcValue::Timestamp(values[row_index])),
-            Self::NullableU8(values) => values[row_index].map(OdbcValue::U8),
-            Self::NullableI8(values) => values[row_index].map(OdbcValue::I8),
-            Self::NullableI16(values) => values[row_index].map(OdbcValue::I16),
-            Self::NullableI32(values) => values[row_index].map(OdbcValue::I32),
-            Self::NullableI64(values) => values[row_index].map(OdbcValue::I64),
-            Self::NullableF32(values) => values[row_index].map(OdbcValue::F32),
-            Self::NullableF64(values) => values[row_index].map(OdbcValue::F64),
-            Self::NullableBool(values) => values[row_index].map(OdbcValue::Bool),
-            Self::NullableDate(values) => values[row_index].map(OdbcValue::Date),
-            Self::NullableTime(values) => values[row_index].map(OdbcValue::Time),
-            Self::NullableTimestamp(values) => values[row_index].map(OdbcValue::Timestamp),
+            Self::U8(values) => values.get(row_index).copied().map(OdbcValue::U8),
+            Self::I8(values) => values.get(row_index).copied().map(OdbcValue::I8),
+            Self::I16(values) => values.get(row_index).copied().map(OdbcValue::I16),
+            Self::I32(values) => values.get(row_index).copied().map(OdbcValue::I32),
+            Self::I64(values) => values.get(row_index).copied().map(OdbcValue::I64),
+            Self::F32(values) => values.get(row_index).copied().map(OdbcValue::F32),
+            Self::F64(values) => values.get(row_index).copied().map(OdbcValue::F64),
+            Self::Bool(values) => values.get(row_index).copied().map(OdbcValue::Bool),
+            Self::Date(values) => values.get(row_index).copied().map(OdbcValue::Date),
+            Self::Time(values) => values.get(row_index).copied().map(OdbcValue::Time),
+            Self::Timestamp(values) => values.get(row_index).copied().map(OdbcValue::Timestamp),
+            Self::NullableU8(values) => values.get(row_index).copied().flatten().map(OdbcValue::U8),
+            Self::NullableI8(values) => values.get(row_index).copied().flatten().map(OdbcValue::I8),
+            Self::NullableI16(values) => {
+                values.get(row_index).copied().flatten().map(OdbcValue::I16)
+            }
+            Self::NullableI32(values) => {
+                values.get(row_index).copied().flatten().map(OdbcValue::I32)
+            }
+            Self::NullableI64(values) => {
+                values.get(row_index).copied().flatten().map(OdbcValue::I64)
+            }
+            Self::NullableF32(values) => {
+                values.get(row_index).copied().flatten().map(OdbcValue::F32)
+            }
+            Self::NullableF64(values) => {
+                values.get(row_index).copied().flatten().map(OdbcValue::F64)
+            }
+            Self::NullableBool(values) => values
+                .get(row_index)
+                .copied()
+                .flatten()
+                .map(OdbcValue::Bool),
+            Self::NullableDate(values) => values
+                .get(row_index)
+                .copied()
+                .flatten()
+                .map(OdbcValue::Date),
+            Self::NullableTime(values) => values
+                .get(row_index)
+                .copied()
+                .flatten()
+                .map(OdbcValue::Time),
+            Self::NullableTimestamp(values) => values
+                .get(row_index)
+                .copied()
+                .flatten()
+                .map(OdbcValue::Timestamp),
             Self::Unsupported => None,
         }
     }
 
     fn bytes(&self, row_index: usize) -> Option<Option<&[u8]>> {
         match self {
-            Self::Bytes(values) => Some(values[row_index].as_deref()),
+            Self::Bytes(values) => Some(values.get(row_index).and_then(Option::as_deref)),
             Self::Unsupported => Some(None),
             _ => None,
         }
@@ -456,11 +491,12 @@ fn fill_byte_column<'a>(
             None => values[row_index] = None,
         }
     }
-    values.truncate(nrows);
 }
 
 #[derive(Clone, Debug)]
 pub(crate) enum OdbcValue<'a> {
+    // The parser's columnar batch path always yields `Borrowed` bytes. The
+    // Arrow fallback may produce `Owned` bytes when converting WText rows.
     Bytes(Cow<'a, [u8]>),
     U8(u8),
     I8(i8),
@@ -1235,6 +1271,20 @@ mod tests {
         assert_eq!(cell_i32::<TestError>(ints.cell(0).unwrap()).unwrap(), 42);
         assert!(ints.cell(1).is_none());
         assert!(ints.bytes(0).is_none());
+    }
+
+    #[test]
+    fn byte_column_reuses_existing_slot_capacity() {
+        let mut values = Vec::new();
+        fill_byte_column(&mut values, 1, |_| Some(b"abcdef"));
+        let first_ptr = values[0].as_ref().unwrap().as_ptr();
+        let first_capacity = values[0].as_ref().unwrap().capacity();
+
+        fill_byte_column(&mut values, 1, |_| Some(b"abc"));
+        let slot = values[0].as_ref().unwrap();
+        assert_eq!(slot, b"abc");
+        assert_eq!(slot.as_ptr(), first_ptr);
+        assert_eq!(slot.capacity(), first_capacity);
     }
 }
 
