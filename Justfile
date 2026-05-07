@@ -23,11 +23,15 @@ test-feature-gate:
     cargo c --features src_postgres
     cargo c --features src_mysql
     cargo c --features src_mssql
+    cargo c --features src_sybase
     cargo c --features src_sqlite
     cargo c --features src_oracle
     cargo c --features src_trino
     cargo c --features src_clickhouse
     cargo c --features dst_arrow
+
+bench-sybase-odbc:
+    cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
 
 cleanup:
     cargo clean
