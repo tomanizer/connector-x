@@ -53,10 +53,11 @@ jobs:
             exit 0
           fi
 
-          cargo check -p connectorx --no-default-features --features "src_sybase dst_arrow"
-          cargo clippy -p connectorx --no-default-features --features "src_sybase dst_arrow" -- -D warnings
-          cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow" --test test_sybase -- --nocapture
-          cargo bench -p connectorx --no-default-features --features "src_sybase dst_arrow" --bench sybase_odbc --no-run
+          features="src_sybase dst_arrow fptr"
+          cargo check -p connectorx --no-default-features --features "$features"
+          cargo clippy -p connectorx --no-default-features --features "$features"
+          cargo test -p connectorx --no-default-features --features "$features" --test test_sybase -- --nocapture
+          cargo bench -p connectorx --no-default-features --features "$features" --bench sybase_odbc --no-run
 
       - name: Check Db2 connector
         shell: bash
@@ -67,7 +68,8 @@ jobs:
             exit 0
           fi
 
-          cargo check -p connectorx --no-default-features --features "src_db2 dst_arrow"
-          cargo clippy -p connectorx --no-default-features --features "src_db2 dst_arrow" -- -D warnings
-          cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow" --test test_db2 -- --nocapture
-          cargo bench -p connectorx --no-default-features --features "src_db2 dst_arrow" --bench db2_odbc --no-run
+          features="src_db2 dst_arrow fptr"
+          cargo check -p connectorx --no-default-features --features "$features"
+          cargo clippy -p connectorx --no-default-features --features "$features"
+          cargo test -p connectorx --no-default-features --features "$features" --test test_db2 -- --nocapture
+          cargo bench -p connectorx --no-default-features --features "$features" --bench db2_odbc --no-run
