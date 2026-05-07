@@ -14,7 +14,7 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::db2::Db2Source,
+    sources::db2::{db2_conn_string, Db2Source},
     sql::CXQuery,
     transports::Db2ArrowTransport,
 };
@@ -25,6 +25,26 @@ fn db2_odbc_conn() -> Option<String> {
 
 fn db2_url() -> Option<String> {
     std::env::var("DB2_URL").ok()
+}
+
+#[test]
+fn test_db2_url_to_odbc_conn_string_escapes_values() {
+    let conn = db2_conn_string(
+        "db2://user%3Bname:pa%3Dss%7Dword@example.com:50000/db%3Bname?driver=IBM%7DDB2&protocol=TCPIP%3Bfoo",
+    )
+    .unwrap();
+
+    assert_eq!(
+        conn,
+        "Driver={IBM}}DB2};Hostname={example.com};Port=50000;Protocol={TCPIP;foo};UID={user;name};PWD={pa=ss}}word};Database={db;name};"
+    );
+}
+
+#[test]
+fn test_db2_url_to_odbc_conn_string_keeps_raw_odbc_string() {
+    let conn =
+        "Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;UID=db2inst1;PWD=password;";
+    assert_eq!(db2_conn_string(conn).unwrap(), conn);
 }
 
 fn basic_type_query() -> CXQuery<String> {

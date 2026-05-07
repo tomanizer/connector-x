@@ -13,6 +13,7 @@ chapters:
     - file: databases/db2
     - file: databases/mssql
     - file: databases/mysql
+    - file: databases/odbc
     - file: databases/oracle
     - file: databases/postgres
     - file: databases/sqlite

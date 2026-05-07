@@ -105,7 +105,7 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] Oracle
 - [x] Big Query
 - [x] Trino
-- [ ] ODBC (WIP)
+- [x] ODBC
 - [ ] ...
 
 ## Destinations

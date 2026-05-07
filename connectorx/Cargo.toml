@@ -116,6 +116,7 @@ all = [
   "src_mssql",
   "src_sybase",
   "src_db2",
+  "src_odbc",
   "src_oracle",
   "src_bigquery",
   "src_csv",
@@ -151,6 +152,7 @@ src_mssql = [
 ]
 src_sybase = ["odbc-api", "rust_decimal", "num-traits", "urlencoding"]
 src_db2 = ["odbc-api", "rust_decimal", "num-traits", "urlencoding"]
+src_odbc = ["odbc-api", "rust_decimal", "num-traits", "urlencoding"]
 src_mysql = ["r2d2_mysql", "mysql_common", "rust_decimal", "num-traits", "r2d2"]
 src_oracle = ["oracle", "r2d2-oracle", "r2d2", "urlencoding", "rust_decimal"]
 src_postgres = [

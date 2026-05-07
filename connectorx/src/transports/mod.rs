@@ -26,6 +26,10 @@ mod mssql_arrowstream;
 mod mysql_arrow;
 #[cfg(all(feature = "src_mysql", feature = "dst_arrow"))]
 mod mysql_arrowstream;
+#[cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
+mod odbc_arrow;
+#[cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
+mod odbc_arrowstream;
 #[cfg(all(feature = "src_oracle", feature = "dst_arrow"))]
 mod oracle_arrow;
 #[cfg(all(feature = "src_oracle", feature = "dst_arrow"))]
@@ -84,6 +88,13 @@ pub use mysql_arrow::{MySQLArrowTransport, MySQLArrowTransportError};
 pub use mysql_arrowstream::{
     MySQLArrowTransport as MySQLArrowStreamTransport,
     MySQLArrowTransportError as MySQLArrowStreamTransportError,
+};
+#[cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
+pub use odbc_arrow::{OdbcArrowTransport, OdbcArrowTransportError};
+#[cfg(all(feature = "src_odbc", feature = "dst_arrow"))]
+pub use odbc_arrowstream::{
+    OdbcArrowTransport as OdbcArrowStreamTransport,
+    OdbcArrowTransportError as OdbcArrowStreamTransportError,
 };
 #[cfg(all(feature = "src_oracle", feature = "dst_arrow"))]
 pub use oracle_arrow::{OracleArrowTransport, OracleArrowTransportError};
