@@ -14,6 +14,7 @@ use testcontainers::{
 };
 
 static POSTGRES_INIT: Once = Once::new();
+static POSTGRES_ODBC_INIT: Once = Once::new();
 static MYSQL_INIT: Once = Once::new();
 static MSSQL_INIT: Once = Once::new();
 static TRINO_INIT: Once = Once::new();
@@ -47,6 +48,12 @@ fn wait_for_tcp_ready(host: &str, port: u16, timeout: Duration, label: &str) {
         }
 
         thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn set_default_env(name: &str, value: &str) {
+    if env::var(name).is_err() {
+        env::set_var(name, value);
     }
 }
 
@@ -91,6 +98,84 @@ pub fn postgres_url() -> String {
     });
 
     env::var("POSTGRES_URL").expect("POSTGRES_URL must be set")
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn postgres_odbc_url() -> String {
+    POSTGRES_ODBC_INIT.call_once(|| {
+        set_default_env(
+            "ODBC_TEST_QUERY",
+            "select id, flag, name from cx_odbc_test order by id",
+        );
+        set_default_env(
+            "ODBC_PARTITION_QUERY",
+            "select id, flag, name from cx_odbc_test",
+        );
+        set_default_env("ODBC_PARTITION_COLUMN", "id");
+        set_default_env("ODBC_EXPECTED_ROWS", "2");
+
+        if env::var("ODBC_URL").is_ok() && env::var("ODBC_CONN").is_ok() {
+            return;
+        }
+
+        let driver = env::var("ODBC_POSTGRES_DRIVER")
+            .unwrap_or_else(|_| "PostgreSQL Unicode".to_string());
+        let init_script = scripts_dir().join("odbc_postgres.sql");
+        let image = GenericImage::new("postgres", "16")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stdout(
+                "PostgreSQL init process complete; ready for start up.",
+            ))
+            .with_startup_timeout(Duration::from_secs(180))
+            .with_env_var("POSTGRES_USER", "connectorx")
+            .with_env_var("POSTGRES_PASSWORD", "connectorx")
+            .with_env_var("POSTGRES_DB", "connectorx")
+            .with_mount(Mount::bind_mount(
+                init_script.to_string_lossy().into_owned(),
+                "/docker-entrypoint-initdb.d/odbc_postgres.sql".to_string(),
+            ));
+
+        let container = image.start().expect("start postgres odbc testcontainer");
+        let host = container
+            .get_host()
+            .expect("get postgres odbc container host")
+            .to_string();
+        let port = container
+            .get_host_port_ipv4(5432)
+            .expect("get postgres odbc exposed port");
+
+        wait_for_tcp_ready(&host, port, Duration::from_secs(180), "postgres odbc");
+        let host_for_url = if host.eq_ignore_ascii_case("localhost") {
+            "127.0.0.1"
+        } else {
+            host.as_str()
+        };
+
+        set_default_env(
+            "ODBC_CONN",
+            &format!(
+                "Driver={{{driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
+            ),
+        );
+        set_default_env(
+            "ODBC_URL",
+            &format!(
+                "odbc://connectorx:connectorx@{host_for_url}:{port}/connectorx?driver={}",
+                urlencoding::encode(&driver)
+            ),
+        );
+
+        // Keep the container alive for the test process lifetime.
+        std::mem::forget(container);
+    });
+
+    env::var("ODBC_URL").expect("ODBC_URL must be set")
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn postgres_odbc_conn() -> String {
+    let _ = postgres_odbc_url();
+    env::var("ODBC_CONN").expect("ODBC_CONN must be set")
 }
 
 #[cfg(feature = "src_mysql")]

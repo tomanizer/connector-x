@@ -2,8 +2,6 @@
 set -euo pipefail
 
 container_name="${ODBC_POSTGRES_CONTAINER:-connectorx-odbc-postgres}"
-postgres_image="${ODBC_POSTGRES_IMAGE:-postgres:16}"
-postgres_port="${ODBC_POSTGRES_PORT:-5432}"
 driver_name="${ODBC_POSTGRES_DRIVER:-PostgreSQL Unicode}"
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -24,41 +22,10 @@ if ! odbcinst -q -d | grep -Fqxi "[${driver_name}]"; then
 fi
 
 if docker ps -a --format '{{.Names}}' | grep -qx "${container_name}"; then
+  echo "removing stale ${container_name} container from the previous ODBC live test" >&2
   docker rm -f "${container_name}" >/dev/null
 fi
 
-docker run -d \
-  --name "${container_name}" \
-  -e POSTGRES_USER=connectorx \
-  -e POSTGRES_PASSWORD=connectorx \
-  -e POSTGRES_DB=connectorx \
-  -p "${postgres_port}:5432" \
-  "${postgres_image}" >/dev/null
-
-cleanup() {
-  if [ "${ODBC_POSTGRES_KEEP:-0}" != "1" ]; then
-    docker rm -f "${container_name}" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT
-
-for _ in $(seq 1 60); do
-  if docker exec "${container_name}" pg_isready -U connectorx -d connectorx >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-docker exec -i "${container_name}" \
-  psql -U connectorx -d connectorx \
-  < "$(dirname "$0")/odbc_postgres.sql"
-
-export ODBC_CONN="Driver={${driver_name}};Server=127.0.0.1;Port=${postgres_port};Database=connectorx;UID=connectorx;PWD=connectorx;"
-driver_param="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "${driver_name}")"
-export ODBC_URL="odbc://connectorx:connectorx@127.0.0.1:${postgres_port}/connectorx?driver=${driver_param}"
-export ODBC_TEST_QUERY="select id, flag, name from cx_odbc_test order by id"
-export ODBC_PARTITION_QUERY="select id, flag, name from cx_odbc_test"
-export ODBC_PARTITION_COLUMN="id"
-export ODBC_EXPECTED_ROWS="2"
-
+export CONNECTORX_ODBC_TESTCONTAINER=1
+export ODBC_POSTGRES_DRIVER="${driver_name}"
 cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture

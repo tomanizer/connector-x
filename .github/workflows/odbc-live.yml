@@ -90,29 +90,9 @@ jobs:
   live-postgres-odbc:
     if: inputs.backend == 'postgres' || inputs.backend == 'both'
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: connectorx
-          POSTGRES_PASSWORD: connectorx
-          POSTGRES_DB: connectorx
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U connectorx -d connectorx"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
 
     env:
-      PGPASSWORD: connectorx
-      ODBC_CONN: Driver={PostgreSQL Unicode};Server=127.0.0.1;Port=5432;Database=connectorx;UID=connectorx;PWD=connectorx;
-      ODBC_URL: odbc://connectorx:connectorx@127.0.0.1:5432/connectorx?driver=PostgreSQL%20Unicode
-      ODBC_TEST_QUERY: select id, flag, name from cx_odbc_test order by id
-      ODBC_PARTITION_QUERY: select id, flag, name from cx_odbc_test
-      ODBC_PARTITION_COLUMN: id
-      ODBC_EXPECTED_ROWS: "2"
+      CONNECTORX_ODBC_TESTCONTAINER: "1"
 
     steps:
       - uses: actions/checkout@v6
@@ -126,12 +106,11 @@ jobs:
       - name: Install PostgreSQL ODBC dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y unixodbc unixodbc-dev odbc-postgresql postgresql-client pkg-config libssl-dev libkrb5-dev libclang-dev
+          sudo apt-get install -y unixodbc unixodbc-dev odbc-postgresql pkg-config libssl-dev libkrb5-dev libclang-dev
           odbcinst -q -d
 
-      - name: Seed PostgreSQL test data
-        run: |
-          psql -h 127.0.0.1 -U connectorx -d connectorx -f scripts/odbc_postgres.sql
+      - name: Verify Docker access for Testcontainers
+        run: docker ps
 
       - name: Run generic ODBC tests against PostgreSQL
         run: |

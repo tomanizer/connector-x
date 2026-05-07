@@ -10,19 +10,36 @@ use connectorx::{
     transports::OdbcArrowTransport,
 };
 
+#[allow(dead_code, unused_imports)]
+mod test_db;
+
+fn use_postgres_testcontainer() -> bool {
+    std::env::var("CONNECTORX_ODBC_TESTCONTAINER").is_ok()
+}
+
 fn odbc_conn() -> Option<String> {
-    std::env::var("ODBC_CONN").ok()
+    std::env::var("ODBC_CONN")
+        .ok()
+        .or_else(|| use_postgres_testcontainer().then(test_db::postgres_odbc_conn))
 }
 
 fn odbc_url() -> Option<String> {
-    std::env::var("ODBC_URL").ok()
+    std::env::var("ODBC_URL")
+        .ok()
+        .or_else(|| use_postgres_testcontainer().then(test_db::postgres_odbc_url))
 }
 
 fn odbc_query() -> Option<CXQuery<String>> {
+    if use_postgres_testcontainer() {
+        let _ = test_db::postgres_odbc_url();
+    }
     std::env::var("ODBC_TEST_QUERY").ok().map(CXQuery::naked)
 }
 
 fn odbc_partition_query() -> Option<(String, String)> {
+    if use_postgres_testcontainer() {
+        let _ = test_db::postgres_odbc_url();
+    }
     Some((
         std::env::var("ODBC_PARTITION_QUERY").ok()?,
         std::env::var("ODBC_PARTITION_COLUMN").ok()?,
