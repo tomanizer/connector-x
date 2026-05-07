@@ -10,11 +10,14 @@ use connectorx::{
     transports::OdbcArrowTransport,
 };
 
-#[allow(dead_code, unused_imports)]
 mod test_db;
 
 fn use_postgres_testcontainer() -> bool {
     std::env::var("CONNECTORX_ODBC_TESTCONTAINER").is_ok()
+}
+
+fn init_postgres_testcontainer() {
+    test_db::postgres_odbc_url();
 }
 
 fn odbc_conn() -> Option<String> {
@@ -33,14 +36,14 @@ fn odbc_url() -> Option<String> {
 
 fn odbc_query() -> Option<CXQuery<String>> {
     if use_postgres_testcontainer() {
-        let _ = test_db::postgres_odbc_url();
+        init_postgres_testcontainer();
     }
     std::env::var("ODBC_TEST_QUERY").ok().map(CXQuery::naked)
 }
 
 fn odbc_partition_query() -> Option<(String, String)> {
     if use_postgres_testcontainer() {
-        let _ = test_db::postgres_odbc_url();
+        init_postgres_testcontainer();
     }
     Some((
         std::env::var("ODBC_PARTITION_QUERY").ok()?,

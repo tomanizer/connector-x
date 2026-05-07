@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    env,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
     sync::Once,
@@ -7,18 +7,31 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(feature = "src_mssql", feature = "src_trino", feature = "src_oracle"))]
+use std::fs;
+
 use testcontainers::{
-    core::{CmdWaitFor, ExecCommand, IntoContainerPort, Mount, WaitFor},
+    core::{IntoContainerPort, Mount, WaitFor},
     runners::SyncRunner,
     GenericImage, ImageExt,
 };
 
+#[cfg(any(feature = "src_mssql", feature = "src_oracle"))]
+use testcontainers::core::{CmdWaitFor, ExecCommand};
+
+#[cfg(feature = "src_postgres")]
 static POSTGRES_INIT: Once = Once::new();
+#[cfg(feature = "src_odbc")]
 static POSTGRES_ODBC_INIT: Once = Once::new();
+#[cfg(feature = "src_mysql")]
 static MYSQL_INIT: Once = Once::new();
+#[cfg(feature = "src_mssql")]
 static MSSQL_INIT: Once = Once::new();
+#[cfg(feature = "src_trino")]
 static TRINO_INIT: Once = Once::new();
+#[cfg(feature = "src_clickhouse")]
 static CLICKHOUSE_INIT: Once = Once::new();
+#[cfg(feature = "src_oracle")]
 static ORACLE_INIT: Once = Once::new();
 
 fn scripts_dir() -> PathBuf {
@@ -51,10 +64,16 @@ fn wait_for_tcp_ready(host: &str, port: u16, timeout: Duration, label: &str) {
     }
 }
 
+#[cfg(feature = "src_odbc")]
 fn set_default_env(name: &str, value: &str) {
     if env::var(name).is_err() {
         env::set_var(name, value);
     }
+}
+
+#[cfg(feature = "src_odbc")]
+fn escape_odbc_braced_value(value: &str) -> String {
+    value.replace('}', "}}")
 }
 
 #[cfg(feature = "src_postgres")]
@@ -120,6 +139,7 @@ pub fn postgres_odbc_url() -> String {
 
         let driver = env::var("ODBC_POSTGRES_DRIVER")
             .unwrap_or_else(|_| "PostgreSQL Unicode".to_string());
+        let escaped_driver = escape_odbc_braced_value(&driver);
         let init_script = scripts_dir().join("odbc_postgres.sql");
         let image = GenericImage::new("postgres", "16")
             .with_exposed_port(5432.tcp())
@@ -154,7 +174,7 @@ pub fn postgres_odbc_url() -> String {
         env::set_var(
             "ODBC_CONN",
             format!(
-                "Driver={{{driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
+                "Driver={{{escaped_driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
             ),
         );
         env::set_var(
@@ -174,7 +194,7 @@ pub fn postgres_odbc_url() -> String {
 
 #[cfg(feature = "src_odbc")]
 pub fn postgres_odbc_conn() -> String {
-    let _ = postgres_odbc_url();
+    postgres_odbc_url();
     env::var("ODBC_CONN").expect("ODBC_CONN must be set")
 }
 
