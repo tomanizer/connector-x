@@ -7,13 +7,32 @@
 ## Connection String
 
 ```python
+import connectorx as cx
+
 conn = "sybase://username:password@server:5000/database?driver=FreeTDS&tds_version=5.0"
+table = cx.read_sql(conn, "select * from dbo.lineitem", return_type="arrow")
 ```
 
 The `driver` query parameter can be an ODBC driver name from `odbcinst.ini` or an absolute driver library path. URL-encode absolute paths:
 
 ```python
 conn = "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=%2Fopt%2Fhomebrew%2Flib%2Flibtdsodbc.so"
+```
+
+Python users can construct the same URL with `ConnectionUrl`:
+
+```python
+from connectorx import ConnectionUrl
+
+conn = ConnectionUrl(
+    backend="sybase",
+    username="sa",
+    password="sybase",
+    server="127.0.0.1",
+    port=5000,
+    database="tempdb",
+    database_options={"driver": "FreeTDS", "tds_version": "5.0"},
+)
 ```
 
 `tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.

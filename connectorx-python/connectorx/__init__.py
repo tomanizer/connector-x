@@ -53,7 +53,9 @@ def rewrite_conn(
     if not protocol:
         # note: redshift/clickhouse are not compatible with the 'binary' protocol, and use other database
         # drivers to connect. set a compatible protocol and masquerade as the appropriate backend.
-        backend, connection_details = conn.split(":", 1) if conn else ("", "")
+        backend, connection_details = (
+            conn.split(":", 1) if conn and ":" in conn else (conn or "", "")
+        )
         if "redshift" in backend and "-iam" not in backend:
             conn = f"postgresql:{connection_details}"
             protocol = "cursor"
@@ -619,6 +621,46 @@ class ConnectionUrl(Generic[_BackendT], str):
     def __new__(
         cls,
         *,
+        backend: Literal["odbc"],
+        driver: str | None = None,
+        dsn: str | None = None,
+        username: str = "",
+        password: str = "",
+        server: str = "",
+        port: int | None = None,
+        database: str = "",
+        database_options: dict[str, str] | None = None,
+    ) -> ConnectionUrl[Literal["odbc"]]:
+        """
+        Help to build a generic ODBC connection string URL.
+
+        Parameters
+        ==========
+        backend:
+            must specify "odbc".
+        driver:
+            ODBC driver name or absolute driver library path. Exactly one of driver or dsn is
+            required.
+        dsn:
+            ODBC data source name. Exactly one of driver or dsn is required.
+        username:
+            the database username.
+        password:
+            the database password.
+        server:
+            the database server name. Optional for DSN-only connections.
+        port:
+            the database server port. Requires server.
+        database:
+            the database name.
+        database_options:
+            extra ODBC connection-string keywords.
+        """
+
+    @overload
+    def __new__(
+        cls,
+        *,
         backend: _ServerBackendT,
         username: str,
         password: str = "",
@@ -674,6 +716,8 @@ class ConnectionUrl(Generic[_BackendT], str):
         database: str = "",
         database_options: dict[str, str] | None = None,
         db_path: str | Path = "",
+        driver: str | None = None,
+        dsn: str | None = None,
     ) -> ConnectionUrl:
         if raw_connection is not None:
             return super().__new__(cls, raw_connection)
@@ -682,6 +726,41 @@ class ConnectionUrl(Generic[_BackendT], str):
         if backend == "sqlite":
             db_path = urllib.parse.quote(str(db_path))
             connection = f"{backend}://{db_path}"
+        elif backend == "odbc":
+            if bool(driver) == bool(dsn):
+                raise ValueError(
+                    'ConnectionUrl(backend="odbc") requires exactly one of driver or dsn'
+                )
+            if port is not None and not server:
+                raise ValueError(
+                    'ConnectionUrl(backend="odbc") cannot set port without server'
+                )
+
+            options = dict(database_options or {})
+            options["driver" if driver else "dsn"] = driver or dsn or ""
+            if not server:
+                if username:
+                    options["UID"] = username
+                if password:
+                    options["PWD"] = password
+
+            netloc = ""
+            if server:
+                quoted_server = urllib.parse.quote(server, safe="[]:")
+                auth = ""
+                if username or password:
+                    auth = (
+                        urllib.parse.quote(username, safe="")
+                        + ":"
+                        + urllib.parse.quote(password, safe="")
+                        + "@"
+                    )
+                netloc = auth + quoted_server
+                if port is not None:
+                    netloc += f":{port}"
+
+            path = "/" + urllib.parse.quote(database, safe="") if database else "/"
+            connection = f"odbc://{netloc}{path}?" + urllib.parse.urlencode(options)
         else:
             connection = f"{backend}://{username}:{password}@{server}:{port}/{database}"
             if database_options:

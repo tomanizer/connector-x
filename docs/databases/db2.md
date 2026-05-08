@@ -7,13 +7,32 @@
 ## Connection String
 
 ```python
+import connectorx as cx
+
 conn = "db2://username:password@server:50000/database?driver=IBM%20DB2%20ODBC%20DRIVER"
+table = cx.read_sql(conn, "select * from schema.table", return_type="arrow")
 ```
 
 The `driver` query parameter can be an ODBC driver name from `odbcinst.ini` or an absolute driver library path. URL-encode absolute paths:
 
 ```python
 conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=%2Fopt%2Fibm%2Fdb2%2Fclidriver%2Flib%2Flibdb2o.so"
+```
+
+Python users can construct the same URL with `ConnectionUrl`:
+
+```python
+from connectorx import ConnectionUrl
+
+conn = ConnectionUrl(
+    backend="db2",
+    username="db2inst1",
+    password="password",
+    server="127.0.0.1",
+    port=50000,
+    database="testdb",
+    database_options={"driver": "IBM DB2 ODBC DRIVER"},
+)
 ```
 
 ConnectorX expands this URL into an ODBC connection string using `Driver`, `Hostname`, `Port`, `Protocol`, `Database`, `UID`, and `PWD`. `Protocol` defaults to `TCPIP`. Generated values are brace-escaped, including `}` characters. A raw ODBC connection string starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` is also accepted.

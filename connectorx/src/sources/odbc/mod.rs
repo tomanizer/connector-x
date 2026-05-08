@@ -1084,6 +1084,15 @@ pub fn odbc_conn_string(conn: &str) -> String {
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect::<Vec<_>>();
 
+    if let Some(raw_conn) = param_value(&params, "odbc_connect") {
+        if !is_raw_odbc_conn_string(raw_conn) {
+            throw!(anyhow!(
+                "odbc_connect must contain a raw ODBC connection string starting with Driver=, DSN=, FileDSN=, or Database="
+            ));
+        }
+        return raw_conn.to_string();
+    }
+
     let driver = param_value(&params, "driver");
     let dsn = param_value(&params, "dsn");
     if driver.is_none() && dsn.is_none() {

@@ -168,6 +168,39 @@ fn test_odbc_url_to_odbc_conn_string_keeps_raw_odbc_string() {
 }
 
 #[test]
+fn test_odbc_url_to_odbc_conn_string_keeps_encoded_raw_odbc_string() {
+    let conn = "odbc:///?odbc_connect=Driver%3D%7BSQLite3%7D%3BDatabase%3D%2Ftmp%2Ftest.db%3B";
+    assert_eq!(
+        odbc_conn_string(conn).unwrap(),
+        "Driver={SQLite3};Database=/tmp/test.db;"
+    );
+}
+
+#[test]
+fn test_odbc_url_to_odbc_conn_string_rejects_invalid_encoded_raw_odbc_string() {
+    let err = odbc_conn_string("odbc:///?odbc_connect=Server%3Dexample.com").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("odbc_connect must contain a raw ODBC connection string"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn test_parse_source_routes_raw_odbc_connection_string() {
+    let source_conn = parse_source("Driver={SQLite3};Database=/tmp/test.db;", None).unwrap();
+    assert!(matches!(
+        source_conn.ty,
+        connectorx::source_router::SourceType::Odbc
+    ));
+    assert_eq!(
+        odbc_conn_string(source_conn.conn.as_str()).unwrap(),
+        "Driver={SQLite3};Database=/tmp/test.db;"
+    );
+}
+
+#[test]
 fn test_odbc_arrow_route_with_raw_conn() {
     let _ = env_logger::builder().is_test(true).try_init();
     let _guard = lock_odbc_env();
