@@ -70,3 +70,65 @@ impl OdbcTypeSystem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use odbc_api::sys::SqlDataType;
+
+    #[test]
+    fn maps_core_odbc_types_and_nullability() {
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(DataType::Integer, Nullability::NoNulls),
+            OdbcTypeSystem::Int(false)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::Decimal {
+                    precision: 18,
+                    scale: 4
+                },
+                Nullability::Nullable
+            ),
+            OdbcTypeSystem::Decimal(true)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(DataType::Float { precision: 24 }, Nullability::Unknown),
+            OdbcTypeSystem::Real(true)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(DataType::Float { precision: 53 }, Nullability::NoNulls),
+            OdbcTypeSystem::Double(false)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::LongVarbinary { length: None },
+                Nullability::Nullable
+            ),
+            OdbcTypeSystem::Binary(true)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(DataType::Timestamp { precision: 6 }, Nullability::NoNulls),
+            OdbcTypeSystem::Timestamp(false)
+        ));
+    }
+
+    #[test]
+    fn falls_back_unknown_and_vendor_types_to_nullable_text() {
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown),
+            OdbcTypeSystem::Varchar(true)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::Other {
+                    data_type: SqlDataType(-9999),
+                    column_size: None,
+                    decimal_digits: 0,
+                },
+                Nullability::NoNulls
+            ),
+            OdbcTypeSystem::Varchar(false)
+        ));
+    }
+}

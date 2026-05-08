@@ -9,8 +9,8 @@ pub use self::typesystem::OdbcTypeSystem;
 #[cfg(feature = "dst_arrow")]
 use crate::sources::odbc_core::{
     bit_to_bool, cell_bool, cell_date, cell_f32, cell_f64, cell_i64, cell_time, cell_timestamp,
-    odbc_cell_from_column, odbc_date_to_naive, odbc_time_to_naive, odbc_timestamp_to_naive,
-    parse_decimal, OdbcValue,
+    ensure_column_not_truncated, odbc_cell_from_column, odbc_date_to_naive, odbc_time_to_naive,
+    odbc_timestamp_to_naive, parse_decimal, OdbcValue,
 };
 #[cfg(feature = "dst_arrow")]
 use crate::{
@@ -84,7 +84,7 @@ impl OdbcSource {
             names: vec![],
             schema: vec![],
             batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize("ODBC_MAX_STR_LEN")
+            max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
                 .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
         }
     }
@@ -221,7 +221,7 @@ impl SourcePartition for OdbcSourcePartition {
                 .map(|ty| ty.buffer_desc(self.max_str_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        OdbcSourceParser::new(cursor, self.schema.len(), "Odbc")
+        OdbcSourceParser::new(cursor, self.schema.len())
     }
 
     fn nrows(&self) -> usize {
@@ -309,9 +309,16 @@ fn odbc_partition_record_batches(
     while let Some(batch) = cursor.fetch()? {
         let mut columns = Vec::with_capacity(batch.num_cols());
         for col_index in 0..batch.num_cols() {
+            let column = batch.column(col_index);
+            ensure_column_not_truncated::<OdbcSourceError>(
+                &column,
+                OdbcTypeSystem::source_name(),
+                OdbcTypeSystem::max_str_len_env(),
+                col_index,
+            )?;
             columns.push(odbc_arrow_array(
                 partition.schema[col_index],
-                batch.column(col_index),
+                column,
                 batch.num_rows(),
             )?);
         }
@@ -969,6 +976,14 @@ impl OdbcCoreError for OdbcSourceError {
 }
 
 impl OdbcTypePolicy for OdbcTypeSystem {
+    fn source_name() -> &'static str {
+        "Odbc"
+    }
+
+    fn max_str_len_env() -> &'static str {
+        "ODBC_MAX_STR_LEN"
+    }
+
     fn nullable(self) -> bool {
         match self {
             OdbcTypeSystem::TinyInt(nullable)

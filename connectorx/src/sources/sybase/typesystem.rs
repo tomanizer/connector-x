@@ -72,3 +72,72 @@ impl SybaseTypeSystem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use odbc_api::sys::SqlDataType;
+
+    #[test]
+    fn maps_sybase_odbc_types_and_nullability() {
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(DataType::SmallInt, Nullability::NoNulls),
+            SybaseTypeSystem::SmallInt(false)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Decimal {
+                    precision: 18,
+                    scale: 4
+                },
+                Nullability::Nullable
+            ),
+            SybaseTypeSystem::Decimal(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(DataType::Real, Nullability::Unknown),
+            SybaseTypeSystem::Real(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(DataType::Binary { length: None }, Nullability::NoNulls),
+            SybaseTypeSystem::Binary(false)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Timestamp { precision: 3 },
+                Nullability::Nullable
+            ),
+            SybaseTypeSystem::Timestamp(true)
+        ));
+    }
+
+    #[test]
+    fn maps_freetds_time2_extension_and_text_fallbacks() {
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Other {
+                    data_type: SqlDataType(-154),
+                    column_size: None,
+                    decimal_digits: 0,
+                },
+                Nullability::NoNulls
+            ),
+            SybaseTypeSystem::Time(false)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown),
+            SybaseTypeSystem::Varchar(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Other {
+                    data_type: SqlDataType(-9999),
+                    column_size: None,
+                    decimal_digits: 0,
+                },
+                Nullability::Nullable
+            ),
+            SybaseTypeSystem::Varchar(true)
+        ));
+    }
+}

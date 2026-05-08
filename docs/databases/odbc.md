@@ -32,17 +32,28 @@ ConnectorX links against the platform ODBC manager. The ODBC driver for your dat
 
 ## Type Support
 
-The generic ODBC connector maps standard ODBC-reported types:
+The ODBC-family connectors use one shared fetch and conversion layer. Standard ODBC-reported types are mapped as follows:
 
-* Integer: `tinyint`, `smallint`, `integer`, `bigint`
-* Floating point: `real`, `float`, `double`
-* Decimal: `numeric`, `decimal`
-* Boolean: `bit`
-* Text: character, varchar, long varchar, and wide-character variants
-* Binary: binary, varbinary, and long varbinary
-* Temporal: date, time, timestamp
+| ODBC-reported type | Generic ODBC | Db2 | Sybase |
+| --- | --- | --- | --- |
+| `SQL_TINYINT` | `u8` | `u8` if reported | `u8` |
+| `SQL_SMALLINT` | `i16` | `i16` | `i16` |
+| `SQL_INTEGER` | `i32` | `i32` | `i32` |
+| `SQL_BIGINT` | `i64` | `i64` | `i64` |
+| `SQL_REAL`, `SQL_FLOAT(<=24)` | `f32` | `f32` | `f32` |
+| `SQL_DOUBLE`, `SQL_FLOAT(>24)` | `f64` | `f64` | `f64` |
+| `SQL_NUMERIC`, `SQL_DECIMAL` | Arrow decimal via text buffer | Arrow decimal via text buffer | Arrow decimal via text buffer |
+| `SQL_BIT` | `bool` | `bool` if reported | `bool` |
+| char/varchar/long varchar and wide variants | UTF-8 `String` | UTF-8 `String` | UTF-8 `String` |
+| binary/varbinary/long varbinary | Arrow large binary | Arrow large binary | Arrow large binary through text-compatible FreeTDS path |
+| date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp through text-compatible FreeTDS path |
+| unknown/vendor-specific | `String` fallback | `String` fallback | `String` fallback, except FreeTDS `TIME2` maps to time |
 
-Vendor-specific ODBC types may be reported as unknown or other. Cast them in the query to a supported standard type when needed.
+Nullability reported as unknown is treated as nullable. If a driver reports a value as nullable but later returns `NULL` for a non-null ConnectorX destination type, ConnectorX returns an error instead of fabricating a default.
+
+Vendor-specific ODBC types may be reported as unknown or other. Cast them in the query to a supported standard type when you need a specific output type.
+
+Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that names the relevant max-length setting. Increase the setting or cast/substr the selected column in the query.
 
 ## Performance
 
