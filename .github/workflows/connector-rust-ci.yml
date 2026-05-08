@@ -44,7 +44,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y unixodbc unixodbc-dev pkg-config libssl-dev libkrb5-dev libclang-dev
+          sudo apt-get install -y unixodbc unixodbc-dev odbc-postgresql pkg-config libssl-dev libkrb5-dev libclang-dev
 
       - name: Install macOS ODBC dependencies
         if: runner.os == 'macOS'
@@ -54,12 +54,17 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
 
+      - name: Initialize ODBC-family coverage summary
+        shell: bash
+        run: echo "### ODBC-family coverage" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Check Sybase connector
         shell: bash
         run: |
           set -euo pipefail
           if ! grep -q 'src_sybase' connectorx/Cargo.toml; then
             echo "src_sybase is not present on this branch; skipping Sybase connector checks."
+            echo "- Sybase: skipped because src_sybase is absent on this branch." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -72,6 +77,7 @@ jobs:
           else
             echo "Skipping Sybase benchmark build on Windows because pprof does not compile there."
           fi
+          echo "- Sybase: compile/clippy/unit coverage ran. Live tests are env-gated and print CONNECTORX_SKIP when SYBASE_* variables are absent." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check Db2 connector
         shell: bash
@@ -79,6 +85,7 @@ jobs:
           set -euo pipefail
           if ! grep -q 'src_db2' connectorx/Cargo.toml; then
             echo "src_db2 is not present on this branch; skipping Db2 connector checks."
+            echo "- Db2: skipped because src_db2 is absent on this branch." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -91,6 +98,7 @@ jobs:
           else
             echo "Skipping Db2 benchmark build on Windows because pprof does not compile there."
           fi
+          echo "- Db2: compile/clippy/unit coverage ran. Live tests are env-gated and print CONNECTORX_SKIP when DB2_* variables are absent." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check generic ODBC connector
         shell: bash
@@ -98,6 +106,7 @@ jobs:
           set -euo pipefail
           if ! grep -q 'src_odbc' connectorx/Cargo.toml; then
             echo "src_odbc is not present on this branch; skipping generic ODBC connector checks."
+            echo "- Generic ODBC: skipped because src_odbc is absent on this branch." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -105,3 +114,22 @@ jobs:
           cargo check -p connectorx --no-default-features --features "$features"
           cargo clippy -p connectorx --no-default-features --features "$features"
           cargo test -p connectorx --no-default-features --features "$features" --test test_odbc -- --nocapture
+          echo "- Generic ODBC: compile/clippy/unit coverage ran. Env-gated live tests print CONNECTORX_SKIP when ODBC_* variables are absent." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run generic ODBC PostgreSQL testcontainer coverage
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          CONNECTORX_ODBC_TESTCONTAINER: "1"
+        run: |
+          set -euo pipefail
+          if ! grep -q 'src_odbc' connectorx/Cargo.toml; then
+            echo "src_odbc is not present on this branch; skipping PostgreSQL ODBC testcontainer checks."
+            echo "- Generic ODBC PostgreSQL testcontainer: skipped because src_odbc is absent." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          docker ps
+          odbcinst -q -d
+          cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture --test-threads=1
+          echo "- Generic ODBC PostgreSQL testcontainer: live driver coverage ran with CONNECTORX_ODBC_TESTCONTAINER=1 and no repository secrets." >> "$GITHUB_STEP_SUMMARY"

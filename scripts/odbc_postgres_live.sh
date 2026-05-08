@@ -28,4 +28,4 @@ fi
 
 export CONNECTORX_ODBC_TESTCONTAINER=1
 export ODBC_POSTGRES_DRIVER="${driver_name}"
-cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture
+cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture --test-threads=1

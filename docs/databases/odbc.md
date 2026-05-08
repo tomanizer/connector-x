@@ -113,3 +113,37 @@ cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fp
 
 Partition smoke tests additionally use `ODBC_URL`, `ODBC_PARTITION_QUERY`, and `ODBC_PARTITION_COLUMN`.
 Set `ODBC_EXPECTED_ROWS` to assert the returned row count for live tests.
+
+## CI And Live Coverage
+
+ODBC-family coverage is split into three explicit categories:
+
+| Coverage kind | Where it runs | Expected result without credentials |
+| --- | --- | --- |
+| Compile/unit coverage | `connector-rust-ci` for `src_odbc`, `src_db2`, and `src_sybase` | Tests print `CONNECTORX_SKIP:` for env-gated live cases and still pass. |
+| PostgreSQL ODBC testcontainer coverage | Ubuntu `connector-rust-ci` and manual `odbc-live` with `backend=postgres` or `backend=both` | Runs without repository secrets, using Docker testcontainers and psqlODBC. |
+| Secret-backed live coverage | Manual `odbc-live` with `backend=sybase`, `db2`, `odbc`, or `both` | Fails before tests with a clear error if the selected backend secrets are missing. |
+
+The GitHub Actions job summary records which ODBC-family backends were skipped, exercised through PostgreSQL testcontainers, or exercised against secret-backed live drivers. In raw logs, grep for `CONNECTORX_SKIP:` to find env-gated tests that intentionally skipped, and `ODBC_COVERAGE:` for local `just` live-test output.
+
+Repository secrets for the manual `odbc-live` workflow:
+
+| Backend | Required secrets |
+| --- | --- |
+| Sybase | `SYBASE_ODBC_CONN` and/or `SYBASE_URL` |
+| Db2 | `DB2_ODBC_CONN` and/or `DB2_URL` |
+| Generic ODBC | `ODBC_TEST_QUERY` plus `ODBC_CONN` and/or `ODBC_URL`; optionally `ODBC_EXPECTED_ROWS` |
+
+The manual workflow installs `unixodbc`, FreeTDS for Sybase, and IBM's Linux x64 Db2 ODBC/CLI driver registered as `IBM DB2 ODBC DRIVER`. The PostgreSQL testcontainer path installs `odbc-postgresql` and uses the registered `PostgreSQL Unicode` driver. If you use a different commercial ODBC driver, point the corresponding secret at that registered driver name or absolute driver library path.
+
+Local live-test shortcuts:
+
+```bash
+just test-odbc-live postgres
+just test-odbc-live sybase
+just test-odbc-live db2
+just test-odbc-live odbc
+just test-odbc-live all
+```
+
+The `postgres` target uses the no-secret PostgreSQL ODBC testcontainer path. The other targets use the same environment variables as the manual workflow and print `CONNECTORX_SKIP:` when their credentials are not set.

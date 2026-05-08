@@ -102,7 +102,7 @@ fn assert_expected_rows(batches: &[arrow::record_batch::RecordBatch]) {
 
 fn assert_postgres_testcontainer_rows(batches: &[arrow::record_batch::RecordBatch]) {
     if batches.iter().any(|batch| batch.num_columns() < 3) {
-        eprintln!("skipping default PostgreSQL row assertion: query returned fewer than 3 columns");
+        eprintln!("CONNECTORX_SKIP: skipping default PostgreSQL row assertion: query returned fewer than 3 columns");
         return;
     }
 
@@ -173,7 +173,7 @@ fn test_odbc_arrow_route_with_raw_conn() {
     let _guard = lock_odbc_env();
 
     let (Some(conn), Some(query)) = (odbc_conn(), odbc_query()) else {
-        eprintln!("skipping ODBC integration test: ODBC_CONN and ODBC_TEST_QUERY are not set");
+        eprintln!("CONNECTORX_SKIP: skipping ODBC integration test: ODBC_CONN and ODBC_TEST_QUERY are not set");
         return;
     };
 
@@ -198,7 +198,7 @@ fn test_odbc_get_arrow_route() {
     let _guard = lock_odbc_env();
 
     let (Some(conn), Some(query)) = (odbc_url(), odbc_query()) else {
-        eprintln!("skipping ODBC get_arrow test: ODBC_URL and ODBC_TEST_QUERY are not set");
+        eprintln!("CONNECTORX_SKIP: skipping ODBC get_arrow test: ODBC_URL and ODBC_TEST_QUERY are not set");
         return;
     };
 
@@ -219,7 +219,7 @@ fn test_odbc_partition_query() {
 
     let (Some(conn), Some((query, column))) = (odbc_url(), odbc_partition_query()) else {
         eprintln!(
-            "skipping ODBC partition test: ODBC_URL, ODBC_PARTITION_QUERY, and ODBC_PARTITION_COLUMN are not set"
+            "CONNECTORX_SKIP: skipping ODBC partition test: ODBC_URL, ODBC_PARTITION_QUERY, and ODBC_PARTITION_COLUMN are not set"
         );
         return;
     };
@@ -236,7 +236,7 @@ fn test_odbc_testcontainer_edge_types() {
     let _guard = lock_odbc_env();
 
     if !use_postgres_testcontainer() {
-        eprintln!("skipping ODBC edge type test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+        eprintln!("CONNECTORX_SKIP: skipping ODBC edge type test: CONNECTORX_ODBC_TESTCONTAINER is not set");
         return;
     }
 
@@ -324,7 +324,7 @@ fn test_odbc_testcontainer_errors_on_truncated_text() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!("skipping ODBC truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+        eprintln!("CONNECTORX_SKIP: skipping ODBC truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set");
         return;
     }
 
@@ -376,7 +376,7 @@ fn test_odbc_testcontainer_streaming_errors_on_truncated_text() {
 
     if !use_postgres_testcontainer() {
         eprintln!(
-            "skipping ODBC streaming truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping ODBC streaming truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set"
         );
         return;
     }
