@@ -162,6 +162,9 @@ jobs:
 
       - uses: Gr1N/setup-poetry@v9
 
+      - name: Install ODBC dependencies
+        run: brew install unixodbc freetds
+
       - name: Setup project
         run: |
           just bootstrap-python

@@ -35,6 +35,13 @@ impl TryFrom<&str> for SourceConn {
     type Error = ConnectorXError;
 
     fn try_from(conn: &str) -> Result<SourceConn> {
+        #[cfg(feature = "src_odbc")]
+        if crate::sources::odbc_common::is_raw_odbc_conn_string(conn) {
+            let mut url = Url::parse("odbc:///").expect("valid generic ODBC URL");
+            url.query_pairs_mut().append_pair("odbc_connect", conn);
+            return Ok(SourceConn::new(SourceType::Odbc, url, "binary".to_string()));
+        }
+
         let old_url = Url::parse(conn).map_err(|e| anyhow!("parse error: {}", e))?;
 
         // parse connectorx protocol

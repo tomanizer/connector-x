@@ -30,6 +30,13 @@ rustup override set {version}
 
 * Step 3: Install system dependencies. Please refer to [release.yml](https://github.com/sfu-db/connector-x/blob/main/.github/workflows/release.yml) for dependencies needed for different os.
 
+    ConnectorX wheels link against the platform ODBC manager so the Python package can expose Sybase, Db2, and generic ODBC sources. Database-specific ODBC drivers are runtime dependencies and are not bundled in wheels.
+
+    * Linux source builds need unixODBC development headers, for example `unixodbc-dev` on Debian/Ubuntu or `unixODBC-devel` on RHEL-compatible distributions.
+    * macOS source builds need Homebrew `unixodbc`.
+    * Windows source builds use the Windows ODBC manager and do not need unixODBC, but users still need to install the vendor driver for the database they connect to.
+    * At runtime, install/register the matching database driver separately, such as FreeTDS or SAP ASE SDK for Sybase, IBM Data Server Driver for ODBC and CLI for Db2, or psqlODBC for PostgreSQL-backed generic ODBC.
+
 * Step 4: Install python dependencies.
 ```bash
 just bootstrap-python

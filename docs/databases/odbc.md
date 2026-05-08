@@ -9,26 +9,58 @@
 Use a raw ODBC connection string when you need exact driver-specific keywords:
 
 ```python
+import connectorx as cx
+
 conn = "Driver={SQLite3};Database=/tmp/example.db;"
+cx.read_sql(conn, "select * from example", return_type="arrow")
 ```
 
 For URL-style configuration, use `odbc://` with either `driver=` or `dsn=`:
 
 ```python
+import connectorx as cx
+
 conn = "odbc://username:password@server:1433/database?driver=ODBC%20Driver%2018%20for%20SQL%20Server"
+cx.read_sql(conn, "select * from dbo.lineitem", return_type="arrow")
 ```
 
 ConnectorX expands the URL into an ODBC connection string using `Driver` or `DSN`, `Server`, `Port`, `Database`, `UID`, and `PWD`. Additional URL query parameters are appended to the generated ODBC connection string. Use `server_key=Hostname` when a driver expects `Hostname` instead of `Server`.
 
 All generated ODBC values are escaped when required, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
+Python users can also build ODBC URLs with `ConnectionUrl`:
+
+```python
+from connectorx import ConnectionUrl
+
+conn = ConnectionUrl(
+    backend="odbc",
+    driver="PostgreSQL Unicode",
+    username="connectorx",
+    password="connectorx",
+    server="127.0.0.1",
+    port=5432,
+    database="connectorx",
+)
+```
+
+For DSN-only connections, omit the server fields and pass `dsn=`:
+
+```python
+conn = ConnectionUrl(backend="odbc", dsn="Warehouse DSN")
+```
+
+The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route. Use `return_type="arrow"`, `return_type="arrow_stream"`, or a downstream Arrow consumer. To get pandas today, read Arrow and call `table.to_pandas()` after installing `pyarrow`.
+
 ## Runtime Dependencies
 
 ConnectorX links against the platform ODBC manager. The ODBC driver for your database is a runtime dependency and is not bundled in ConnectorX wheels.
 
-* Linux: install `unixodbc`, `unixodbc-dev`, and your database driver.
-* macOS: install `unixodbc` with Homebrew and your database driver.
-* Windows: install/register the vendor ODBC driver with the Windows ODBC driver manager.
+* Linux wheels are built against unixODBC. Runtime systems need the unixODBC manager libraries and the target database driver registered with unixODBC.
+* macOS wheels are built against Homebrew `unixodbc`. Runtime systems need `unixodbc` and the target database driver installed locally.
+* Windows wheels link to the Windows ODBC manager. Runtime systems need the target vendor ODBC driver installed and registered.
+
+Database-specific ODBC drivers are not bundled in ConnectorX wheels. Examples: FreeTDS or SAP ASE SDK for Sybase, IBM Data Server Driver for ODBC and CLI for Db2, and psqlODBC for PostgreSQL-backed generic ODBC tests.
 
 ## Type Support
 
