@@ -11,7 +11,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use odbc_api::handles::StatementConnection;
 use odbc_api::sys::{Date, Time, Timestamp};
 use odbc_api::{
-    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, TextRowSet},
+    buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, Indicator, TextRowSet},
     environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl, DataType,
     Nullability, ResultSetMetadata,
 };
@@ -43,7 +43,10 @@ pub trait OdbcCoreError:
     fn parse_value(value: String, ty: &'static str) -> Self;
 }
 
-pub(crate) trait OdbcTypePolicy: TypeSystem + Copy {
+/// Backend-specific ODBC metadata and buffer policy for the shared parser.
+pub trait OdbcTypePolicy: TypeSystem + Copy {
+    fn source_name() -> &'static str;
+    fn max_str_len_env() -> &'static str;
     fn nullable(self) -> bool;
     fn buffer_desc(self, max_str_len: usize) -> BufferDesc;
 }
@@ -54,22 +57,21 @@ pub struct OdbcParser<TS, E> {
     ncols: usize,
     current_cell: usize,
     is_finished: bool,
-    source_name: &'static str,
     _marker: PhantomData<(TS, E)>,
 }
 
 impl<TS, E> OdbcParser<TS, E>
 where
+    TS: OdbcTypePolicy,
     E: OdbcCoreError,
 {
-    pub(crate) fn new(cursor: OdbcBlockCursor, ncols: usize, source_name: &'static str) -> Self {
+    pub(crate) fn new(cursor: OdbcBlockCursor, ncols: usize) -> Self {
         Self {
             cursor,
             batch: OdbcBatch::with_capacity(ncols),
             ncols,
             current_cell: 0,
             is_finished: false,
-            source_name,
             _marker: PhantomData,
         }
     }
@@ -89,7 +91,7 @@ where
     }
 
     pub(crate) fn next_bytes<T>(&mut self) -> Result<Option<&[u8]>, E> {
-        let source_name = self.source_name;
+        let source_name = TS::source_name();
         let Some((row_index, col_index)) = self.next_position() else {
             return Ok(None);
         };
@@ -103,7 +105,7 @@ where
     }
 
     pub(crate) fn required_cell<T>(&mut self, ty: &'static str) -> Result<OdbcValue<'_>, E> {
-        let source_name = self.source_name;
+        let source_name = TS::source_name();
         let value = self.next_cell();
         Ok(value.ok_or_else(|| {
             ConnectorXError::cannot_produce::<T>(Some(format!(
@@ -113,7 +115,7 @@ where
     }
 
     pub(crate) fn required_bytes<T>(&mut self, ty: &'static str) -> Result<&[u8], E> {
-        let source_name = self.source_name;
+        let source_name = TS::source_name();
         let value = self.next_bytes::<T>()?;
         Ok(value.ok_or_else(|| {
             ConnectorXError::cannot_produce::<T>(Some(format!(
@@ -125,7 +127,7 @@ where
 
 impl<'a, TS, E> PartitionParser<'a> for OdbcParser<TS, E>
 where
-    TS: TypeSystem,
+    TS: OdbcTypePolicy,
     E: OdbcCoreError,
 {
     type TypeSystem = TS;
@@ -150,8 +152,12 @@ where
             let num_cols = batch.num_cols();
             self.batch.nrows = num_rows;
             for col_index in 0..num_cols {
-                self.batch
-                    .replace_column(col_index, batch.column(col_index));
+                self.batch.replace_column::<E>(
+                    col_index,
+                    batch.column(col_index),
+                    TS::source_name(),
+                    TS::max_str_len_env(),
+                )?;
             }
             self.batch.truncate_columns(num_cols);
         } else {
@@ -183,13 +189,24 @@ impl OdbcBatch {
         self.nrows = 0;
     }
 
-    fn replace_column(&mut self, col_index: usize, column: AnySlice<'_>) {
+    fn replace_column<E>(
+        &mut self,
+        col_index: usize,
+        column: AnySlice<'_>,
+        source_name: &'static str,
+        max_str_len_env: &'static str,
+    ) -> Result<(), E>
+    where
+        E: OdbcCoreError,
+    {
+        ensure_column_not_truncated::<E>(&column, source_name, max_str_len_env, col_index)?;
         if col_index == self.columns.len() {
             self.columns
                 .push(OdbcColumn::from_slice(column, self.nrows));
         } else {
             self.columns[col_index].replace_from_slice(column, self.nrows);
         }
+        Ok(())
     }
 
     fn truncate_columns(&mut self, ncols: usize) {
@@ -203,6 +220,43 @@ impl OdbcBatch {
     fn bytes(&self, row_index: usize, col_index: usize) -> Option<Option<&[u8]>> {
         self.columns[col_index].bytes(row_index)
     }
+}
+
+pub(crate) fn ensure_column_not_truncated<E>(
+    column: &AnySlice<'_>,
+    source_name: &'static str,
+    max_str_len_env: &'static str,
+    col_index: usize,
+) -> Result<(), E>
+where
+    E: OdbcCoreError,
+{
+    let indicator = truncated_indicator(column);
+    if let Some(indicator) = indicator {
+        return Err(truncation_error(source_name, max_str_len_env, col_index, indicator).into());
+    }
+    Ok(())
+}
+
+fn truncated_indicator(column: &AnySlice<'_>) -> Option<Indicator> {
+    match column {
+        AnySlice::Text(view) => view.has_truncated_values(),
+        AnySlice::WText(view) => view.has_truncated_values(),
+        AnySlice::Binary(view) => view.has_truncated_values(),
+        _ => None,
+    }
+}
+
+fn truncation_error(
+    source_name: &'static str,
+    max_str_len_env: &'static str,
+    col_index: usize,
+    indicator: Indicator,
+) -> anyhow::Error {
+    anyhow!(
+        "{source_name} column {} was truncated by the ODBC fetch buffer ({indicator:?}); increase {max_str_len_env} or cast/substr the column in the query",
+        col_index + 1
+    )
 }
 
 // A fetched ODBC batch cannot be borrowed across `fetch_next`, so the parser
@@ -1212,8 +1266,15 @@ mod tests {
     #[test]
     fn parses_partition_values() {
         assert_eq!(parse_partition_value::<TestError>(b"").unwrap(), 0);
+        assert_eq!(parse_partition_value::<TestError>(b"  -42  ").unwrap(), -42);
         assert_eq!(parse_partition_value::<TestError>(b"42").unwrap(), 42);
         assert_eq!(parse_partition_value::<TestError>(b"42.9").unwrap(), 42);
+        assert_eq!(parse_partition_value::<TestError>(b"-42.9").unwrap(), -42);
+        assert_eq!(
+            parse_partition_value::<TestError>(b"123.0001").unwrap(),
+            123
+        );
+        assert!(parse_partition_value::<TestError>(b"not-a-number").is_err());
     }
 
     #[test]

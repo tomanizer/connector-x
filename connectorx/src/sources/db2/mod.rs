@@ -53,7 +53,8 @@ impl Db2Source {
             names: vec![],
             schema: vec![],
             batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize("DB2_MAX_STR_LEN").unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
+                .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
         }
     }
 
@@ -189,7 +190,7 @@ impl SourcePartition for Db2SourcePartition {
                 .map(|ty| ty.buffer_desc(self.max_str_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        Db2SourceParser::new(cursor, self.schema.len(), "Db2")
+        Db2SourceParser::new(cursor, self.schema.len())
     }
 
     fn nrows(&self) -> usize {
@@ -216,6 +217,14 @@ impl OdbcCoreError for Db2SourceError {
 }
 
 impl OdbcTypePolicy for Db2TypeSystem {
+    fn source_name() -> &'static str {
+        "Db2"
+    }
+
+    fn max_str_len_env() -> &'static str {
+        "DB2_MAX_STR_LEN"
+    }
+
     fn nullable(self) -> bool {
         match self {
             Db2TypeSystem::TinyInt(nullable)

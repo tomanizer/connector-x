@@ -70,3 +70,58 @@ impl Db2TypeSystem {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use odbc_api::sys::SqlDataType;
+
+    #[test]
+    fn maps_db2_odbc_types_and_nullability() {
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(DataType::Integer, Nullability::NoNulls),
+            Db2TypeSystem::Int(false)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::Numeric {
+                    precision: 31,
+                    scale: 6
+                },
+                Nullability::Nullable
+            ),
+            Db2TypeSystem::Numeric(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(DataType::Double, Nullability::Unknown),
+            Db2TypeSystem::Double(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(DataType::Varbinary { length: None }, Nullability::NoNulls),
+            Db2TypeSystem::Binary(false)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(DataType::Time { precision: 6 }, Nullability::Nullable),
+            Db2TypeSystem::Time(true)
+        ));
+    }
+
+    #[test]
+    fn falls_back_unknown_and_vendor_types_to_text() {
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown),
+            Db2TypeSystem::Varchar(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::Other {
+                    data_type: SqlDataType(-370),
+                    column_size: None,
+                    decimal_digits: 0,
+                },
+                Nullability::NoNulls
+            ),
+            Db2TypeSystem::Varchar(false)
+        ));
+    }
+}

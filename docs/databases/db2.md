@@ -58,6 +58,8 @@ The ODBC path currently maps these Db2 types:
 
 Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be reported by the ODBC driver as generic or vendor-specific types. Cast them in the query to a supported type if needed.
 
+See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, temporal, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal and text columns use text buffers for driver compatibility.
@@ -68,6 +70,7 @@ The defaults are tuned for throughput over small memory use:
 * `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
 
 Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound.
+If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking
 

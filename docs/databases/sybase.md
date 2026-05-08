@@ -65,6 +65,8 @@ The ODBC path currently maps these Sybase/ASE types:
 
 ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.
 
+See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, and `bit` columns avoid text conversion in the hot path. Decimal, date/time, text, and binary columns still use text buffers for driver compatibility.
@@ -75,6 +77,7 @@ The defaults are tuned for throughput over small memory use:
 * `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`.
 
 Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
+If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking
 

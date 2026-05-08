@@ -53,7 +53,7 @@ impl SybaseSource {
             schema: vec![],
             batch_size: odbc_core::env_usize("SYBASE_BATCH_SIZE")
                 .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize("SYBASE_MAX_STR_LEN")
+            max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
                 .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
         }
     }
@@ -192,7 +192,7 @@ impl SourcePartition for SybaseSourcePartition {
                 .map(|ty| ty.buffer_desc(self.max_str_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        SybaseSourceParser::new(cursor, self.schema.len(), "Sybase")
+        SybaseSourceParser::new(cursor, self.schema.len())
     }
 
     fn nrows(&self) -> usize {
@@ -219,6 +219,14 @@ impl OdbcCoreError for SybaseSourceError {
 }
 
 impl OdbcTypePolicy for SybaseTypeSystem {
+    fn source_name() -> &'static str {
+        "Sybase"
+    }
+
+    fn max_str_len_env() -> &'static str {
+        "SYBASE_MAX_STR_LEN"
+    }
+
     fn nullable(self) -> bool {
         match self {
             SybaseTypeSystem::TinyInt(nullable)
