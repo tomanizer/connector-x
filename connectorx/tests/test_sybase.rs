@@ -72,7 +72,7 @@ fn test_sybase_arrow_basic_types() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -92,7 +92,7 @@ fn test_sybase_arrow_decimal_timestamp() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -137,7 +137,7 @@ fn test_sybase_arrow_binary_time_and_nullable_values() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -189,7 +189,7 @@ fn test_sybase_arrow_primitive_type_matrix() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -276,7 +276,7 @@ fn test_sybase_arrow_date_money_and_text_variants() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -345,7 +345,7 @@ fn test_sybase_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!("skipping Sybase get_arrow test: SYBASE_URL is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase get_arrow test: SYBASE_URL is not set");
         return;
     };
 
@@ -361,7 +361,7 @@ fn test_sybase_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!("skipping Sybase partition test: SYBASE_URL is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Sybase partition test: SYBASE_URL is not set");
         return;
     };
 

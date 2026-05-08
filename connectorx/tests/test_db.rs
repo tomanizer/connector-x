@@ -19,6 +19,9 @@ use testcontainers::{
 #[cfg(any(feature = "src_mssql", feature = "src_oracle"))]
 use testcontainers::core::{CmdWaitFor, ExecCommand};
 
+#[cfg(feature = "src_odbc")]
+use odbc_api::{environment, ConnectionOptions};
+
 #[cfg(feature = "src_postgres")]
 static POSTGRES_INIT: Once = Once::new();
 #[cfg(feature = "src_odbc")]
@@ -74,6 +77,30 @@ fn set_default_env(name: &str, value: &str) {
 #[cfg(feature = "src_odbc")]
 fn escape_odbc_braced_value(value: &str) -> String {
     value.replace('}', "}}")
+}
+
+#[cfg(feature = "src_odbc")]
+fn wait_for_odbc_ready(conn: &str, timeout: Duration, label: &str) {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let last_error = match environment()
+            .and_then(|env| env.connect_with_connection_string(conn, ConnectionOptions::default()))
+            .and_then(|conn| conn.execute("select 1", (), Some(5)).map(|_| ()))
+        {
+            Ok(()) => return,
+            Err(err) => err.to_string(),
+        };
+
+        if Instant::now() >= deadline {
+            panic!(
+                "{label} did not accept ODBC connections within {:?}; last error: {}",
+                timeout, last_error
+            );
+        }
+
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 #[cfg(feature = "src_postgres")]
@@ -171,12 +198,11 @@ pub fn postgres_odbc_url() -> String {
             host.as_str()
         };
 
-        env::set_var(
-            "ODBC_CONN",
-            format!(
-                "Driver={{{escaped_driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
-            ),
+        let odbc_conn = format!(
+            "Driver={{{escaped_driver}}};Server={host_for_url};Port={port};Database=connectorx;UID=connectorx;PWD=connectorx;"
         );
+        wait_for_odbc_ready(&odbc_conn, Duration::from_secs(180), "postgres odbc");
+        env::set_var("ODBC_CONN", odbc_conn);
         env::set_var(
             "ODBC_URL",
             format!(

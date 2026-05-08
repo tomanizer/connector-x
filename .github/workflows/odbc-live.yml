@@ -40,7 +40,30 @@ jobs:
       - name: Install ODBC dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y unixodbc unixodbc-dev pkg-config libssl-dev libkrb5-dev libclang-dev
+          sudo apt-get install -y unixodbc unixodbc-dev freetds-bin freetds-dev pkg-config libssl-dev libkrb5-dev libclang-dev
+          {
+            echo "### ODBC live coverage"
+            echo "- Requested backend: \`${{ inputs.backend }}\`"
+            echo "- Secret-backed live job: running on Ubuntu."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Db2 ODBC/CLI driver
+        if: inputs.backend == 'db2' || inputs.backend == 'both'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y curl tar gzip libxml2 libstdc++6
+          sudo apt-get install -y libaio1 || sudo apt-get install -y libaio1t64
+          mkdir -p "$RUNNER_TEMP/db2"
+          curl -fsSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz -o "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz"
+          tar -xzf "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz" -C "$RUNNER_TEMP/db2"
+          {
+            echo "[IBM DB2 ODBC DRIVER]"
+            echo "Description=IBM DB2 ODBC CLI Driver"
+            echo "Driver=$RUNNER_TEMP/db2/clidriver/lib/libdb2.so"
+          } | sudo tee -a /etc/odbcinst.ini
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/db2/clidriver/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          echo "- Db2 driver setup: registered IBM DB2 ODBC DRIVER from IBM clidriver." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run live Sybase tests
         if: inputs.backend == 'sybase' || inputs.backend == 'both'
@@ -49,13 +72,16 @@ jobs:
           set -euo pipefail
           if ! grep -q 'src_sybase' connectorx/Cargo.toml; then
             echo "src_sybase is not present on this branch; skipping."
+            echo "- Sybase live: skipped because src_sybase is absent." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${SYBASE_URL:-}" ] && [ -z "${SYBASE_ODBC_CONN:-}" ]; then
-            echo "Set SYBASE_URL and/or SYBASE_ODBC_CONN repository secrets to run live Sybase tests."
+            echo "::error::Set SYBASE_URL and/or SYBASE_ODBC_CONN repository secrets to run explicitly requested live Sybase tests."
+            echo "- Sybase live: failed before tests because SYBASE_URL and SYBASE_ODBC_CONN are both missing." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow fptr" --test test_sybase -- --nocapture
+          echo "- Sybase live: exercised against configured secret-backed ODBC driver." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run live Db2 tests
         if: inputs.backend == 'db2' || inputs.backend == 'both'
@@ -64,13 +90,16 @@ jobs:
           set -euo pipefail
           if ! grep -q 'src_db2' connectorx/Cargo.toml; then
             echo "src_db2 is not present on this branch; skipping."
+            echo "- Db2 live: skipped because src_db2 is absent." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${DB2_URL:-}" ] && [ -z "${DB2_ODBC_CONN:-}" ]; then
-            echo "Set DB2_URL and/or DB2_ODBC_CONN repository secrets to run live Db2 tests."
+            echo "::error::Set DB2_URL and/or DB2_ODBC_CONN repository secrets to run explicitly requested live Db2 tests."
+            echo "- Db2 live: failed before tests because DB2_URL and DB2_ODBC_CONN are both missing." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           cargo test -p connectorx --no-default-features --features "src_db2 dst_arrow fptr" --test test_db2 -- --nocapture
+          echo "- Db2 live: exercised against configured secret-backed ODBC driver." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run live generic ODBC tests
         if: inputs.backend == 'odbc' || inputs.backend == 'both'
@@ -79,13 +108,16 @@ jobs:
           set -euo pipefail
           if ! grep -q 'src_odbc' connectorx/Cargo.toml; then
             echo "src_odbc is not present on this branch; skipping."
+            echo "- Generic ODBC live: skipped because src_odbc is absent." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "${ODBC_TEST_QUERY:-}" ] || { [ -z "${ODBC_URL:-}" ] && [ -z "${ODBC_CONN:-}" ]; }; then
-            echo "Set ODBC_TEST_QUERY plus ODBC_URL and/or ODBC_CONN repository secrets to run live generic ODBC tests."
+            echo "::error::Set ODBC_TEST_QUERY plus ODBC_URL and/or ODBC_CONN repository secrets to run explicitly requested live generic ODBC tests."
+            echo "- Generic ODBC live: failed before tests because ODBC_TEST_QUERY and/or both ODBC_URL and ODBC_CONN are missing." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture
+          cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture --test-threads=1
+          echo "- Generic ODBC live: exercised against configured secret-backed ODBC driver." >> "$GITHUB_STEP_SUMMARY"
 
   live-postgres-odbc:
     if: inputs.backend == 'postgres' || inputs.backend == 'both'
@@ -108,10 +140,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y unixodbc unixodbc-dev odbc-postgresql pkg-config libssl-dev libkrb5-dev libclang-dev
           odbcinst -q -d
+          {
+            echo "### ODBC live coverage"
+            echo "- Requested backend: \`${{ inputs.backend }}\`"
+            echo "- Generic ODBC PostgreSQL testcontainer: running with no repository secrets."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify Docker access for Testcontainers
         run: docker ps
 
       - name: Run generic ODBC tests against PostgreSQL
         run: |
-          cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture
+          cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc -- --nocapture --test-threads=1
+          echo "- Generic ODBC PostgreSQL testcontainer: exercised through psqlODBC and Docker testcontainers." >> "$GITHUB_STEP_SUMMARY"

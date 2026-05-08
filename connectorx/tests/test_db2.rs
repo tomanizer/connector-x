@@ -70,7 +70,7 @@ fn test_db2_arrow_basic_types() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -90,7 +90,7 @@ fn test_db2_arrow_decimal_timestamp() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -136,7 +136,7 @@ fn test_db2_arrow_binary_time_and_nullable_values() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -188,7 +188,7 @@ fn test_db2_arrow_primitive_type_matrix() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -260,7 +260,7 @@ fn test_db2_arrow_date_decimal_and_text_variants() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -330,7 +330,7 @@ fn test_db2_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("skipping Db2 get_arrow test: DB2_URL is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 get_arrow test: DB2_URL is not set");
         return;
     };
 
@@ -346,7 +346,7 @@ fn test_db2_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("skipping Db2 partition test: DB2_URL is not set");
+        eprintln!("CONNECTORX_SKIP: skipping Db2 partition test: DB2_URL is not set");
         return;
     };
 

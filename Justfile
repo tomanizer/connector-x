@@ -40,6 +40,59 @@ bench-db2-odbc:
 bench-odbc:
     cargo bench -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --bench odbc
 
+test-odbc-live target="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    run_cargo_test() {
+        local features="$1"
+        local test_name="$2"
+        local coverage_msg="$3"
+        shift 3
+        echo "ODBC_COVERAGE: $coverage_msg"
+        cargo test -p connectorx --no-default-features --features "$features" --test "$test_name" -- --nocapture "$@"
+    }
+    run_postgres() {
+        CONNECTORX_ODBC_TESTCONTAINER=1 \
+            run_cargo_test "src_odbc dst_arrow fptr" "test_odbc" "running generic ODBC PostgreSQL testcontainer coverage" --test-threads=1
+    }
+    run_sybase() {
+        if [ -z "${SYBASE_ODBC_CONN:-}" ] && [ -z "${SYBASE_URL:-}" ]; then
+            echo "CONNECTORX_SKIP: skipping Sybase live tests: set SYBASE_ODBC_CONN and/or SYBASE_URL"
+            return
+        fi
+        run_cargo_test "src_sybase dst_arrow fptr" "test_sybase" "running secret/local Sybase ODBC coverage"
+    }
+    run_db2() {
+        if [ -z "${DB2_ODBC_CONN:-}" ] && [ -z "${DB2_URL:-}" ]; then
+            echo "CONNECTORX_SKIP: skipping Db2 live tests: set DB2_ODBC_CONN and/or DB2_URL"
+            return
+        fi
+        run_cargo_test "src_db2 dst_arrow fptr" "test_db2" "running secret/local Db2 ODBC coverage"
+    }
+    run_odbc() {
+        if [ -z "${ODBC_TEST_QUERY:-}" ] || { [ -z "${ODBC_CONN:-}" ] && [ -z "${ODBC_URL:-}" ]; }; then
+            echo "CONNECTORX_SKIP: skipping generic ODBC live tests: set ODBC_TEST_QUERY plus ODBC_CONN and/or ODBC_URL"
+            return
+        fi
+        run_cargo_test "src_odbc dst_arrow fptr" "test_odbc" "running secret/local generic ODBC coverage"
+    }
+    case "{{target}}" in
+        all)
+            run_postgres
+            run_sybase
+            run_db2
+            run_odbc
+            ;;
+        postgres) run_postgres ;;
+        sybase) run_sybase ;;
+        db2) run_db2 ;;
+        odbc) run_odbc ;;
+        *)
+            echo "unknown ODBC live target '{{target}}'; use all, postgres, sybase, db2, or odbc" >&2
+            exit 2
+            ;;
+    esac
+
 start-db2-docker:
     #!/usr/bin/env bash
     set -euo pipefail
