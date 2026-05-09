@@ -24,6 +24,7 @@ use odbc_api::{
 };
 use rust_decimal::Decimal;
 use sqlparser::dialect::MsSqlDialect;
+use std::sync::Arc;
 use url::Url;
 use urlencoding::decode;
 
@@ -136,6 +137,7 @@ where
                 SybaseSourcePartition::new(
                     self.conn.clone(),
                     query,
+                    &self.names,
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
@@ -148,7 +150,8 @@ where
 pub struct SybaseSourcePartition {
     conn: String,
     query: CXQuery<String>,
-    schema: Vec<SybaseTypeSystem>,
+    names: Arc<[String]>,
+    schema: Arc<[SybaseTypeSystem]>,
     column_buffer_max_lens: Vec<usize>,
     nrows: usize,
     ncols: usize,
@@ -159,6 +162,7 @@ impl SybaseSourcePartition {
     pub fn new(
         conn: String,
         query: &CXQuery<String>,
+        names: &[String],
         schema: &[SybaseTypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
@@ -166,7 +170,8 @@ impl SybaseSourcePartition {
         Self {
             conn,
             query: query.clone(),
-            schema: schema.to_vec(),
+            names: names.to_vec().into(),
+            schema: schema.to_vec().into(),
             column_buffer_max_lens: column_buffer_max_lens.to_vec(),
             nrows: 0,
             ncols: schema.len(),
@@ -198,7 +203,7 @@ impl SourcePartition for SybaseSourcePartition {
                 .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        SybaseSourceParser::new(cursor, self.schema.len())
+        SybaseSourceParser::new(cursor, Arc::clone(&self.names), Arc::clone(&self.schema))
     }
 
     fn nrows(&self) -> usize {

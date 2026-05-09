@@ -25,6 +25,7 @@ use odbc_api::{
 };
 use rust_decimal::Decimal;
 use sqlparser::dialect::GenericDialect;
+use std::sync::Arc;
 use url::Url;
 use urlencoding::decode;
 
@@ -135,6 +136,7 @@ where
                 Db2SourcePartition::new(
                     self.conn.clone(),
                     query,
+                    &self.names,
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
@@ -147,7 +149,8 @@ where
 pub struct Db2SourcePartition {
     conn: String,
     query: CXQuery<String>,
-    schema: Vec<Db2TypeSystem>,
+    names: Arc<[String]>,
+    schema: Arc<[Db2TypeSystem]>,
     column_buffer_max_lens: Vec<usize>,
     nrows: usize,
     ncols: usize,
@@ -158,6 +161,7 @@ impl Db2SourcePartition {
     pub fn new(
         conn: String,
         query: &CXQuery<String>,
+        names: &[String],
         schema: &[Db2TypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
@@ -165,7 +169,8 @@ impl Db2SourcePartition {
         Self {
             conn,
             query: query.clone(),
-            schema: schema.to_vec(),
+            names: names.to_vec().into(),
+            schema: schema.to_vec().into(),
             column_buffer_max_lens: column_buffer_max_lens.to_vec(),
             nrows: 0,
             ncols: schema.len(),
@@ -196,7 +201,7 @@ impl SourcePartition for Db2SourcePartition {
                 .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        Db2SourceParser::new(cursor, self.schema.len())
+        Db2SourceParser::new(cursor, Arc::clone(&self.names), Arc::clone(&self.schema))
     }
 
     fn nrows(&self) -> usize {
