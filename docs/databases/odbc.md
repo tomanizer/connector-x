@@ -44,10 +44,17 @@ conn = ConnectionUrl(
 )
 ```
 
-For DSN-only connections, omit the server fields and pass `dsn=`:
+For DSN-only connections, omit the server fields and pass `dsn=`. If the DSN still needs credentials, pass `username` and `password`; ConnectorX encodes them as `UID` and `PWD` ODBC options:
 
 ```python
 conn = ConnectionUrl(backend="odbc", dsn="Warehouse DSN")
+
+conn_with_credentials = ConnectionUrl(
+    backend="odbc",
+    dsn="Warehouse DSN",
+    username="connectorx",
+    password="connectorx",
+)
 ```
 
 The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route. Use `return_type="arrow"`, `return_type="arrow_stream"`, or a downstream Arrow consumer. To get pandas today, read Arrow and call `table.to_pandas()` after installing `pyarrow`.

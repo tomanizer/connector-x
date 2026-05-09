@@ -91,6 +91,8 @@ partition to the database and then write the returned data to the destination ro
 
 Example connection string, supported protocols and data types for each data source can be found [here](https://sfu-db.github.io/connector-x/databases.html).
 
+ODBC-backed sources are available for generic ODBC drivers, Sybase ASE, and IBM Db2. These paths require the platform ODBC manager plus the target database driver at runtime, for example FreeTDS or SAP ASE SDK for Sybase, IBM Data Server Driver for ODBC and CLI for Db2, or psqlODBC for PostgreSQL-backed generic ODBC tests.
+
 For more planned data sources, please check out our [discussion](https://github.com/sfu-db/connector-x/discussions/61).
 
 ## Sources
@@ -105,7 +107,9 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] Oracle
 - [x] Big Query
 - [x] Trino
-- [x] ODBC
+- [x] Sybase ASE (through ODBC)
+- [x] IBM Db2 (through ODBC)
+- [x] Generic ODBC
 - [ ] ...
 
 ## Destinations

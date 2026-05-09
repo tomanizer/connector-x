@@ -10,6 +10,14 @@ The easiest way to install ConnectorX is using pip, with the following command:
 pip install connectorx
 ```
 
+The Python wheel includes ConnectorX itself, but not database-specific ODBC drivers. To use generic ODBC, Sybase, or Db2 sources, install the platform ODBC manager and the target database driver separately:
+
+* Linux needs unixODBC runtime libraries and the target driver registered with unixODBC.
+* macOS needs Homebrew `unixodbc` and the target driver installed locally.
+* Windows uses the Windows ODBC manager and needs the vendor driver installed and registered.
+
+See the [ODBC database page](./databases/odbc.md) for connection-string forms, driver examples, and live-test setup.
+
 ### Build from source code
 
 * Step 0: Install tools.
@@ -28,7 +36,7 @@ rustup install {version}
 rustup override set {version}
 ```
 
-* Step 3: Install system dependencies. Please refer to [release.yml](https://github.com/sfu-db/connector-x/blob/main/.github/workflows/release.yml) for dependencies needed for different os.
+* Step 3: Install system dependencies. Please refer to [release.yml](https://github.com/sfu-db/connector-x/blob/main/.github/workflows/release.yml) for dependencies needed for different operating systems.
 
     ConnectorX wheels link against the platform ODBC manager so the Python package can expose Sybase, Db2, and generic ODBC sources. Database-specific ODBC drivers are runtime dependencies and are not bundled in wheels.
 
