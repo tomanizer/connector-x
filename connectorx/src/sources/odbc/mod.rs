@@ -64,6 +64,12 @@ const ODBC_DEFAULT_MAX_STR_LEN: usize = 1024;
 
 pub type OdbcSourceParser = odbc_core::OdbcParser<OdbcTypeSystem, OdbcSourceError>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct OdbcOptions {
+    pub batch_size: usize,
+    pub max_str_len: usize,
+}
+
 pub struct OdbcSource {
     conn: String,
     origin_query: Option<String>,
@@ -77,7 +83,17 @@ pub struct OdbcSource {
 
 impl OdbcSource {
     #[throws(OdbcSourceError)]
-    pub fn new(conn: &str, _nconn: usize) -> Self {
+    pub fn new(conn: &str, nconn: usize) -> Self {
+        let options = OdbcOptions {
+            batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
+                .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+        };
+        Self::with_options(conn, nconn, options)?
+    }
+
+    #[throws(OdbcSourceError)]
+    pub fn with_options(conn: &str, _nconn: usize, options: OdbcOptions) -> Self {
         Self {
             conn: odbc_conn_string(conn)?,
             origin_query: None,
@@ -85,9 +101,8 @@ impl OdbcSource {
             names: vec![],
             schema: vec![],
             column_buffer_max_lens: vec![],
-            batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
-                .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+            batch_size: options.batch_size,
+            max_str_len: options.max_str_len,
         }
     }
 

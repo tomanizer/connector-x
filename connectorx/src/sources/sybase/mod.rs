@@ -33,6 +33,12 @@ const SYBASE_DEFAULT_MAX_STR_LEN: usize = 1024;
 
 pub type SybaseSourceParser = odbc_core::OdbcParser<SybaseTypeSystem, SybaseSourceError>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct SybaseOptions {
+    pub batch_size: usize,
+    pub max_str_len: usize,
+}
+
 pub struct SybaseSource {
     conn: String,
     origin_query: Option<String>,
@@ -46,7 +52,18 @@ pub struct SybaseSource {
 
 impl SybaseSource {
     #[throws(SybaseSourceError)]
-    pub fn new(conn: &str, _nconn: usize) -> Self {
+    pub fn new(conn: &str, nconn: usize) -> Self {
+        let options = SybaseOptions {
+            batch_size: odbc_core::env_usize("SYBASE_BATCH_SIZE")
+                .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
+                .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
+        };
+        Self::with_options(conn, nconn, options)?
+    }
+
+    #[throws(SybaseSourceError)]
+    pub fn with_options(conn: &str, _nconn: usize, options: SybaseOptions) -> Self {
         Self {
             conn: sybase_conn_string(conn)?,
             origin_query: None,
@@ -54,10 +71,8 @@ impl SybaseSource {
             names: vec![],
             schema: vec![],
             column_buffer_max_lens: vec![],
-            batch_size: odbc_core::env_usize("SYBASE_BATCH_SIZE")
-                .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
-                .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
+            batch_size: options.batch_size,
+            max_str_len: options.max_str_len,
         }
     }
 

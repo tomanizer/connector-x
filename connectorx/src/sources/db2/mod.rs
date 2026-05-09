@@ -34,6 +34,12 @@ const DB2_DEFAULT_MAX_STR_LEN: usize = 1024;
 
 pub type Db2SourceParser = odbc_core::OdbcParser<Db2TypeSystem, Db2SourceError>;
 
+#[derive(Debug, Clone, Copy)]
+pub struct Db2Options {
+    pub batch_size: usize,
+    pub max_str_len: usize,
+}
+
 pub struct Db2Source {
     conn: String,
     origin_query: Option<String>,
@@ -47,7 +53,17 @@ pub struct Db2Source {
 
 impl Db2Source {
     #[throws(Db2SourceError)]
-    pub fn new(conn: &str, _nconn: usize) -> Self {
+    pub fn new(conn: &str, nconn: usize) -> Self {
+        let options = Db2Options {
+            batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
+                .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+        };
+        Self::with_options(conn, nconn, options)?
+    }
+
+    #[throws(Db2SourceError)]
+    pub fn with_options(conn: &str, _nconn: usize, options: Db2Options) -> Self {
         Self {
             conn: db2_conn_string(conn)?,
             origin_query: None,
@@ -55,9 +71,8 @@ impl Db2Source {
             names: vec![],
             schema: vec![],
             column_buffer_max_lens: vec![],
-            batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
-                .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            batch_size: options.batch_size,
+            max_str_len: options.max_str_len,
         }
     }
 

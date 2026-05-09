@@ -15,7 +15,7 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::odbc::{odbc_conn_string, OdbcSource},
+    sources::odbc::{odbc_conn_string, OdbcOptions, OdbcSource},
     sql::CXQuery,
     transports::OdbcArrowTransport,
 };
@@ -405,35 +405,43 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
 }
 
 #[test]
-fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
+fn test_odbc_testcontainer_streaming_supports_distinct_source_options() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
         eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC streaming per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping ODBC source options test: CONNECTORX_ODBC_TESTCONTAINER is not set"
         );
         return;
     }
 
-    let _guard = lock_odbc_env();
     let conn = test_db::postgres_odbc_conn();
-    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
-
     let queries = [CXQuery::naked(
         "select long_text from cx_odbc_edge where id = 1",
     )];
-    let source = OdbcSource::new(&conn, 1).unwrap();
-    let mut destination = ArrowDestination::new();
-    let dispatcher =
-        Dispatcher::<_, _, OdbcArrowTransport>::new(source, &mut destination, &queries, None);
-    dispatcher.run().unwrap();
 
-    let mut batches = destination.arrow().unwrap();
-    let batch = batches.pop().unwrap();
-    let long_text = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<StringArray>()
+    for max_str_len in [4, 128] {
+        let source = OdbcSource::with_options(
+            &conn,
+            1,
+            OdbcOptions {
+                batch_size: 1024,
+                max_str_len,
+            },
+        )
         .unwrap();
-    assert_eq!(long_text.value(0).len(), 64);
+        let mut destination = ArrowDestination::new();
+        let dispatcher =
+            Dispatcher::<_, _, OdbcArrowTransport>::new(source, &mut destination, &queries, None);
+        dispatcher.run().unwrap();
+
+        let mut batches = destination.arrow().unwrap();
+        let batch = batches.pop().unwrap();
+        let long_text = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(long_text.value(0).len(), 64);
+    }
 }
