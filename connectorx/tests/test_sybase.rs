@@ -19,11 +19,23 @@ use connectorx::{
     transports::SybaseArrowTransport,
 };
 
+mod test_db;
+
+fn use_sybase_testcontainer() -> bool {
+    std::env::var("CONNECTORX_SYBASE_TESTCONTAINER").is_ok()
+}
+
 fn sybase_odbc_conn() -> Option<String> {
+    if use_sybase_testcontainer() {
+        return Some(test_db::sybase_odbc_conn());
+    }
     std::env::var("SYBASE_ODBC_CONN").ok()
 }
 
 fn sybase_url() -> Option<String> {
+    if use_sybase_testcontainer() {
+        return Some(test_db::sybase_odbc_url());
+    }
     std::env::var("SYBASE_URL").ok()
 }
 
@@ -338,6 +350,55 @@ fn test_sybase_arrow_date_money_and_text_variants() {
 
     let text_v = rb.column(5).as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!(text_v.value(0), "long text value");
+}
+
+#[test]
+fn test_sybase_testcontainer_time2_and_null_bit() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase TIME2/null bit test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select convert(bigtime, '03:04:05.123456') as time_v, \
+         convert(bit, null) as nullable_bit",
+    )];
+
+    let source = SybaseSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, SybaseArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 2);
+
+    let time_v = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<Time64MicrosecondArray>()
+        .unwrap();
+    let expected_time = NaiveTime::parse_from_str("03:04:05.123456", "%H:%M:%S%.f")
+        .unwrap()
+        .num_seconds_from_midnight() as i64
+        * 1_000_000
+        + 123_456;
+    assert_eq!(time_v.value(0), expected_time);
+
+    let nullable_bit = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert!(nullable_bit.is_null(0));
 }
 
 #[test]

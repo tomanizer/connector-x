@@ -16,16 +16,25 @@ use testcontainers::{
     GenericImage, ImageExt,
 };
 
-#[cfg(any(feature = "src_mssql", feature = "src_oracle"))]
+#[cfg(any(
+    feature = "src_mssql",
+    feature = "src_oracle",
+    feature = "src_db2",
+    feature = "src_sybase"
+))]
 use testcontainers::core::{CmdWaitFor, ExecCommand};
 
-#[cfg(feature = "src_odbc")]
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 use odbc_api::{environment, ConnectionOptions};
 
 #[cfg(feature = "src_postgres")]
 static POSTGRES_INIT: Once = Once::new();
 #[cfg(feature = "src_odbc")]
 static POSTGRES_ODBC_INIT: Once = Once::new();
+#[cfg(feature = "src_db2")]
+static DB2_ODBC_INIT: Once = Once::new();
+#[cfg(feature = "src_sybase")]
+static SYBASE_ODBC_INIT: Once = Once::new();
 #[cfg(feature = "src_mysql")]
 static MYSQL_INIT: Once = Once::new();
 #[cfg(feature = "src_mssql")]
@@ -67,26 +76,36 @@ fn wait_for_tcp_ready(host: &str, port: u16, timeout: Duration, label: &str) {
     }
 }
 
-#[cfg(feature = "src_odbc")]
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 fn set_default_env(name: &str, value: &str) {
     if env::var(name).is_err() {
         env::set_var(name, value);
     }
 }
 
-#[cfg(feature = "src_odbc")]
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 fn escape_odbc_braced_value(value: &str) -> String {
     value.replace('}', "}}")
 }
 
-#[cfg(feature = "src_odbc")]
+#[cfg(any(feature = "src_db2", feature = "src_sybase"))]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(any(feature = "src_odbc", feature = "src_sybase"))]
 fn wait_for_odbc_ready(conn: &str, timeout: Duration, label: &str) {
+    wait_for_odbc_query(conn, "select 1", timeout, label);
+}
+
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
+fn wait_for_odbc_query(conn: &str, query: &str, timeout: Duration, label: &str) {
     let deadline = Instant::now() + timeout;
 
     loop {
         let last_error = match environment()
             .and_then(|env| env.connect_with_connection_string(conn, ConnectionOptions::default()))
-            .and_then(|conn| conn.execute("select 1", (), Some(5)).map(|_| ()))
+            .and_then(|conn| conn.execute(query, (), Some(5)).map(|_| ()))
         {
             Ok(()) => return,
             Err(err) => err.to_string(),
@@ -222,6 +241,227 @@ pub fn postgres_odbc_url() -> String {
 pub fn postgres_odbc_conn() -> String {
     postgres_odbc_url();
     env::var("ODBC_CONN").expect("ODBC_CONN must be set")
+}
+
+#[cfg(feature = "src_db2")]
+pub fn db2_odbc_url() -> String {
+    DB2_ODBC_INIT.call_once(|| {
+        set_default_env(
+            "DB2_TEST_QUERY",
+            "select id, flag, name from cx_odbc_edge order by id",
+        );
+        set_default_env(
+            "DB2_PARTITION_QUERY",
+            "select id, flag, name from cx_odbc_edge",
+        );
+        set_default_env("DB2_PARTITION_COLUMN", "id");
+
+        if env::var("DB2_URL").is_ok() && env::var("DB2_ODBC_CONN").is_ok() {
+            return;
+        }
+
+        let image_name = env::var("DB2_TESTCONTAINER_IMAGE")
+            .unwrap_or_else(|_| "icr.io/db2_community/db2".to_string());
+        let image_tag = env::var("DB2_TESTCONTAINER_TAG").unwrap_or_else(|_| "latest".to_string());
+        let password =
+            env::var("DB2_TESTCONTAINER_PASSWORD").unwrap_or_else(|_| "password".to_string());
+        let database = env::var("DB2_TESTCONTAINER_DATABASE").unwrap_or_else(|_| "testdb".to_string());
+        let driver = env::var("DB2_ODBC_DRIVER")
+            .unwrap_or_else(|_| "IBM DB2 ODBC DRIVER".to_string());
+        let escaped_driver = escape_odbc_braced_value(&driver);
+        let init_script = scripts_dir().join("odbc_db2.sql");
+
+        let image = GenericImage::new(image_name, image_tag)
+            .with_exposed_port(50000.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Setup has completed"))
+            .with_startup_timeout(Duration::from_secs(900))
+            .with_env_var("LICENSE", "accept")
+            .with_env_var("DB2INST1_PASSWORD", password.as_str())
+            .with_env_var("DBNAME", database.as_str())
+            .with_env_var("BLU", "false")
+            .with_env_var("ENABLE_ORACLE_COMPATIBILITY", "false")
+            .with_env_var("UPDATEAVAIL", "NO")
+            .with_env_var("TO_CREATE_SAMPLEDB", "false")
+            .with_mount(Mount::bind_mount(
+                init_script.to_string_lossy().into_owned(),
+                "/tmp/odbc_db2.sql".to_string(),
+            ))
+            .with_privileged(true);
+
+        let container = image.start().expect("start Db2 ODBC testcontainer");
+        let host = container
+            .get_host()
+            .expect("get Db2 ODBC container host")
+            .to_string();
+        let port = container
+            .get_host_port_ipv4(50000)
+            .expect("get Db2 ODBC exposed port");
+
+        wait_for_tcp_ready(&host, port, Duration::from_secs(900), "Db2 ODBC");
+        let host_for_url = if host.eq_ignore_ascii_case("localhost") {
+            "127.0.0.1"
+        } else {
+            host.as_str()
+        };
+
+        let db2_init = format!(
+            "db2 connect to {} user db2inst1 using {} && db2 -tvf /tmp/odbc_db2.sql",
+            shell_single_quote(&database),
+            shell_single_quote(&password)
+        );
+        let init_cmd = format!("su - db2inst1 -c {}", shell_single_quote(&db2_init));
+        let mut exec = container
+            .exec(
+                ExecCommand::new(["bash", "-lc", init_cmd.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+            )
+            .expect("exec Db2 init script");
+        let code = exec.exit_code().expect("read Db2 init exit code").unwrap_or(-1);
+        if code != 0 {
+            let stdout =
+                String::from_utf8(exec.stdout_to_vec().unwrap_or_default()).unwrap_or_default();
+            let stderr =
+                String::from_utf8(exec.stderr_to_vec().unwrap_or_default()).unwrap_or_default();
+            panic!("Db2 init failed: {}\n{}", stdout, stderr);
+        }
+
+        let odbc_conn = format!(
+            "Driver={{{escaped_driver}}};Hostname={{{}}};Port={port};Protocol=TCPIP;Database={{{}}};UID=db2inst1;PWD={{{}}};",
+            escape_odbc_braced_value(host_for_url),
+            escape_odbc_braced_value(&database),
+            escape_odbc_braced_value(&password)
+        );
+        wait_for_odbc_query(
+            &odbc_conn,
+            "select 1 from sysibm.sysdummy1",
+            Duration::from_secs(300),
+            "Db2 ODBC",
+        );
+        env::set_var("DB2_ODBC_CONN", odbc_conn);
+        env::set_var(
+            "DB2_URL",
+            format!(
+                "db2://db2inst1:{}@{host_for_url}:{port}/{database}?driver={}",
+                urlencoding::encode(&password),
+                urlencoding::encode(&driver)
+            ),
+        );
+
+        std::mem::forget(container);
+    });
+
+    env::var("DB2_URL").expect("DB2_URL must be set")
+}
+
+#[cfg(feature = "src_db2")]
+pub fn db2_odbc_conn() -> String {
+    db2_odbc_url();
+    env::var("DB2_ODBC_CONN").expect("DB2_ODBC_CONN must be set")
+}
+
+#[cfg(feature = "src_sybase")]
+pub fn sybase_odbc_url() -> String {
+    SYBASE_ODBC_INIT.call_once(|| {
+        set_default_env(
+            "SYBASE_TEST_QUERY",
+            "select id, flag, name from cx_odbc_edge order by id",
+        );
+        set_default_env(
+            "SYBASE_PARTITION_QUERY",
+            "select id, flag, name from cx_odbc_edge",
+        );
+        set_default_env("SYBASE_PARTITION_COLUMN", "id");
+
+        if env::var("SYBASE_URL").is_ok() && env::var("SYBASE_ODBC_CONN").is_ok() {
+            return;
+        }
+
+        let image_name = env::var("SYBASE_TESTCONTAINER_IMAGE")
+            .unwrap_or_else(|_| "datagrip/sybase".to_string());
+        let image_tag = env::var("SYBASE_TESTCONTAINER_TAG").unwrap_or_else(|_| "16.0".to_string());
+        let password =
+            env::var("SYBASE_TESTCONTAINER_PASSWORD").unwrap_or_else(|_| "myPassword".to_string());
+        let driver = env::var("SYBASE_ODBC_DRIVER").unwrap_or_else(|_| "FreeTDS".to_string());
+        let escaped_driver = escape_odbc_braced_value(&driver);
+        let init_script = scripts_dir().join("odbc_sybase.sql");
+
+        let image = GenericImage::new(image_name, image_tag)
+            .with_exposed_port(5000.tcp())
+            .with_wait_for(WaitFor::seconds(1))
+            .with_startup_timeout(Duration::from_secs(300))
+            .with_env_var("SYBASE_PASSWORD", password.as_str())
+            .with_env_var("SYBASE_SA_PASSWORD", password.as_str())
+            .with_env_var("SA_PASSWORD", password.as_str())
+            .with_mount(Mount::bind_mount(
+                init_script.to_string_lossy().into_owned(),
+                "/tmp/odbc_sybase.sql".to_string(),
+            ));
+
+        let container = image.start().expect("start Sybase ODBC testcontainer");
+        let host = container
+            .get_host()
+            .expect("get Sybase ODBC container host")
+            .to_string();
+        let port = container
+            .get_host_port_ipv4(5000)
+            .expect("get Sybase ODBC exposed port");
+
+        wait_for_tcp_ready(&host, port, Duration::from_secs(300), "Sybase ODBC");
+        let host_for_url = if host.eq_ignore_ascii_case("localhost") {
+            "127.0.0.1"
+        } else {
+            host.as_str()
+        };
+
+        let odbc_conn = format!(
+            "Driver={{{escaped_driver}}};Server={{{}}};Port={port};TDS_Version=5.0;UID=sa;PWD={{{}}};Database=tempdb;",
+            escape_odbc_braced_value(host_for_url),
+            escape_odbc_braced_value(&password)
+        );
+        wait_for_odbc_ready(&odbc_conn, Duration::from_secs(300), "Sybase ODBC");
+
+        let init_cmd = format!(
+            "isql -Usa -P{} -SMYSYBASE -Dtempdb -i /tmp/odbc_sybase.sql",
+            shell_single_quote(&password)
+        );
+        let mut exec = container
+            .exec(
+                ExecCommand::new(["bash", "-lc", init_cmd.as_str()])
+                    .with_cmd_ready_condition(CmdWaitFor::exit_code(0)),
+            )
+            .expect("exec Sybase init script");
+        let code = exec
+            .exit_code()
+            .expect("read Sybase init exit code")
+            .unwrap_or(-1);
+        if code != 0 {
+            let stdout =
+                String::from_utf8(exec.stdout_to_vec().unwrap_or_default()).unwrap_or_default();
+            let stderr =
+                String::from_utf8(exec.stderr_to_vec().unwrap_or_default()).unwrap_or_default();
+            panic!("Sybase init failed: {}\n{}", stdout, stderr);
+        }
+
+        env::set_var("SYBASE_ODBC_CONN", odbc_conn);
+        env::set_var(
+            "SYBASE_URL",
+            format!(
+                "sybase://sa:{}@{host_for_url}:{port}/tempdb?driver={}&tds_version=5.0",
+                urlencoding::encode(&password),
+                urlencoding::encode(&driver)
+            ),
+        );
+
+        std::mem::forget(container);
+    });
+
+    env::var("SYBASE_URL").expect("SYBASE_URL must be set")
+}
+
+#[cfg(feature = "src_sybase")]
+pub fn sybase_odbc_conn() -> String {
+    sybase_odbc_url();
+    env::var("SYBASE_ODBC_CONN").expect("SYBASE_ODBC_CONN must be set")
 }
 
 #[cfg(feature = "src_mysql")]
