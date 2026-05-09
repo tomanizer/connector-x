@@ -76,6 +76,8 @@ partition to the database and then write the returned data to the destination ro
 
 Example connection string, supported protocols and data types for each data source can be found [here](https://sfu-db.github.io/connector-x/databases.html).
 
+ODBC-backed sources are available for generic ODBC drivers, Sybase ASE, and IBM Db2. Install the platform ODBC manager plus the target database driver at runtime; ConnectorX does not bundle commercial or database-specific ODBC drivers in Python wheels.
+
 For more planned data sources, please check out our [discussion](https://github.com/sfu-db/connector-x/discussions/61).
 
 ## Sources
@@ -89,9 +91,10 @@ For more planned data sources, please check out our [discussion](https://github.
 - [x] Azure SQL Database (through mssql protocol)
 - [x] Sybase ASE (through ODBC)
 - [x] IBM Db2 (through ODBC)
-- [x] ODBC
+- [x] Generic ODBC
 - [x] Oracle
 - [x] Big Query
+- [x] Trino
 - [ ] ...
 
 ## Destinations
