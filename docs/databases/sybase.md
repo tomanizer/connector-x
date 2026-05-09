@@ -115,3 +115,5 @@ SYBASE_BENCH_QUERY="select * from dbo.cx_sybase_test" \
 SYBASE_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
 ```
+
+To compare Polars ConnectorX `sybase://` reads against Polars `read_database(..., connection=SYBASE_ODBC_CONN)` over `arrow-odbc`, use `python scripts/odbc_route_bench.py --backend sybase` and provide the `SYBASE_COMPARE_*` (or shared `CX_ODBC_COMPARE_*`) workload env vars documented in `docs/databases/odbc.md`.

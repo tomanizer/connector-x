@@ -136,3 +136,5 @@ DB2_BENCH_QUERY="select * from cx_db2_test" \
 DB2_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
 ```
+
+To compare Polars ConnectorX `db2://` reads against Polars `read_database(..., connection=DB2_ODBC_CONN)` over `arrow-odbc`, use `python scripts/odbc_route_bench.py --backend db2` and provide the `DB2_COMPARE_*` (or shared `CX_ODBC_COMPARE_*`) workload env vars documented in `docs/databases/odbc.md`.

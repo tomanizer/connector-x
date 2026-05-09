@@ -115,6 +115,36 @@ Useful benchmark controls:
 * `ODBC_BENCH_BATCH_SIZES`: comma-separated `ODBC_BATCH_SIZE` values to compare. Defaults to `1024,4096,8192,16384`.
 * `ODBC_BENCH_QUERY`: custom benchmark query. When set, the benchmark runs only that query.
 
+## ConnectorX vs arrow-odbc comparison harness
+
+For end-to-end correctness and throughput comparisons between Polars ConnectorX routes and the Polars `read_database` fallback over `arrow-odbc`, use:
+
+```bash
+python scripts/odbc_route_bench.py --backend odbc --json-out /tmp/odbc-route-results.json
+```
+
+The harness compares these route shapes when their env vars are present:
+
+* `pl.read_database_uri(..., engine="connectorx")` through `DB2_URL`, `SYBASE_URL`, or `ODBC_URL`
+* `pl.read_database_uri(..., engine="connectorx", partition_on=..., partition_range=..., partition_num=...)`
+* `pl.read_database(..., connection="Driver={...};...")` through `DB2_ODBC_CONN`, `SYBASE_ODBC_CONN`, or `ODBC_CONN`
+
+Connection env vars are backend-specific, but workload env vars can be shared across backends with the `CX_ODBC_COMPARE_*` prefix or overridden per backend with `DB2_COMPARE_*`, `SYBASE_COMPARE_*`, and `ODBC_COMPARE_*`.
+
+Required workload/query env vars:
+
+* `*_COMPARE_MIXED_QUERY`: query or view covering integer keys, nullable/non-nullable strings, long strings, long binary values, decimals, date/time/timestamp values, and null-heavy columns.
+* `*_COMPARE_WIDE_QUERY`: query or view covering a wide table (for example 100+ columns).
+* `*_COMPARE_PARTITION_QUERY`, `*_COMPARE_PARTITION_COLUMN`, `*_COMPARE_PARTITION_RANGE=min,max`, `*_COMPARE_PARTITION_NUM`: large partitionable query for comparing single-query ConnectorX, partitioned ConnectorX, and `arrow-odbc`.
+* `*_COMPARE_MIXED_SORT_COLUMNS`, `*_COMPARE_WIDE_SORT_COLUMNS`, `*_COMPARE_PARTITION_SORT_COLUMNS` (optional): comma-separated stable sort keys used before hashing and sampling so partitioned reads can be compared order-independently.
+
+Optional harness controls:
+
+* `ARROW_ODBC_BATCH_SIZE`: passes `batch_size`/`iter_batches=True` to `pl.read_database`.
+* Backend fetch buffer env vars such as `ODBC_BATCH_SIZE`, `ODBC_MAX_STR_LEN`, `DB2_BATCH_SIZE`, `DB2_MAX_STR_LEN`, `SYBASE_BATCH_SIZE`, and `SYBASE_MAX_STR_LEN` are recorded in the output alongside wall-clock time, rows/sec, best-effort peak RSS, and connection/partition counts.
+
+Correctness checks fail the script when routes disagree on row counts, column names, Polars schema, Arrow schema, null counts, hash/sample values, numeric/date/timestamp min/max values, or decimal precision/scale.
+
 ## Testing
 
 For the preferred live test, run PostgreSQL through the Rust testcontainer helper and connect to it through psqlODBC:
