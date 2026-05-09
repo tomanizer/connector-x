@@ -402,6 +402,42 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let destination = get_arrow(
+        &source_conn,
+        None,
+        &[CXQuery::naked("select repeat('x', 2048) as long_text")],
+        None,
+    )
+    .unwrap();
+    let mut batches = destination.arrow().unwrap();
+    let batch = batches.pop().unwrap();
+    let long_text = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(long_text.value(0).len(), 2048);
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let destination = get_arrow(
+        &source_conn,
+        None,
+        &[CXQuery::naked(
+            "select decode(repeat('ab', 2048), 'hex') as long_binary",
+        )],
+        None,
+    )
+    .unwrap();
+    let mut batches = destination.arrow().unwrap();
+    let batch = batches.pop().unwrap();
+    let long_binary = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(long_binary.value(0).len(), 2048);
 }
 
 #[test]

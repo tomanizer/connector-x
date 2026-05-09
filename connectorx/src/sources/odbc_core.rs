@@ -252,18 +252,30 @@ pub(crate) fn ensure_column_not_truncated<E>(
 where
     E: OdbcCoreError,
 {
-    let indicator = truncated_indicator(column);
-    if let Some(indicator) = indicator {
-        return Err(truncation_error(source_name, max_str_len_env, col_index, indicator).into());
+    if let Some((indicator, buffer_max_len)) = truncated_indicator(column) {
+        return Err(truncation_error(
+            source_name,
+            max_str_len_env,
+            col_index,
+            indicator,
+            buffer_max_len,
+        )
+        .into());
     }
     Ok(())
 }
 
-fn truncated_indicator(column: &AnySlice<'_>) -> Option<Indicator> {
+fn truncated_indicator(column: &AnySlice<'_>) -> Option<(Indicator, Option<usize>)> {
     match column {
-        AnySlice::Text(view) => view.has_truncated_values(),
-        AnySlice::WText(view) => view.has_truncated_values(),
-        AnySlice::Binary(view) => view.has_truncated_values(),
+        AnySlice::Text(view) => view
+            .has_truncated_values()
+            .map(|indicator| (indicator, Some(view.max_len()))),
+        AnySlice::WText(view) => view
+            .has_truncated_values()
+            .map(|indicator| (indicator, Some(view.max_len()))),
+        AnySlice::Binary(view) => view
+            .has_truncated_values()
+            .map(|indicator| (indicator, None)),
         _ => None,
     }
 }
@@ -273,23 +285,27 @@ fn truncation_error(
     max_str_len_env: &'static str,
     col_index: usize,
     indicator: Indicator,
+    buffer_max_len: Option<usize>,
 ) -> anyhow::Error {
     let column_number = col_index + 1;
+    let buffer_max_len = buffer_max_len
+        .map(|size| format!(", fetch buffer size {size}"))
+        .unwrap_or_default();
     match indicator {
         Indicator::Length(required_len) => anyhow!(
             "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
-             ({required_len} bytes required); increase {max_str_len_env} or cast/substr \
+             ({required_len} bytes required{buffer_max_len}); increase {max_str_len_env} or cast/substr \
              the column in the query"
         ),
         Indicator::NoTotal => anyhow!(
             "{source_name} column {column_number} could not be fully fetched because the ODBC \
-             driver did not report the value length (NoTotal); increasing {max_str_len_env} \
+             driver did not report the value length (NoTotal{buffer_max_len}); increasing {max_str_len_env} \
              may not help, so cast the column to a sized varchar(N) or varbinary(N) or substr \
              it in the query"
         ),
         other => anyhow!(
             "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
-             ({other:?}); increase {max_str_len_env} or cast/substr the column in the query"
+             ({other:?}{buffer_max_len}); increase {max_str_len_env} or cast/substr the column in the query"
         ),
     }
 }
@@ -1391,6 +1407,38 @@ mod tests {
             ),
             12
         );
+        assert_eq!(
+            TestType::Text.buffer_max_len(
+                DataType::Varchar {
+                    length: std::num::NonZeroUsize::new(2048),
+                },
+                1024,
+            ),
+            8192
+        );
+        assert_eq!(
+            TestType::Binary.buffer_max_len(
+                DataType::Varbinary {
+                    length: std::num::NonZeroUsize::new(2048),
+                },
+                1024,
+            ),
+            2048
+        );
+    }
+
+    #[test]
+    fn decimal_buffer_length_uses_precision_metadata_not_default() {
+        assert_eq!(
+            TestType::Text.buffer_max_len(
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                4,
+            ),
+            12
+        );
     }
 
     #[test]
@@ -1416,21 +1464,35 @@ mod tests {
 
     #[test]
     fn truncation_error_reports_required_length_for_real_truncation() {
-        let message =
-            truncation_error("Odbc", "ODBC_MAX_STR_LEN", 6, Indicator::Length(2048)).to_string();
+        let message = truncation_error(
+            "Odbc",
+            "ODBC_MAX_STR_LEN",
+            6,
+            Indicator::Length(2048),
+            Some(64),
+        )
+        .to_string();
 
         assert!(message.contains("column 7"), "{}", message);
         assert!(message.contains("2048 bytes required"), "{}", message);
+        assert!(message.contains("fetch buffer size 64"), "{}", message);
         assert!(message.contains("increase ODBC_MAX_STR_LEN"), "{}", message);
     }
 
     #[test]
     fn truncation_error_explains_no_total_requires_sized_cast() {
-        let message =
-            truncation_error("Sybase", "SYBASE_MAX_STR_LEN", 2, Indicator::NoTotal).to_string();
+        let message = truncation_error(
+            "Sybase",
+            "SYBASE_MAX_STR_LEN",
+            2,
+            Indicator::NoTotal,
+            Some(128),
+        )
+        .to_string();
 
         assert!(message.contains("column 3"), "{}", message);
         assert!(message.contains("NoTotal"), "{}", message);
+        assert!(message.contains("fetch buffer size 128"), "{}", message);
         assert!(message.contains("may not help"), "{}", message);
         assert!(message.contains("varchar(N)"), "{}", message);
         assert!(message.contains("varbinary(N)"), "{}", message);

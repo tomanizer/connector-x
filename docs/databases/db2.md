@@ -86,10 +86,11 @@ The ODBC reader fetches rows in batches and binds primitive columns with typed O
 The defaults are tuned for throughput over small memory use:
 
 * `DB2_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
-* `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `DB2_MAX_STR_LEN`: fallback maximum bytes bound per cell for ODBC text and binary buffers when the driver does not report usable column size metadata. Defaults to `1024`.
 
-Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound.
-If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.
+ConnectorX prefers ODBC column metadata for declared-width text/binary columns and decimal/numeric text buffers. `DB2_MAX_STR_LEN` remains an explicit fallback for unsized/NoTotal ODBC metadata (for example some long/CLOB/BLOB paths).
+
+If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data. Error messages include the column index, required/source length metadata when available, and the configured fetch buffer size to help tune `DB2_MAX_STR_LEN` or adjust query casts.
 
 ## Testing And Benchmarking
 

@@ -92,7 +92,7 @@ Nullability reported as unknown is treated as nullable. If a driver reports a va
 
 Vendor-specific ODBC types may be reported as unknown or other. Cast them in the query to a supported standard type when you need a specific output type.
 
-Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that names the relevant max-length setting. Increase the setting or cast/substr the selected column in the query.
+Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that identifies the column, required/source length metadata when available, and the configured fetch buffer size.
 
 ## Performance
 
@@ -101,7 +101,7 @@ The ODBC reader fetches rows in batches and binds primitive, binary, and tempora
 Tuning environment variables:
 
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
-* `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `ODBC_MAX_STR_LEN`: fallback maximum bytes bound per cell for ODBC text and binary buffers when the driver does not report usable column size metadata. Defaults to `1024`.
 
 To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
 
