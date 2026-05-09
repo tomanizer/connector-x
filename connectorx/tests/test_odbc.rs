@@ -353,11 +353,11 @@ fn test_odbc_testcontainer_edge_types() {
 }
 
 #[test]
-fn test_odbc_testcontainer_errors_on_truncated_text() {
+fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+        eprintln!("CONNECTORX_SKIP: skipping ODBC per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set");
         return;
     }
 
@@ -385,31 +385,32 @@ fn test_odbc_testcontainer_errors_on_truncated_text() {
     assert!(nullable_text.is_null(0));
 
     let source_conn = parse_source(&conn, None).unwrap();
-    let result = get_arrow(
+    let destination = get_arrow(
         &source_conn,
         None,
         &[CXQuery::naked(
             "select long_text from cx_odbc_edge where id = 1",
         )],
         None,
-    );
-
-    let err = match result {
-        Ok(_) => panic!("long text should fail when the ODBC text buffer truncates"),
-        Err(err) => err,
-    };
-    let message = err.to_string();
-    assert!(message.contains("truncated"), "{}", message);
-    assert!(message.contains("ODBC_MAX_STR_LEN"), "{}", message);
+    )
+    .unwrap();
+    let mut batches = destination.arrow().unwrap();
+    let batch = batches.pop().unwrap();
+    let long_text = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(long_text.value(0).len(), 64);
 }
 
 #[test]
-fn test_odbc_testcontainer_streaming_errors_on_truncated_text() {
+fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
         eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC streaming truncation test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping ODBC streaming per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set"
         );
         return;
     }
@@ -425,13 +426,14 @@ fn test_odbc_testcontainer_streaming_errors_on_truncated_text() {
     let mut destination = ArrowDestination::new();
     let dispatcher =
         Dispatcher::<_, _, OdbcArrowTransport>::new(source, &mut destination, &queries, None);
-    let result = dispatcher.run();
+    dispatcher.run().unwrap();
 
-    let err = match result {
-        Ok(_) => panic!("streaming route should fail when the ODBC text buffer truncates"),
-        Err(err) => err,
-    };
-    let message = err.to_string();
-    assert!(message.contains("truncated"), "{}", message);
-    assert!(message.contains("ODBC_MAX_STR_LEN"), "{}", message);
+    let mut batches = destination.arrow().unwrap();
+    let batch = batches.pop().unwrap();
+    let long_text = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(long_text.value(0).len(), 64);
 }

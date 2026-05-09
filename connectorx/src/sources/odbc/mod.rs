@@ -70,6 +70,7 @@ pub struct OdbcSource {
     queries: Vec<CXQuery<String>>,
     names: Vec<String>,
     schema: Vec<OdbcTypeSystem>,
+    column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
 }
@@ -83,6 +84,7 @@ impl OdbcSource {
             queries: vec![],
             names: vec![],
             schema: vec![],
+            column_buffer_max_lens: vec![],
             batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
                 .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
@@ -124,13 +126,16 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
-        let (names, schema) = odbc_core::fetch_metadata::<OdbcTypeSystem, OdbcSourceError, _>(
-            &self.conn,
-            &first_query,
-            OdbcTypeSystem::from_odbc,
-        )?;
+        let (names, schema, column_buffer_max_lens) =
+            odbc_core::fetch_metadata::<OdbcTypeSystem, OdbcSourceError, _>(
+                &self.conn,
+                &first_query,
+                self.max_str_len,
+                OdbcTypeSystem::from_odbc,
+            )?;
         self.names = names;
         self.schema = schema;
+        self.column_buffer_max_lens = column_buffer_max_lens;
     }
 
     #[throws(OdbcSourceError)]
@@ -162,8 +167,8 @@ where
                     self.conn.clone(),
                     query,
                     &self.schema,
+                    &self.column_buffer_max_lens,
                     self.batch_size,
-                    self.max_str_len,
                 )
             })
             .collect()
@@ -174,10 +179,10 @@ pub struct OdbcSourcePartition {
     conn: String,
     query: CXQuery<String>,
     schema: Vec<OdbcTypeSystem>,
+    column_buffer_max_lens: Vec<usize>,
     nrows: usize,
     ncols: usize,
     batch_size: usize,
-    max_str_len: usize,
 }
 
 impl OdbcSourcePartition {
@@ -185,17 +190,17 @@ impl OdbcSourcePartition {
         conn: String,
         query: &CXQuery<String>,
         schema: &[OdbcTypeSystem],
+        column_buffer_max_lens: &[usize],
         batch_size: usize,
-        max_str_len: usize,
     ) -> Self {
         Self {
             conn,
             query: query.clone(),
             schema: schema.to_vec(),
+            column_buffer_max_lens: column_buffer_max_lens.to_vec(),
             nrows: 0,
             ncols: schema.len(),
             batch_size,
-            max_str_len,
         }
     }
 }
@@ -218,7 +223,8 @@ impl SourcePartition for OdbcSourcePartition {
             self.batch_size,
             self.schema
                 .iter()
-                .map(|ty| ty.buffer_desc(self.max_str_len)),
+                .zip(&self.column_buffer_max_lens)
+                .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
         OdbcSourceParser::new(cursor, self.schema.len())
@@ -302,7 +308,8 @@ fn odbc_partition_record_batches(
         partition
             .schema
             .iter()
-            .map(|ty| ty.buffer_desc(partition.max_str_len)),
+            .zip(&partition.column_buffer_max_lens)
+            .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
     )?;
     let mut cursor = cursor.bind_buffer(buffer)?;
 
