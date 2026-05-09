@@ -274,10 +274,24 @@ fn truncation_error(
     col_index: usize,
     indicator: Indicator,
 ) -> anyhow::Error {
-    anyhow!(
-        "{source_name} column {} was truncated by the ODBC fetch buffer ({indicator:?}); increase {max_str_len_env} or cast/substr the column in the query",
-        col_index + 1
-    )
+    let column_number = col_index + 1;
+    match indicator {
+        Indicator::Length(required_len) => anyhow!(
+            "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
+             ({required_len} bytes required); increase {max_str_len_env} or cast/substr \
+             the column in the query"
+        ),
+        Indicator::NoTotal => anyhow!(
+            "{source_name} column {column_number} could not be fully fetched because the ODBC \
+             driver did not report the value length (NoTotal); increasing {max_str_len_env} \
+             may not help, so cast the column to a sized varchar(N) or varbinary(N) or substr \
+             it in the query"
+        ),
+        other => anyhow!(
+            "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
+             ({other:?}); increase {max_str_len_env} or cast/substr the column in the query"
+        ),
+    }
 }
 
 // A fetched ODBC batch cannot be borrowed across `fetch_next`, so the parser
@@ -1398,6 +1412,28 @@ mod tests {
             ),
             1024
         );
+    }
+
+    #[test]
+    fn truncation_error_reports_required_length_for_real_truncation() {
+        let message =
+            truncation_error("Odbc", "ODBC_MAX_STR_LEN", 6, Indicator::Length(2048)).to_string();
+
+        assert!(message.contains("column 7"), "{}", message);
+        assert!(message.contains("2048 bytes required"), "{}", message);
+        assert!(message.contains("increase ODBC_MAX_STR_LEN"), "{}", message);
+    }
+
+    #[test]
+    fn truncation_error_explains_no_total_requires_sized_cast() {
+        let message =
+            truncation_error("Sybase", "SYBASE_MAX_STR_LEN", 2, Indicator::NoTotal).to_string();
+
+        assert!(message.contains("column 3"), "{}", message);
+        assert!(message.contains("NoTotal"), "{}", message);
+        assert!(message.contains("may not help"), "{}", message);
+        assert!(message.contains("varchar(N)"), "{}", message);
+        assert!(message.contains("varbinary(N)"), "{}", message);
     }
 
     #[test]
