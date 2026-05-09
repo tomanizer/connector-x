@@ -41,6 +41,7 @@ use odbc_api::{
 };
 use rust_decimal::Decimal;
 use sqlparser::dialect::GenericDialect;
+use std::sync::Arc;
 use url::Url;
 use urlencoding::decode;
 #[cfg(feature = "dst_arrow")]
@@ -56,7 +57,6 @@ use {
     },
     odbc_api::{buffers::AnySlice, sys::NULL_DATA},
     rayon::prelude::*,
-    std::sync::Arc,
 };
 
 const ODBC_DEFAULT_BATCH_SIZE: usize = 1024;
@@ -166,6 +166,7 @@ where
                 OdbcSourcePartition::new(
                     self.conn.clone(),
                     query,
+                    &self.names,
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
@@ -178,7 +179,8 @@ where
 pub struct OdbcSourcePartition {
     conn: String,
     query: CXQuery<String>,
-    schema: Vec<OdbcTypeSystem>,
+    names: Arc<[String]>,
+    schema: Arc<[OdbcTypeSystem]>,
     column_buffer_max_lens: Vec<usize>,
     nrows: usize,
     ncols: usize,
@@ -189,6 +191,7 @@ impl OdbcSourcePartition {
     pub fn new(
         conn: String,
         query: &CXQuery<String>,
+        names: &[String],
         schema: &[OdbcTypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
@@ -196,7 +199,8 @@ impl OdbcSourcePartition {
         Self {
             conn,
             query: query.clone(),
-            schema: schema.to_vec(),
+            names: names.to_vec().into(),
+            schema: schema.to_vec().into(),
             column_buffer_max_lens: column_buffer_max_lens.to_vec(),
             nrows: 0,
             ncols: schema.len(),
@@ -227,7 +231,7 @@ impl SourcePartition for OdbcSourcePartition {
                 .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        OdbcSourceParser::new(cursor, self.schema.len())
+        OdbcSourceParser::new(cursor, Arc::clone(&self.names), Arc::clone(&self.schema))
     }
 
     fn nrows(&self) -> usize {
@@ -322,6 +326,8 @@ fn odbc_partition_record_batches(
                 OdbcTypeSystem::source_name(),
                 OdbcTypeSystem::max_str_len_env(),
                 col_index,
+                partition.names.get(col_index).map(String::as_str),
+                partition.schema.get(col_index).copied(),
             )?;
             columns.push(odbc_arrow_array(
                 partition.schema[col_index],

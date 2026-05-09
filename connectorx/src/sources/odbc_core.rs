@@ -4,7 +4,9 @@
 //! buffer/type policy. This module owns the common ODBC execution, metadata,
 //! columnar batch parsing, primitive conversion, count, and partition helpers.
 
-use std::{borrow::Cow, convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError};
+use std::{
+    borrow::Cow, convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError, sync::Arc,
+};
 
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
@@ -44,7 +46,7 @@ pub trait OdbcCoreError:
 }
 
 /// Backend-specific ODBC metadata and buffer policy for the shared parser.
-pub trait OdbcTypePolicy: TypeSystem + Copy {
+pub trait OdbcTypePolicy: TypeSystem + Copy + Debug {
     fn source_name() -> &'static str;
     fn max_str_len_env() -> &'static str;
     fn nullable(self) -> bool;
@@ -75,6 +77,8 @@ pub trait OdbcTypePolicy: TypeSystem + Copy {
 pub struct OdbcParser<TS, E> {
     cursor: OdbcBlockCursor,
     batch: OdbcBatch,
+    names: Arc<[String]>,
+    schema: Arc<[TS]>,
     ncols: usize,
     current_cell: usize,
     is_finished: bool,
@@ -86,10 +90,14 @@ where
     TS: OdbcTypePolicy,
     E: OdbcCoreError,
 {
-    pub(crate) fn new(cursor: OdbcBlockCursor, ncols: usize) -> Self {
+    pub(crate) fn new(cursor: OdbcBlockCursor, names: Arc<[String]>, schema: Arc<[TS]>) -> Self {
+        let ncols = schema.len();
+        debug_assert_eq!(names.len(), ncols);
         Self {
             cursor,
             batch: OdbcBatch::with_capacity(ncols),
+            names,
+            schema,
             ncols,
             current_cell: 0,
             is_finished: false,
@@ -176,6 +184,8 @@ where
                 self.batch.replace_column::<E>(
                     col_index,
                     batch.column(col_index),
+                    self.names.get(col_index).map(String::as_str),
+                    self.schema.get(col_index).copied(),
                     TS::source_name(),
                     TS::max_str_len_env(),
                 )?;
@@ -214,13 +224,22 @@ impl OdbcBatch {
         &mut self,
         col_index: usize,
         column: AnySlice<'_>,
+        column_name: Option<&str>,
+        column_type: Option<impl Debug + Copy>,
         source_name: &'static str,
         max_str_len_env: &'static str,
     ) -> Result<(), E>
     where
         E: OdbcCoreError,
     {
-        ensure_column_not_truncated::<E>(&column, source_name, max_str_len_env, col_index)?;
+        ensure_column_not_truncated::<E>(
+            &column,
+            source_name,
+            max_str_len_env,
+            col_index,
+            column_name,
+            column_type,
+        )?;
         if col_index == self.columns.len() {
             self.columns
                 .push(OdbcColumn::from_slice(column, self.nrows));
@@ -248,13 +267,23 @@ pub(crate) fn ensure_column_not_truncated<E>(
     source_name: &'static str,
     max_str_len_env: &'static str,
     col_index: usize,
+    column_name: Option<&str>,
+    column_type: Option<impl Debug + Copy>,
 ) -> Result<(), E>
 where
     E: OdbcCoreError,
 {
     let indicator = truncated_indicator(column);
     if let Some(indicator) = indicator {
-        return Err(truncation_error(source_name, max_str_len_env, col_index, indicator).into());
+        return Err(truncation_error(
+            source_name,
+            max_str_len_env,
+            col_index,
+            column_name,
+            column_type,
+            indicator,
+        )
+        .into());
     }
     Ok(())
 }
@@ -272,25 +301,41 @@ fn truncation_error(
     source_name: &'static str,
     max_str_len_env: &'static str,
     col_index: usize,
+    column_name: Option<&str>,
+    column_type: Option<impl Debug + Copy>,
     indicator: Indicator,
 ) -> anyhow::Error {
-    let column_number = col_index + 1;
+    let column = column_description(col_index, column_name, column_type);
     match indicator {
         Indicator::Length(required_len) => anyhow!(
-            "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
+            "{source_name} {column} was truncated by the ODBC fetch buffer \
              ({required_len} bytes required); increase {max_str_len_env} or cast/substr \
              the column in the query"
         ),
         Indicator::NoTotal => anyhow!(
-            "{source_name} column {column_number} could not be fully fetched because the ODBC \
+            "{source_name} {column} could not be fully fetched because the ODBC \
              driver did not report the value length (NoTotal); increasing {max_str_len_env} \
              may not help, so cast the column to a sized varchar(N) or varbinary(N) or substr \
              it in the query"
         ),
         other => anyhow!(
-            "{source_name} column {column_number} was truncated by the ODBC fetch buffer \
+            "{source_name} {column} was truncated by the ODBC fetch buffer \
              ({other:?}); increase {max_str_len_env} or cast/substr the column in the query"
         ),
+    }
+}
+
+fn column_description(
+    col_index: usize,
+    column_name: Option<&str>,
+    column_type: Option<impl Debug + Copy>,
+) -> String {
+    let column_number = col_index + 1;
+    match (column_name, column_type) {
+        (Some(name), Some(ty)) => format!("column \"{name}\" (#{column_number}, {ty:?})"),
+        (Some(name), None) => format!("column \"{name}\" (#{column_number})"),
+        (None, Some(ty)) => format!("column {column_number} ({ty:?})"),
+        (None, None) => format!("column {column_number}"),
     }
 }
 
@@ -1171,7 +1216,7 @@ where
 mod tests {
     use super::*;
 
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, Debug)]
     enum TestType {
         Text,
         Binary,
@@ -1416,24 +1461,62 @@ mod tests {
 
     #[test]
     fn truncation_error_reports_required_length_for_real_truncation() {
-        let message =
-            truncation_error("Odbc", "ODBC_MAX_STR_LEN", 6, Indicator::Length(2048)).to_string();
+        let message = truncation_error(
+            "Odbc",
+            "ODBC_MAX_STR_LEN",
+            6,
+            Some("long_text"),
+            Some(TestType::Text),
+            Indicator::Length(2048),
+        )
+        .to_string();
 
-        assert!(message.contains("column 7"), "{}", message);
+        assert!(
+            message.contains("column \"long_text\" (#7, Text)"),
+            "{}",
+            message
+        );
         assert!(message.contains("2048 bytes required"), "{}", message);
         assert!(message.contains("increase ODBC_MAX_STR_LEN"), "{}", message);
     }
 
     #[test]
     fn truncation_error_explains_no_total_requires_sized_cast() {
-        let message =
-            truncation_error("Sybase", "SYBASE_MAX_STR_LEN", 2, Indicator::NoTotal).to_string();
+        let message = truncation_error(
+            "Sybase",
+            "SYBASE_MAX_STR_LEN",
+            2,
+            Some("payload"),
+            Some(TestType::Binary),
+            Indicator::NoTotal,
+        )
+        .to_string();
 
-        assert!(message.contains("column 3"), "{}", message);
+        assert!(
+            message.contains("column \"payload\" (#3, Binary)"),
+            "{}",
+            message
+        );
         assert!(message.contains("NoTotal"), "{}", message);
         assert!(message.contains("may not help"), "{}", message);
         assert!(message.contains("varchar(N)"), "{}", message);
         assert!(message.contains("varbinary(N)"), "{}", message);
+    }
+
+    #[test]
+    fn truncation_error_falls_back_to_index_when_metadata_is_missing() {
+        let message = truncation_error(
+            "Odbc",
+            "ODBC_MAX_STR_LEN",
+            1,
+            None,
+            None::<TestType>,
+            Indicator::Length(256),
+        )
+        .to_string();
+
+        assert!(message.contains("column 2"), "{}", message);
+        assert!(!message.contains("#2"), "{}", message);
     }
 
     #[test]
