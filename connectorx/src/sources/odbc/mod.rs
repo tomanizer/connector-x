@@ -64,6 +64,31 @@ const ODBC_DEFAULT_MAX_STR_LEN: usize = 1024;
 
 pub type OdbcSourceParser = odbc_core::OdbcParser<OdbcTypeSystem, OdbcSourceError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OdbcOptions {
+    pub batch_size: usize,
+    pub max_str_len: usize,
+}
+
+impl OdbcOptions {
+    pub fn from_env() -> Self {
+        Self {
+            batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
+                .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+        }
+    }
+}
+
+impl Default for OdbcOptions {
+    fn default() -> Self {
+        Self {
+            batch_size: ODBC_DEFAULT_BATCH_SIZE,
+            max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
+        }
+    }
+}
+
 pub struct OdbcSource {
     conn: String,
     origin_query: Option<String>,
@@ -77,7 +102,12 @@ pub struct OdbcSource {
 
 impl OdbcSource {
     #[throws(OdbcSourceError)]
-    pub fn new(conn: &str, _nconn: usize) -> Self {
+    pub fn new(conn: &str, nconn: usize) -> Self {
+        Self::with_options(conn, nconn, OdbcOptions::from_env())?
+    }
+
+    #[throws(OdbcSourceError)]
+    pub fn with_options(conn: &str, _nconn: usize, options: OdbcOptions) -> Self {
         Self {
             conn: odbc_conn_string(conn)?,
             origin_query: None,
@@ -85,9 +115,8 @@ impl OdbcSource {
             names: vec![],
             schema: vec![],
             column_buffer_max_lens: vec![],
-            batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
-                .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+            batch_size: options.batch_size,
+            max_str_len: options.max_str_len,
         }
     }
 
@@ -1164,4 +1193,48 @@ fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str>
         .iter()
         .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
         .map(|(_, value)| value.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_options_keeps_per_source_limits() {
+        let conn = "Driver={SQLite3};Database=:memory:;";
+        let small = OdbcSource::with_options(
+            conn,
+            1,
+            OdbcOptions {
+                batch_size: 2,
+                max_str_len: 8,
+            },
+        )
+        .unwrap();
+        let large = OdbcSource::with_options(
+            conn,
+            1,
+            OdbcOptions {
+                batch_size: 32,
+                max_str_len: 4096,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(small.batch_size, 2);
+        assert_eq!(small.max_str_len, 8);
+        assert_eq!(large.batch_size, 32);
+        assert_eq!(large.max_str_len, 4096);
+    }
+
+    #[test]
+    fn default_options_match_previous_defaults() {
+        assert_eq!(
+            OdbcOptions::default(),
+            OdbcOptions {
+                batch_size: ODBC_DEFAULT_BATCH_SIZE,
+                max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
+            }
+        );
+    }
 }

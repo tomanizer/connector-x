@@ -34,6 +34,31 @@ const DB2_DEFAULT_MAX_STR_LEN: usize = 1024;
 
 pub type Db2SourceParser = odbc_core::OdbcParser<Db2TypeSystem, Db2SourceError>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Db2Options {
+    pub batch_size: usize,
+    pub max_str_len: usize,
+}
+
+impl Db2Options {
+    pub fn from_env() -> Self {
+        Self {
+            batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
+            max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
+                .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+        }
+    }
+}
+
+impl Default for Db2Options {
+    fn default() -> Self {
+        Self {
+            batch_size: DB2_DEFAULT_BATCH_SIZE,
+            max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+        }
+    }
+}
+
 pub struct Db2Source {
     conn: String,
     origin_query: Option<String>,
@@ -47,7 +72,12 @@ pub struct Db2Source {
 
 impl Db2Source {
     #[throws(Db2SourceError)]
-    pub fn new(conn: &str, _nconn: usize) -> Self {
+    pub fn new(conn: &str, nconn: usize) -> Self {
+        Self::with_options(conn, nconn, Db2Options::from_env())?
+    }
+
+    #[throws(Db2SourceError)]
+    pub fn with_options(conn: &str, _nconn: usize, options: Db2Options) -> Self {
         Self {
             conn: db2_conn_string(conn)?,
             origin_query: None,
@@ -55,9 +85,8 @@ impl Db2Source {
             names: vec![],
             schema: vec![],
             column_buffer_max_lens: vec![],
-            batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
-            max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
-                .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            batch_size: options.batch_size,
+            max_str_len: options.max_str_len,
         }
     }
 
@@ -375,4 +404,36 @@ pub fn db2_conn_string(conn: &str) -> String {
         }
     }
     ret
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_options_sets_instance_limits() {
+        let source = Db2Source::with_options(
+            "Driver={IBM DB2 ODBC DRIVER};Database=test;",
+            1,
+            Db2Options {
+                batch_size: 7,
+                max_str_len: 2048,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(source.batch_size, 7);
+        assert_eq!(source.max_str_len, 2048);
+    }
+
+    #[test]
+    fn default_options_match_previous_defaults() {
+        assert_eq!(
+            Db2Options::default(),
+            Db2Options {
+                batch_size: DB2_DEFAULT_BATCH_SIZE,
+                max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+            }
+        );
+    }
 }
