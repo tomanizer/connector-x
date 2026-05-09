@@ -26,6 +26,10 @@ use odbc_api::{environment, ConnectionOptions};
 static POSTGRES_INIT: Once = Once::new();
 #[cfg(feature = "src_odbc")]
 static POSTGRES_ODBC_INIT: Once = Once::new();
+#[cfg(feature = "src_odbc")]
+static DB2_ODBC_INIT: Once = Once::new();
+#[cfg(feature = "src_odbc")]
+static SYBASE_ODBC_INIT: Once = Once::new();
 #[cfg(feature = "src_mysql")]
 static MYSQL_INIT: Once = Once::new();
 #[cfg(feature = "src_mssql")]
@@ -222,6 +226,85 @@ pub fn postgres_odbc_url() -> String {
 pub fn postgres_odbc_conn() -> String {
     postgres_odbc_url();
     env::var("ODBC_CONN").expect("ODBC_CONN must be set")
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn db2_odbc_url() -> String {
+    DB2_ODBC_INIT.call_once(|| {
+        set_default_env(
+            "ODBC_TEST_QUERY",
+            "select id, flag, name from cx_odbc_test order by id",
+        );
+        set_default_env(
+            "ODBC_PARTITION_QUERY",
+            "select id, flag, name from cx_odbc_test",
+        );
+        set_default_env("ODBC_PARTITION_COLUMN", "id");
+        set_default_env("ODBC_EXPECTED_ROWS", "2");
+
+        if env::var("ODBC_URL").is_ok() && env::var("ODBC_CONN").is_ok() {
+            return;
+        }
+
+        if let Ok(conn) = env::var("DB2_ODBC_CONN") {
+            env::set_var("ODBC_CONN", conn);
+        }
+
+        if let Ok(url) = env::var("DB2_URL") {
+            env::set_var("ODBC_URL", url);
+        }
+    });
+
+    env::var("ODBC_URL")
+        .expect("ODBC_URL must be set (or DB2_URL when CONNECTORX_DB2_TESTCONTAINER is enabled)")
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn db2_odbc_conn() -> String {
+    db2_odbc_url();
+    env::var("ODBC_CONN").expect(
+        "ODBC_CONN must be set (or DB2_ODBC_CONN when CONNECTORX_DB2_TESTCONTAINER is enabled)",
+    )
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn sybase_odbc_url() -> String {
+    SYBASE_ODBC_INIT.call_once(|| {
+        set_default_env(
+            "ODBC_TEST_QUERY",
+            "select id, flag, name from cx_odbc_test order by id",
+        );
+        set_default_env(
+            "ODBC_PARTITION_QUERY",
+            "select id, flag, name from cx_odbc_test",
+        );
+        set_default_env("ODBC_PARTITION_COLUMN", "id");
+        set_default_env("ODBC_EXPECTED_ROWS", "2");
+
+        if env::var("ODBC_URL").is_ok() && env::var("ODBC_CONN").is_ok() {
+            return;
+        }
+
+        if let Ok(conn) = env::var("SYBASE_ODBC_CONN") {
+            env::set_var("ODBC_CONN", conn);
+        }
+
+        if let Ok(url) = env::var("SYBASE_URL") {
+            env::set_var("ODBC_URL", url);
+        }
+    });
+
+    env::var("ODBC_URL").expect(
+        "ODBC_URL must be set (or SYBASE_URL when CONNECTORX_SYBASE_TESTCONTAINER is enabled)",
+    )
+}
+
+#[cfg(feature = "src_odbc")]
+pub fn sybase_odbc_conn() -> String {
+    sybase_odbc_url();
+    env::var("ODBC_CONN").expect(
+        "ODBC_CONN must be set (or SYBASE_ODBC_CONN when CONNECTORX_SYBASE_TESTCONTAINER is enabled)",
+    )
 }
 
 #[cfg(feature = "src_mysql")]

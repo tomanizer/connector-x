@@ -4,8 +4,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use arrow::{
     array::{
-        Array, Decimal128Array, LargeBinaryArray, StringArray, Time64MicrosecondArray,
-        TimestampMicrosecondArray,
+        Array, BooleanArray, Decimal128Array, LargeBinaryArray, StringArray,
+        Time64MicrosecondArray, TimestampMicrosecondArray,
     },
     util::display::array_value_to_string,
 };
@@ -57,34 +57,80 @@ fn use_postgres_testcontainer() -> bool {
     std::env::var("CONNECTORX_ODBC_TESTCONTAINER").is_ok()
 }
 
-fn init_postgres_testcontainer() {
-    test_db::postgres_odbc_url();
+fn use_db2_testcontainer() -> bool {
+    std::env::var("CONNECTORX_DB2_TESTCONTAINER").is_ok()
+}
+
+fn use_sybase_testcontainer() -> bool {
+    std::env::var("CONNECTORX_SYBASE_TESTCONTAINER").is_ok()
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum OdbcTestcontainerBackend {
+    Postgres,
+    Db2,
+    Sybase,
+}
+
+fn testcontainer_backend() -> Option<OdbcTestcontainerBackend> {
+    if use_postgres_testcontainer() {
+        return Some(OdbcTestcontainerBackend::Postgres);
+    }
+    if use_db2_testcontainer() {
+        return Some(OdbcTestcontainerBackend::Db2);
+    }
+    if use_sybase_testcontainer() {
+        return Some(OdbcTestcontainerBackend::Sybase);
+    }
+    None
+}
+
+fn init_testcontainer(backend: OdbcTestcontainerBackend) {
+    match backend {
+        OdbcTestcontainerBackend::Postgres => {
+            test_db::postgres_odbc_url();
+        }
+        OdbcTestcontainerBackend::Db2 => {
+            test_db::db2_odbc_url();
+        }
+        OdbcTestcontainerBackend::Sybase => {
+            test_db::sybase_odbc_url();
+        }
+    }
 }
 
 fn odbc_conn() -> Option<String> {
-    if use_postgres_testcontainer() {
-        return Some(test_db::postgres_odbc_conn());
+    if let Some(backend) = testcontainer_backend() {
+        return Some(match backend {
+            OdbcTestcontainerBackend::Postgres => test_db::postgres_odbc_conn(),
+            OdbcTestcontainerBackend::Db2 => test_db::db2_odbc_conn(),
+            OdbcTestcontainerBackend::Sybase => test_db::sybase_odbc_conn(),
+        });
     }
     std::env::var("ODBC_CONN").ok()
 }
 
 fn odbc_url() -> Option<String> {
-    if use_postgres_testcontainer() {
-        return Some(test_db::postgres_odbc_url());
+    if let Some(backend) = testcontainer_backend() {
+        return Some(match backend {
+            OdbcTestcontainerBackend::Postgres => test_db::postgres_odbc_url(),
+            OdbcTestcontainerBackend::Db2 => test_db::db2_odbc_url(),
+            OdbcTestcontainerBackend::Sybase => test_db::sybase_odbc_url(),
+        });
     }
     std::env::var("ODBC_URL").ok()
 }
 
 fn odbc_query() -> Option<CXQuery<String>> {
-    if use_postgres_testcontainer() {
-        init_postgres_testcontainer();
+    if let Some(backend) = testcontainer_backend() {
+        init_testcontainer(backend);
     }
     std::env::var("ODBC_TEST_QUERY").ok().map(CXQuery::naked)
 }
 
 fn odbc_partition_query() -> Option<(String, String)> {
-    if use_postgres_testcontainer() {
-        init_postgres_testcontainer();
+    if let Some(backend) = testcontainer_backend() {
+        init_testcontainer(backend);
     }
     Some((
         std::env::var("ODBC_PARTITION_QUERY").ok()?,
@@ -268,29 +314,39 @@ fn test_odbc_testcontainer_edge_types() {
     let _ = env_logger::builder().is_test(true).try_init();
     let _guard = lock_odbc_env();
 
-    if !use_postgres_testcontainer() {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC edge type test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+    let Some(backend) = testcontainer_backend() else {
+        eprintln!("CONNECTORX_SKIP: skipping ODBC edge type test: set CONNECTORX_ODBC_TESTCONTAINER, CONNECTORX_DB2_TESTCONTAINER, or CONNECTORX_SYBASE_TESTCONTAINER");
         return;
-    }
+    };
 
-    let conn = test_db::postgres_odbc_url();
+    let conn = odbc_url().unwrap();
     let source_conn = parse_source(&conn, None).unwrap();
-    let destination = get_arrow(
-        &source_conn,
-        None,
-        &[CXQuery::naked(
+    let query = match backend {
+        OdbcTestcontainerBackend::Postgres => {
             "select amount, created_at, event_time, payload, wide_text, nullable_text, long_text \
-             from cx_odbc_edge order by id",
-        )],
-        None,
-    )
-    .unwrap();
+             from cx_odbc_edge order by id"
+        }
+        OdbcTestcontainerBackend::Db2 => {
+            "select amount, created_at, event_time, payload, wide_text, nullable_text, long_text, \
+             decfloat_text, xml_text, graphic_text from cx_odbc_edge order by id"
+        }
+        OdbcTestcontainerBackend::Sybase => {
+            "select amount, created_at, event_time, payload, wide_text, nullable_text, long_text, \
+             time2_v, nullable_bit from cx_odbc_edge order by id"
+        }
+    };
+    let destination = get_arrow(&source_conn, None, &[CXQuery::naked(query)], None).unwrap();
 
     let mut batches = destination.arrow().unwrap();
     assert_eq!(batches.len(), 1);
     let batch = batches.pop().unwrap();
     assert_eq!(batch.num_rows(), 2);
-    assert_eq!(batch.num_columns(), 7);
+    let expected_cols = match backend {
+        OdbcTestcontainerBackend::Postgres => 7,
+        OdbcTestcontainerBackend::Db2 => 10,
+        OdbcTestcontainerBackend::Sybase => 9,
+    };
+    assert_eq!(batch.num_columns(), expected_cols);
 
     let amount = batch
         .column(0)
@@ -350,19 +406,68 @@ fn test_odbc_testcontainer_edge_types() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
+
+    match backend {
+        OdbcTestcontainerBackend::Postgres => {}
+        OdbcTestcontainerBackend::Db2 => {
+            let decfloat_text = batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(decfloat_text.value(0), "123.45");
+            assert_eq!(decfloat_text.value(1), "-9.0001");
+
+            let xml_text = batch
+                .column(8)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(xml_text.value(0), "<root>alpha</root>");
+            assert_eq!(xml_text.value(1), "<root>beta</root>");
+
+            let graphic_text = batch
+                .column(9)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert_eq!(graphic_text.value(0), "東京");
+            assert_eq!(graphic_text.value(1), "plain");
+        }
+        OdbcTestcontainerBackend::Sybase => {
+            let time2_v = batch
+                .column(7)
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            assert_eq!(
+                time2_v.value(0),
+                (13 * 3600 + 14 * 60 + 15) * 1_000_000 + 123_456
+            );
+            assert_eq!(time2_v.value(1), 1_000_000);
+
+            let nullable_bit = batch
+                .column(8)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap();
+            assert!(nullable_bit.is_null(0));
+            assert!(nullable_bit.value(1));
+        }
+    }
 }
 
 #[test]
 fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if !use_postgres_testcontainer() {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+    if testcontainer_backend().is_none() {
+        eprintln!("CONNECTORX_SKIP: skipping ODBC per-column buffer test: set CONNECTORX_ODBC_TESTCONTAINER, CONNECTORX_DB2_TESTCONTAINER, or CONNECTORX_SYBASE_TESTCONTAINER");
         return;
     }
 
     let _guard = lock_odbc_env();
-    let conn = test_db::postgres_odbc_url();
+    let conn = odbc_url().unwrap();
     let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
 
     let source_conn = parse_source(&conn, None).unwrap();
@@ -408,15 +513,15 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
 fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
-    if !use_postgres_testcontainer() {
+    if testcontainer_backend().is_none() {
         eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC streaming per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping ODBC streaming per-column buffer test: set CONNECTORX_ODBC_TESTCONTAINER, CONNECTORX_DB2_TESTCONTAINER, or CONNECTORX_SYBASE_TESTCONTAINER"
         );
         return;
     }
 
     let _guard = lock_odbc_env();
-    let conn = test_db::postgres_odbc_conn();
+    let conn = odbc_conn().unwrap();
     let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
 
     let queries = [CXQuery::naked(

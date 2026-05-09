@@ -142,6 +142,10 @@ CONNECTORX_ODBC_TESTCONTAINER=1 \
 cargo test -p connectorx --no-default-features --features "src_odbc dst_arrow fptr" --test test_odbc
 ```
 
+To run the same generic ODBC edge/truncation tests against Db2 or Sybase URLs, set
+`CONNECTORX_DB2_TESTCONTAINER=1` or `CONNECTORX_SYBASE_TESTCONTAINER=1` and provide the matching
+`DB2_*` or `SYBASE_*` connection variables used by `test_db.rs`.
+
 Generic ODBC integration tests are also environment-gated and can be pointed at any ODBC backend:
 
 ```bash
