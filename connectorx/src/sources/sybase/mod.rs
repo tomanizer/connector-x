@@ -38,6 +38,7 @@ pub struct SybaseSource {
     queries: Vec<CXQuery<String>>,
     names: Vec<String>,
     schema: Vec<SybaseTypeSystem>,
+    column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
 }
@@ -51,6 +52,7 @@ impl SybaseSource {
             queries: vec![],
             names: vec![],
             schema: vec![],
+            column_buffer_max_lens: vec![],
             batch_size: odbc_core::env_usize("SYBASE_BATCH_SIZE")
                 .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
@@ -94,13 +96,16 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
-        let (names, schema) = odbc_core::fetch_metadata::<SybaseTypeSystem, SybaseSourceError, _>(
-            &self.conn,
-            &first_query,
-            SybaseTypeSystem::from_odbc,
-        )?;
+        let (names, schema, column_buffer_max_lens) =
+            odbc_core::fetch_metadata::<SybaseTypeSystem, SybaseSourceError, _>(
+                &self.conn,
+                &first_query,
+                self.max_str_len,
+                SybaseTypeSystem::from_odbc,
+            )?;
         self.names = names;
         self.schema = schema;
+        self.column_buffer_max_lens = column_buffer_max_lens;
     }
 
     #[throws(SybaseSourceError)]
@@ -132,8 +137,8 @@ where
                     self.conn.clone(),
                     query,
                     &self.schema,
+                    &self.column_buffer_max_lens,
                     self.batch_size,
-                    self.max_str_len,
                 )
             })
             .collect()
@@ -144,10 +149,10 @@ pub struct SybaseSourcePartition {
     conn: String,
     query: CXQuery<String>,
     schema: Vec<SybaseTypeSystem>,
+    column_buffer_max_lens: Vec<usize>,
     nrows: usize,
     ncols: usize,
     batch_size: usize,
-    max_str_len: usize,
 }
 
 impl SybaseSourcePartition {
@@ -155,17 +160,17 @@ impl SybaseSourcePartition {
         conn: String,
         query: &CXQuery<String>,
         schema: &[SybaseTypeSystem],
+        column_buffer_max_lens: &[usize],
         batch_size: usize,
-        max_str_len: usize,
     ) -> Self {
         Self {
             conn,
             query: query.clone(),
             schema: schema.to_vec(),
+            column_buffer_max_lens: column_buffer_max_lens.to_vec(),
             nrows: 0,
             ncols: schema.len(),
             batch_size,
-            max_str_len,
         }
     }
 }
@@ -189,7 +194,8 @@ impl SourcePartition for SybaseSourcePartition {
             self.batch_size,
             self.schema
                 .iter()
-                .map(|ty| ty.buffer_desc(self.max_str_len)),
+                .zip(&self.column_buffer_max_lens)
+                .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
         SybaseSourceParser::new(cursor, self.schema.len())

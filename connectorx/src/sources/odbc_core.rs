@@ -49,6 +49,27 @@ pub trait OdbcTypePolicy: TypeSystem + Copy {
     fn max_str_len_env() -> &'static str;
     fn nullable(self) -> bool;
     fn buffer_desc(self, max_str_len: usize) -> BufferDesc;
+
+    /// Return the per-column variable buffer length. `default_max_len` is a
+    /// fallback for drivers that do not report useful metadata, not a cap on
+    /// precise driver-reported widths.
+    fn buffer_max_len(self, data_type: DataType, default_max_len: usize) -> usize {
+        match self.buffer_desc(default_max_len) {
+            BufferDesc::Text { .. } => data_type
+                .utf8_len()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(default_max_len),
+            BufferDesc::WText { .. } => data_type
+                .column_size()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(default_max_len),
+            BufferDesc::Binary { .. } => data_type
+                .column_size()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(default_max_len),
+            _ => default_max_len,
+        }
+    }
 }
 
 pub struct OdbcParser<TS, E> {
@@ -620,10 +641,12 @@ where
 pub(crate) fn fetch_metadata<T, E, F>(
     conn: &str,
     query: &str,
+    default_max_len: usize,
     map_type: F,
-) -> Result<(Vec<String>, Vec<T>), E>
+) -> Result<(Vec<String>, Vec<T>, Vec<usize>), E>
 where
     E: OdbcCoreError,
+    T: OdbcTypePolicy,
     F: Fn(DataType, Nullability) -> T,
 {
     let mut cursor = execute_query::<E>(conn, query)?;
@@ -640,14 +663,17 @@ where
     })?;
     let mut names = Vec::with_capacity(ncols as usize);
     let mut schema = Vec::with_capacity(ncols as usize);
+    let mut buffer_max_lens = Vec::with_capacity(ncols as usize);
     for col in 1..=ncols {
         names.push(cursor.col_name(col)?);
-        let ty = cursor.col_data_type(col)?;
+        let data_type = cursor.col_data_type(col)?;
         let nullability = cursor.col_nullability(col)?;
-        schema.push(map_type(ty, nullability));
+        let ty = map_type(data_type, nullability);
+        buffer_max_lens.push(ty.buffer_max_len(data_type, default_max_len));
+        schema.push(ty);
     }
 
-    Ok((names, schema))
+    Ok((names, schema, buffer_max_lens))
 }
 
 pub(crate) fn fetch_count<E, D>(conn: &str, query: &str, dialect: &D) -> Result<usize, E>
@@ -1131,6 +1157,41 @@ where
 mod tests {
     use super::*;
 
+    #[derive(Copy, Clone)]
+    enum TestType {
+        Text,
+        Binary,
+        WText,
+        I32,
+    }
+
+    impl TypeSystem for TestType {}
+
+    impl OdbcTypePolicy for TestType {
+        fn source_name() -> &'static str {
+            "Test"
+        }
+
+        fn max_str_len_env() -> &'static str {
+            "TEST_MAX_STR_LEN"
+        }
+
+        fn nullable(self) -> bool {
+            false
+        }
+
+        fn buffer_desc(self, max_str_len: usize) -> BufferDesc {
+            match self {
+                Self::Text => BufferDesc::Text { max_str_len },
+                Self::Binary => BufferDesc::Binary {
+                    max_bytes: max_str_len,
+                },
+                Self::WText => BufferDesc::WText { max_str_len },
+                Self::I32 => BufferDesc::I32 { nullable: false },
+            }
+        }
+    }
+
     #[derive(Debug)]
     enum TestError {
         ParseValue { value: String, ty: &'static str },
@@ -1275,6 +1336,68 @@ mod tests {
             123
         );
         assert!(parse_partition_value::<TestError>(b"not-a-number").is_err());
+    }
+
+    #[test]
+    fn derives_buffer_lengths_from_column_metadata_when_available() {
+        assert_eq!(
+            TestType::Text.buffer_max_len(
+                DataType::Varchar {
+                    length: std::num::NonZeroUsize::new(12),
+                },
+                1024,
+            ),
+            48
+        );
+        assert_eq!(
+            TestType::Binary.buffer_max_len(
+                DataType::Varbinary {
+                    length: std::num::NonZeroUsize::new(12),
+                },
+                1024,
+            ),
+            12
+        );
+        assert_eq!(
+            TestType::Text.buffer_max_len(
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+                1024,
+            ),
+            12
+        );
+        assert_eq!(
+            TestType::WText.buffer_max_len(
+                DataType::WVarchar {
+                    length: std::num::NonZeroUsize::new(12),
+                },
+                1024,
+            ),
+            12
+        );
+    }
+
+    #[test]
+    fn falls_back_to_default_buffer_length_without_metadata() {
+        assert_eq!(
+            TestType::Text.buffer_max_len(DataType::LongVarchar { length: None }, 1024),
+            1024
+        );
+        assert_eq!(
+            TestType::Binary.buffer_max_len(DataType::LongVarbinary { length: None }, 1024),
+            1024
+        );
+        assert_eq!(
+            TestType::I32.buffer_max_len(
+                DataType::Varchar {
+                    length: std::num::NonZeroUsize::new(12),
+                },
+                1024,
+            ),
+            1024
+        );
     }
 
     #[test]
