@@ -19,11 +19,23 @@ use connectorx::{
     transports::Db2ArrowTransport,
 };
 
+mod test_db;
+
+fn use_db2_testcontainer() -> bool {
+    std::env::var("CONNECTORX_DB2_TESTCONTAINER").is_ok()
+}
+
 fn db2_odbc_conn() -> Option<String> {
+    if use_db2_testcontainer() {
+        return Some(test_db::db2_odbc_conn());
+    }
     std::env::var("DB2_ODBC_CONN").ok()
 }
 
 fn db2_url() -> Option<String> {
+    if use_db2_testcontainer() {
+        return Some(test_db::db2_odbc_url());
+    }
     std::env::var("DB2_URL").ok()
 }
 
@@ -323,6 +335,47 @@ fn test_db2_arrow_date_decimal_and_text_variants() {
 
     let text_v = rb.column(5).as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!(text_v.value(0), "long text value");
+}
+
+#[test]
+fn test_db2_testcontainer_vendor_type_fallbacks() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select decfloat_v, xml_varchar, graphic_varchar from ( \
+             select decfloat(123.5) as decfloat_v, \
+                    xmlserialize(xmlparse(document '<root>alpha</root>') as varchar(64)) as xml_varchar, \
+                    cast(cast('wide' as vargraphic(32)) as varchar(32)) as graphic_varchar \
+             from sysibm.sysdummy1 \
+         ) q",
+    )];
+
+    let source = Db2Source::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, Db2ArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 3);
+
+    let decfloat_v = rb.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+    assert!(decfloat_v.value(0).contains("123.5"));
+    let xml_v = rb.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+    assert!(xml_v.value(0).contains("<root>alpha</root>"));
+    let graphic_v = rb.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(graphic_v.value(0).trim_end(), "wide");
 }
 
 #[test]
