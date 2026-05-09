@@ -6,7 +6,9 @@ use arrow::{
         Date32Array, Decimal128Array, Float32Array, Float64Array, Int64Array, LargeBinaryArray,
         StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
     },
+    datatypes::Schema,
     record_batch::RecordBatch,
+    util::display::array_value_to_string,
 };
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use connectorx::{
@@ -63,6 +65,86 @@ fn basic_type_query() -> CXQuery<String> {
              select cast(2 as integer) as id, cast(0 as smallint) as flag, cast('beta' as varchar(16)) as name from sysibm.sysdummy1 \
          ) q order by id",
     )
+}
+
+fn route_comparison_query() -> CXQuery<String> {
+    CXQuery::naked(
+        "select id, name, amount, nullable_int, created_at from ( \
+             select cast(1 as integer) as id, \
+                    cast('alpha' as varchar(16)) as name, \
+                    cast(123.45 as decimal(18,2)) as amount, \
+                    cast(null as integer) as nullable_int, \
+                    cast('2024-01-02 03:04:05' as timestamp) as created_at \
+             from sysibm.sysdummy1 \
+             union all \
+             select cast(2 as integer) as id, \
+                    cast('beta' as varchar(16)) as name, \
+                    cast(-9.99 as decimal(18,2)) as amount, \
+                    cast(42 as integer) as nullable_int, \
+                    cast('2024-01-03 04:05:06' as timestamp) as created_at \
+             from sysibm.sysdummy1 \
+         ) q order by id",
+    )
+}
+
+fn raw_odbc_url(conn: &str) -> String {
+    format!("odbc:///?odbc_connect={}", urlencoding::encode(conn))
+}
+
+fn run_arrow_route(
+    conn: &str,
+    queries: &[CXQuery<String>],
+    origin_query: Option<String>,
+) -> Vec<RecordBatch> {
+    let source_conn = parse_source(conn, None).unwrap();
+    get_arrow(&source_conn, origin_query, queries, None)
+        .unwrap()
+        .arrow()
+        .unwrap()
+}
+
+fn summarize_arrow_output(batches: &[RecordBatch]) -> (Schema, Vec<usize>, Vec<String>) {
+    assert!(!batches.is_empty());
+    let schema = batches[0].schema().as_ref().clone();
+    let mut null_counts = vec![0; schema.fields().len()];
+    let mut rows = Vec::new();
+
+    for batch in batches {
+        assert_eq!(batch.schema().as_ref(), &schema);
+        for (column_index, column) in batch.columns().iter().enumerate() {
+            null_counts[column_index] += column.null_count();
+        }
+        for row_index in 0..batch.num_rows() {
+            let row = batch
+                .columns()
+                .iter()
+                .map(|column| {
+                    if column.is_null(row_index) {
+                        "NULL".to_string()
+                    } else {
+                        array_value_to_string(column.as_ref(), row_index).unwrap()
+                    }
+                })
+                .collect::<Vec<_>>();
+            rows.push(format!("{row:?}"));
+        }
+    }
+
+    rows.sort();
+    (schema, null_counts, rows)
+}
+
+fn assert_matching_arrow_output(left: &[RecordBatch], right: &[RecordBatch]) {
+    let left_rows = left.iter().map(RecordBatch::num_rows).sum::<usize>();
+    let right_rows = right.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(left_rows, right_rows);
+
+    let (left_schema, left_null_counts, left_values) = summarize_arrow_output(left);
+    let (right_schema, right_null_counts, right_values) = summarize_arrow_output(right);
+
+    assert_eq!(left_schema, right_schema);
+    assert_eq!(left_null_counts, right_null_counts);
+    assert_eq!(left_values, right_values);
 }
 
 #[test]
@@ -366,6 +448,53 @@ fn test_db2_partition_query() {
         .map(RecordBatch::num_rows)
         .sum::<usize>();
     assert_eq!(rows, 1);
+}
+
+#[test]
+fn test_db2_dedicated_and_generic_odbc_routes_match() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = db2_url() else {
+        eprintln!("CONNECTORX_SKIP: skipping Db2 route comparison test: DB2_URL is not set");
+        return;
+    };
+
+    let generic_odbc = raw_odbc_url(&db2_conn_string(&conn).unwrap());
+    let query = route_comparison_query();
+
+    let dedicated = run_arrow_route(&conn, std::slice::from_ref(&query), None);
+    let generic = run_arrow_route(&generic_odbc, &[query], None);
+
+    assert_matching_arrow_output(&dedicated, &generic);
+}
+
+#[test]
+fn test_db2_dedicated_and_generic_odbc_partition_routes_match() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = db2_url() else {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 partition route comparison test: DB2_URL is not set"
+        );
+        return;
+    };
+
+    let generic_odbc = raw_odbc_url(&db2_conn_string(&conn).unwrap());
+    let query = route_comparison_query();
+    let part = PartitionQuery::new(query.as_str(), "id", Some(1), Some(2), 2);
+
+    let dedicated_source = parse_source(&conn, None).unwrap();
+    let generic_source = parse_source(&generic_odbc, None).unwrap();
+    let dedicated_queries = partition(&part, &dedicated_source).unwrap();
+    let generic_queries = partition(&part, &generic_source).unwrap();
+
+    assert_eq!(dedicated_queries.len(), 2);
+    assert_eq!(generic_queries.len(), 2);
+
+    let dedicated = run_arrow_route(&conn, &dedicated_queries, Some(query.to_string()));
+    let generic = run_arrow_route(&generic_odbc, &generic_queries, Some(query.to_string()));
+
+    assert_matching_arrow_output(&dedicated, &generic);
 }
 
 fn verify_arrow_results(mut result: Vec<RecordBatch>) {

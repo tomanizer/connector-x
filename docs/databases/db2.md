@@ -79,6 +79,21 @@ Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be report
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
 
+## Route Selection: `db2://` vs `odbc://`
+
+Prefer `db2://` when you are connecting to IBM Db2 through ConnectorX.
+
+* `db2://` and `odbc://` both end up on the shared ODBC block-cursor + Arrow fetch path, so standard ODBC-reported types are expected to produce the same Arrow schema and values when they are reported identically by the driver.
+* `db2://` is still the better default because it applies the Db2-specific URL-to-ODBC mapping (`Hostname`, `Protocol=TCPIP`, `Database`, `UID`, `PWD`) and keeps the safer structured URL surface instead of asking callers to hand-assemble a raw ODBC string.
+* Use `odbc://` only when you need an exact DSN or driver-specific keyword set that does not fit the structured `db2://...?...` form.
+
+Practical expectations:
+
+1. **Type fidelity:** prefer `db2://`. For standard ODBC types the Arrow schema should match `odbc://`; vendor-specific Db2 types can still depend on how the IBM driver reports them.
+2. **Partitioning:** `db2://` and `odbc://` both use ConnectorX's generic SQL partition rewriter for Db2-style queries, so ANSI-style partitioned extraction is expected to behave the same on both routes.
+3. **Performance:** the internal fetch path is the same, so performance should usually be close. Measure with your actual driver, schema width, and network conditions.
+4. **Connection-string safety:** generated values are brace-escaped on both routes, but `db2://` is safer to author because ConnectorX builds the ODBC string for you. Raw ODBC strings passed through `odbc:///?odbc_connect=...` are trusted as-is.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, temporal, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal and text columns use text buffers for driver compatibility.
@@ -136,3 +151,34 @@ DB2_BENCH_QUERY="select * from cx_db2_test" \
 DB2_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
 ```
+
+To compare the dedicated Db2 route, the generic ODBC route, and partitioned extraction from a Polars caller, use the same query and the same driver in all three cases:
+
+```bash
+DB2_URL="db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER" \
+DB2_ODBC_URL="odbc:///?odbc_connect=Driver%3D%7BIBM%20DB2%20ODBC%20DRIVER%7D%3BHostname%3D127.0.0.1%3BPort%3D50000%3BProtocol%3DTCPIP%3BDatabase%3Dtestdb%3BUID%3Ddb2inst1%3BPWD%3Dpassword%3B" \
+DB2_BENCH_QUERY="select id, name, amount from cx_db2_test order by id" \
+python - <<'PY'
+import os
+import statistics
+import time
+import polars as pl
+
+query = os.environ["DB2_BENCH_QUERY"]
+cases = [
+    ("db2:// dedicated", os.environ["DB2_URL"], {}),
+    ("odbc:// generic", os.environ["DB2_ODBC_URL"], {}),
+    ("db2:// partitioned", os.environ["DB2_URL"], {"partition_on": "id", "partition_num": 4}),
+]
+
+for label, uri, extra in cases:
+    timings = []
+    for _ in range(5):
+        start = time.perf_counter()
+        df = pl.read_database_uri(query, uri, engine="connectorx", **extra)
+        timings.append(time.perf_counter() - start)
+    print(label, "rows=", df.height, "median_s=", round(statistics.median(timings), 4), "runs=", [round(v, 4) for v in timings])
+PY
+```
+
+If the generic ODBC route partitions cleanly for your query and driver, add a fourth case with `DB2_ODBC_URL` plus the same `partition_on`/`partition_num` options.

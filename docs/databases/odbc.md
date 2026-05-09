@@ -59,6 +59,23 @@ conn_with_credentials = ConnectionUrl(
 
 The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route. Use `return_type="arrow"`, `return_type="arrow_stream"`, or a downstream Arrow consumer. To get pandas today, read Arrow and call `table.to_pandas()` after installing `pyarrow`.
 
+## Choosing Between `db2://`, `sybase://`, and `odbc://`
+
+Use the dedicated scheme when ConnectorX has one for your database:
+
+* **Db2:** prefer `db2://` over `odbc://` for normal use. It shares the same ODBC fetch path as generic ODBC, but the dedicated route provides the Db2-specific URL mapping and is the most predictable choice for schema, partitioning, and connection-string construction.
+* **Sybase / SAP ASE:** prefer `sybase://` over `odbc://`. It shares the ODBC fetch core, but it adds Sybase-specific type handling and uses the T-SQL/MS SQL partitioning dialect instead of the generic SQL dialect.
+* **Generic ODBC:** prefer `odbc://` only when you truly need raw DSN or driver-specific ODBC keywords that are not modeled by a dedicated ConnectorX URL.
+
+Expected behavior across routes:
+
+| Question | Db2 | Sybase |
+| --- | --- | --- |
+| Should dedicated and generic routes return the same Arrow schema? | Usually yes for standard ODBC-reported types. Vendor-specific types still depend on how the driver reports them. | Usually yes for standard ODBC-reported types. ASE/FreeTDS-specific types may differ, so the dedicated route is safer. |
+| Should partitioning generate valid SQL on both routes? | Usually yes for ANSI-style Db2 queries because both routes use the generic SQL rewriter. | Not guaranteed. `sybase://` is preferred because it uses the T-SQL/MS SQL rewriter; `odbc://` only guarantees the generic SQL rewriter. |
+| Are there performance differences? | Usually small, because both routes use the same block-cursor and Arrow conversion core. | Possible on temporal/binary-heavy queries because the dedicated Sybase route intentionally uses more compatibility-oriented buffer choices. |
+| Which route is safest to author? | `db2://`, because ConnectorX constructs the ODBC string from structured URL fields. | `sybase://`, for the same reason plus default TDS configuration. |
+
 ## Runtime Dependencies
 
 ConnectorX links against the platform ODBC manager. The ODBC driver for your database is a runtime dependency and is not bundled in ConnectorX wheels.

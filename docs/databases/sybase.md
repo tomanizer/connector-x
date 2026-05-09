@@ -86,6 +86,21 @@ ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` 
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
 
+## Route Selection: `sybase://` vs `odbc://`
+
+Prefer `sybase://` for SAP ASE / Sybase workloads.
+
+* `sybase://` and `odbc://` share the same ODBC fetch core, but the dedicated Sybase route adds Sybase-specific connection-string defaults (`tds_version=5.0`), FreeTDS/ASE type handling, and the Sybase partitioning dialect.
+* `sybase://` is the safer default for correctness because ConnectorX's Sybase type system recognizes ASE/FreeTDS quirks such as the `TIME2` extension and intentionally uses text-compatible buffers for temporal and binary values that are commonly reported in driver-specific ways.
+* Use `odbc://` when you need an exact DSN or vendor-specific ODBC keyword set, and keep the query to standard SQL/ODBC-reported types if you want the closest match.
+
+Practical expectations:
+
+1. **Type fidelity:** prefer `sybase://`. Standard ODBC-reported primitive/text/decimal types are expected to match `odbc://`, but ASE-specific types and FreeTDS quirks are more likely to behave correctly on the dedicated route.
+2. **Partitioning:** prefer `sybase://`. The dedicated route uses the T-SQL/MS SQL dialect rewriter; `odbc://` uses the generic SQL rewriter, which is fine for simple ANSI-style queries but is not expected to cover every ASE-specific query form.
+3. **Performance:** both routes share the same block-cursor fetch engine, but the Sybase route deliberately favors compatibility for temporal/binary-heavy queries. Benchmark both routes on your actual driver and schema if raw throughput is the deciding factor.
+4. **Connection-string safety:** generated values are brace-escaped on both routes, but `sybase://` keeps the structured URL form and default TDS settings. Raw ODBC strings passed through `odbc:///?odbc_connect=...` are trusted as-is.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, and `bit` columns avoid text conversion in the hot path. Decimal, date/time, text, and binary columns still use text buffers for driver compatibility.
@@ -115,3 +130,34 @@ SYBASE_BENCH_QUERY="select * from dbo.cx_sybase_test" \
 SYBASE_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
 ```
+
+To compare the dedicated Sybase route, the generic ODBC route, and partitioned extraction from a Polars caller, run the same query through each route:
+
+```bash
+SYBASE_URL="sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=%2Fpath%2Fto%2Flibtdsodbc.so" \
+SYBASE_ODBC_URL="odbc:///?odbc_connect=Driver%3D%7B%2Fpath%2Fto%2Flibtdsodbc.so%7D%3BServer%3D127.0.0.1%3BPort%3D5000%3BTDS_Version%3D5.0%3BUID%3Dsa%3BPWD%3Dsybase%3BDatabase%3Dtempdb%3B" \
+SYBASE_BENCH_QUERY="select id, name, amount from dbo.cx_sybase_test order by id" \
+python - <<'PY'
+import os
+import statistics
+import time
+import polars as pl
+
+query = os.environ["SYBASE_BENCH_QUERY"]
+cases = [
+    ("sybase:// dedicated", os.environ["SYBASE_URL"], {}),
+    ("odbc:// generic", os.environ["SYBASE_ODBC_URL"], {}),
+    ("sybase:// partitioned", os.environ["SYBASE_URL"], {"partition_on": "id", "partition_num": 4}),
+]
+
+for label, uri, extra in cases:
+    timings = []
+    for _ in range(5):
+        start = time.perf_counter()
+        df = pl.read_database_uri(query, uri, engine="connectorx", **extra)
+        timings.append(time.perf_counter() - start)
+    print(label, "rows=", df.height, "median_s=", round(statistics.median(timings), 4), "runs=", [round(v, 4) for v in timings])
+PY
+```
+
+Only add a generic-ODBC partitioned case after verifying that your query parses and partitions cleanly through the generic route.
