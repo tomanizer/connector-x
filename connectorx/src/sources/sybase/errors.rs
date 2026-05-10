@@ -16,6 +16,17 @@ pub enum SybaseSourceError {
     ParseValue { value: String, ty: &'static str },
 
     #[error(
+        "Invalid Sybase partition bound for source={source_name} column_name={column_name} bound={bound_name} value={value:?}: {reason}"
+    )]
+    InvalidPartitionBound {
+        source_name: &'static str,
+        column_name: String,
+        bound_name: &'static str,
+        value: String,
+        reason: &'static str,
+    },
+
+    #[error(
         "Invalid UTF-16 sequence for source={source_name} column_name={column_name} row_index={row_index} byte_offset={byte_offset} surrogate={surrogate:#06X}. Set replace_invalid_utf16=true to replace invalid UTF-16 with U+FFFD."
     )]
     InvalidUtf16 {

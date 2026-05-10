@@ -48,6 +48,13 @@ pub trait OdbcCoreError:
     fn get_nrows_failed() -> Self;
     fn no_result_set(query: String) -> Self;
     fn parse_value(value: String, ty: &'static str) -> Self;
+    fn invalid_partition_bound(
+        source_name: &'static str,
+        column_name: &str,
+        bound_name: &'static str,
+        value: String,
+        reason: &'static str,
+    ) -> Self;
     fn invalid_utf16(
         source_name: &'static str,
         column_name: Option<&str>,
@@ -931,7 +938,12 @@ where
         .map_err(|_| E::parse_value(bytes_to_string(raw_value), "usize"))?)
 }
 
-pub(crate) fn fetch_i64_pair<E>(conn: &str, query: &str) -> Result<(i64, i64), E>
+pub(crate) fn fetch_i64_pair<E>(
+    conn: &str,
+    query: &str,
+    source_name: &'static str,
+    column_name: &str,
+) -> Result<(i64, i64), E>
 where
     E: OdbcCoreError,
 {
@@ -939,8 +951,8 @@ where
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(128))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
     let batch = cursor.fetch()?.ok_or_else(E::get_nrows_failed)?;
-    let min = parse_partition_value::<E>(batch.at(0, 0).ok_or_else(E::get_nrows_failed)?)?;
-    let max = parse_partition_value::<E>(batch.at(1, 0).ok_or_else(E::get_nrows_failed)?)?;
+    let min = parse_partition_bound::<E>(batch.at(0, 0), source_name, column_name, "min")?;
+    let max = parse_partition_bound::<E>(batch.at(1, 0), source_name, column_name, "max")?;
     Ok((min, max))
 }
 
@@ -1295,22 +1307,72 @@ where
         .map_err(E::from)
 }
 
-fn parse_partition_value<E>(value: &[u8]) -> Result<i64, E>
+fn parse_partition_bound<E>(
+    value: Option<&[u8]>,
+    source_name: &'static str,
+    column_name: &str,
+    bound_name: &'static str,
+) -> Result<i64, E>
+where
+    E: OdbcCoreError,
+{
+    match value {
+        Some(value) => parse_partition_value::<E>(value, source_name, column_name, bound_name),
+        None => Err(E::invalid_partition_bound(
+            source_name,
+            column_name,
+            bound_name,
+            "NULL".to_string(),
+            "partition range query returned NULL",
+        )),
+    }
+}
+
+fn parse_partition_value<E>(
+    value: &[u8],
+    source_name: &'static str,
+    column_name: &str,
+    bound_name: &'static str,
+) -> Result<i64, E>
 where
     E: OdbcCoreError,
 {
     let trimmed = trim_ascii(value);
     if trimmed.is_empty() {
-        return Ok(0);
+        return Err(E::invalid_partition_bound(
+            source_name,
+            column_name,
+            bound_name,
+            bytes_to_string(trimmed),
+            "partition range query returned an empty value",
+        ));
     }
 
-    match parse_i64_with_ty::<E>(trimmed, "partition range") {
-        Ok(value) => Ok(value),
-        Err(_) => bytes_to_str::<E>(trimmed, "partition range")?
-            .parse::<f64>()
-            .map(|value| value as i64)
-            .map_err(|_| E::parse_value(bytes_to_string(trimmed), "partition range")),
+    if let Ok(value) = parse_i64_with_ty::<E>(trimmed, "partition range") {
+        return Ok(value);
     }
+
+    let value = bytes_to_string(trimmed);
+    let has_decimal_marker = trimmed
+        .iter()
+        .copied()
+        .any(|byte| matches!(byte, b'.' | b'e' | b'E'));
+    let uses_numeric_notation = trimmed
+        .iter()
+        .copied()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'));
+    let reason = if has_decimal_marker && uses_numeric_notation {
+        "partition range must be an i64 integer; decimal or fractional bounds are not supported"
+    } else {
+        "partition range value is not a valid i64 integer"
+    };
+    Err(E::invalid_partition_bound(
+        source_name,
+        column_name,
+        bound_name,
+        value,
+        reason,
+    ))
 }
 
 pub(crate) fn env_usize(name: &str) -> Option<usize> {
@@ -1455,6 +1517,13 @@ mod tests {
             value: String,
             ty: &'static str,
         },
+        InvalidPartitionBound {
+            source_name: &'static str,
+            column_name: String,
+            bound_name: &'static str,
+            value: String,
+            reason: &'static str,
+        },
         InvalidUtf16 {
             source_name: &'static str,
             column_name: String,
@@ -1476,6 +1545,22 @@ mod tests {
 
         fn parse_value(value: String, ty: &'static str) -> Self {
             Self::ParseValue { value, ty }
+        }
+
+        fn invalid_partition_bound(
+            source_name: &'static str,
+            column_name: &str,
+            bound_name: &'static str,
+            value: String,
+            reason: &'static str,
+        ) -> Self {
+            Self::InvalidPartitionBound {
+                source_name,
+                column_name: column_name.to_string(),
+                bound_name,
+                value,
+                reason,
+            }
         }
 
         fn invalid_utf16(
@@ -1534,6 +1619,9 @@ mod tests {
     fn parse_value_error<T>(result: Result<T, TestError>) -> (String, &'static str) {
         match result {
             Err(TestError::ParseValue { value, ty }) => (value, ty),
+            Err(TestError::InvalidPartitionBound { .. }) => {
+                panic!("unexpected partition bound error")
+            }
             Err(TestError::InvalidUtf16 { .. }) => panic!("unexpected UTF-16 error"),
             Err(TestError::Other(value)) => panic!("unexpected error: {}", value),
             Ok(_) => panic!("expected parse error"),
@@ -1609,17 +1697,100 @@ mod tests {
     }
 
     #[test]
-    fn parses_partition_values() {
-        assert_eq!(parse_partition_value::<TestError>(b"").unwrap(), 0);
-        assert_eq!(parse_partition_value::<TestError>(b"  -42  ").unwrap(), -42);
-        assert_eq!(parse_partition_value::<TestError>(b"42").unwrap(), 42);
-        assert_eq!(parse_partition_value::<TestError>(b"42.9").unwrap(), 42);
-        assert_eq!(parse_partition_value::<TestError>(b"-42.9").unwrap(), -42);
+    fn parses_integer_partition_values() {
         assert_eq!(
-            parse_partition_value::<TestError>(b"123.0001").unwrap(),
-            123
+            parse_partition_value::<TestError>(b"  -42  ", "Odbc", "id", "min").unwrap(),
+            -42
         );
-        assert!(parse_partition_value::<TestError>(b"not-a-number").is_err());
+        assert_eq!(
+            parse_partition_value::<TestError>(b"42", "Odbc", "id", "max").unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn rejects_empty_partition_values() {
+        match parse_partition_value::<TestError>(b"", "Odbc", "id", "min") {
+            Err(TestError::InvalidPartitionBound {
+                source_name,
+                column_name,
+                bound_name,
+                value,
+                reason,
+            }) => {
+                assert_eq!(source_name, "Odbc");
+                assert_eq!(column_name, "id");
+                assert_eq!(bound_name, "min");
+                assert_eq!(value, "");
+                assert_eq!(reason, "partition range query returned an empty value");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_null_partition_bounds() {
+        match parse_partition_bound::<TestError>(None, "Db2", "amount", "max") {
+            Err(TestError::InvalidPartitionBound {
+                source_name,
+                column_name,
+                bound_name,
+                value,
+                reason,
+            }) => {
+                assert_eq!(source_name, "Db2");
+                assert_eq!(column_name, "amount");
+                assert_eq!(bound_name, "max");
+                assert_eq!(value, "NULL");
+                assert_eq!(reason, "partition range query returned NULL");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn rejects_decimal_partition_values_without_truncation() {
+        for value in [b"42.9".as_slice(), b"-42.9", b"123.0001", b"123.0"] {
+            match parse_partition_value::<TestError>(value, "Sybase", "price", "min") {
+                Err(TestError::InvalidPartitionBound {
+                    source_name,
+                    column_name,
+                    bound_name,
+                    value,
+                    reason,
+                }) => {
+                    assert_eq!(source_name, "Sybase");
+                    assert_eq!(column_name, "price");
+                    assert_eq!(bound_name, "min");
+                    assert!(value.contains('.') || value.contains('e') || value.contains('E'));
+                    assert_eq!(
+                        reason,
+                        "partition range must be an i64 integer; decimal or fractional bounds are not supported"
+                    );
+                }
+                other => panic!("unexpected result: {:?}", other),
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_non_numeric_partition_values() {
+        match parse_partition_value::<TestError>(b"not-a-number", "Odbc", "id", "max") {
+            Err(TestError::InvalidPartitionBound {
+                source_name,
+                column_name,
+                bound_name,
+                value,
+                reason,
+            }) => {
+                assert_eq!(source_name, "Odbc");
+                assert_eq!(column_name, "id");
+                assert_eq!(bound_name, "max");
+                assert_eq!(value, "not-a-number");
+                assert_eq!(reason, "partition range value is not a valid i64 integer");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]
