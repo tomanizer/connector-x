@@ -125,7 +125,10 @@ fn assert_postgres_testcontainer_rows(batches: &[arrow::record_batch::RecordBatc
     );
 }
 
-fn assert_truncation_error_mentions_column(err: &(impl std::fmt::Display + ?Sized), column_name: &str) {
+fn assert_truncation_error_mentions_column(
+    err: &(impl std::fmt::Display + ?Sized),
+    column_name: &str,
+) {
     let message = err.to_string();
     assert!(
         message.contains(&format!("column \"{column_name}\"")),
@@ -461,17 +464,18 @@ fn test_odbc_testcontainer_truncation_error_includes_column_name_get_arrow() {
 
     let _guard = lock_odbc_env();
     let conn = test_db::postgres_odbc_url();
-    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "1");
     let source_conn = parse_source(&conn, None).unwrap();
     let err = get_arrow(
         &source_conn,
         None,
         &[CXQuery::naked(
-            "select cast(long_text as text) as truncation_target from cx_odbc_edge where id = 1",
+            "select payload as truncation_target from cx_odbc_edge where id = 1",
         )],
         None,
     )
-    .unwrap_err();
+    .err()
+    .expect("expected truncation error");
 
     assert_truncation_error_mentions_column(&err, "truncation_target");
 }
@@ -489,9 +493,9 @@ fn test_odbc_testcontainer_truncation_error_includes_column_name_streaming() {
 
     let _guard = lock_odbc_env();
     let conn = test_db::postgres_odbc_conn();
-    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "1");
     let queries = [CXQuery::naked(
-        "select cast(long_text as text) as truncation_target from cx_odbc_edge where id = 1",
+        "select payload as truncation_target from cx_odbc_edge where id = 1",
     )];
     let source = OdbcSource::new(&conn, 1).unwrap();
     let mut destination = ArrowDestination::new();
