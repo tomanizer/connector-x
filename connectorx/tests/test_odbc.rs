@@ -162,6 +162,20 @@ fn test_odbc_url_to_odbc_conn_string_rejects_invalid_keys() {
 }
 
 #[test]
+fn test_odbc_url_to_odbc_conn_string_rejects_duplicate_params() {
+    let err = odbc_conn_string("odbc://example.com/db?driver=PostgreSQL&Driver=BadDriver")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("duplicate ODBC URL query parameter"));
+    assert!(err.contains("driver"));
+
+    let err = odbc_conn_string("odbc://example.com/db?driver=PostgreSQL&dr%69ver=BadDriver")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("driver"));
+}
+
+#[test]
 fn test_odbc_url_to_odbc_conn_string_keeps_raw_odbc_string() {
     let conn = "Driver={SQLite3};Database=/tmp/test.db;";
     assert_eq!(odbc_conn_string(conn).unwrap(), conn);

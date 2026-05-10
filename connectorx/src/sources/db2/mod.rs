@@ -12,10 +12,10 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{
-            connection_bool_param, connection_u32_param, connection_usize_param,
-            is_connector_option_key, is_raw_odbc_conn_string, is_valid_odbc_key, odbc_conn_value,
-            url_bool_param, url_usize_param, LOGIN_TIMEOUT_SECS_PARAM, MAX_CONNECTIONS_PARAM,
-            QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
+            connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
+            is_valid_odbc_key, odbc_conn_value, param_bool_param, param_u32_param,
+            param_usize_param, param_value, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM,
+            MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
         Source, SourcePartition,
@@ -106,12 +106,20 @@ impl Db2Source {
 
     #[throws(Db2SourceError)]
     pub fn with_options(conn: &str, nconn: usize, options: Db2Options) -> Self {
-        let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
+        let params = connection_query_pairs(conn)?;
+        let params = params.as_deref();
+        let replace_invalid_utf16 = params
+            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF16_PARAM))
+            .transpose()?
+            .flatten()
             .unwrap_or(options.replace_invalid_utf16);
-        let max_connections =
-            connection_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+        let max_connections = params
+            .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.max_connections);
         let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
-        let execution_options = db2_execution_options(conn, options)?;
+        let execution_options = db2_execution_options_from_params(params, options)?;
         Self {
             conn: db2_conn_string(conn)?,
             origin_query: None,
@@ -508,9 +516,26 @@ pub(crate) fn fetch_i64_pair(
 
 #[throws(Db2SourceError)]
 pub(crate) fn db2_execution_options(conn: &str, options: Db2Options) -> OdbcExecutionOptions {
+    let params = connection_query_pairs(conn)?;
+    db2_execution_options_from_params(params.as_deref(), options)?
+}
+
+#[throws(Db2SourceError)]
+fn db2_execution_options_from_params(
+    params: Option<&[(String, String)]>,
+    options: Db2Options,
+) -> OdbcExecutionOptions {
     OdbcExecutionOptions::new(
-        connection_u32_param(conn, LOGIN_TIMEOUT_SECS_PARAM)?.or(options.login_timeout_secs),
-        connection_usize_param(conn, QUERY_TIMEOUT_SECS_PARAM)?.or(options.query_timeout_secs),
+        params
+            .map(|params| param_u32_param(params, LOGIN_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.login_timeout_secs),
+        params
+            .map(|params| param_usize_param(params, QUERY_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.query_timeout_secs),
     )?
 }
 
@@ -521,13 +546,15 @@ pub(crate) fn db2_get_arrow(
     queries: &[CXQuery<String>],
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
+    let params = url_query_pairs(conn)?;
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
-    let replace_invalid_utf16 =
-        url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
-    let max_connections = url_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
+        .unwrap_or(options.replace_invalid_utf16);
+    let max_connections =
+        param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
-    let execution_options = db2_execution_options(conn.as_str(), options)?;
+    let execution_options = db2_execution_options_from_params(Some(&params), options)?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         Db2TypeSystem,
         Db2SourceError,
@@ -561,25 +588,15 @@ pub fn db2_conn_string(conn: &str) -> String {
     }
 
     let url = Url::parse(conn)?;
-    let params = url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect::<std::collections::HashMap<_, _>>();
+    let params = url_query_pairs(&url)?;
 
-    let driver = params
-        .get("driver")
-        .cloned()
-        .unwrap_or_else(|| "IBM DB2 ODBC DRIVER".to_string());
+    let driver = param_value(&params, "driver").unwrap_or("IBM DB2 ODBC DRIVER");
     let host = decode(url.host_str().unwrap_or("localhost"))?.into_owned();
     let port = url.port().unwrap_or(50000);
     let database = decode(url.path().trim_start_matches('/'))?.into_owned();
     let username = decode(url.username())?.into_owned();
     let password = decode(url.password().unwrap_or(""))?.into_owned();
-    let protocol = params
-        .get("protocol")
-        .or_else(|| params.get("Protocol"))
-        .cloned()
-        .unwrap_or_else(|| "TCPIP".to_string());
+    let protocol = param_value(&params, "protocol").unwrap_or("TCPIP");
 
     let mut ret = format!(
         "Driver={};Hostname={};Port={};Protocol={};UID={};PWD={};",
@@ -593,14 +610,15 @@ pub fn db2_conn_string(conn: &str) -> String {
     if !database.is_empty() {
         ret.push_str(&format!("Database={};", odbc_conn_value(&database)));
     }
-    for (key, value) in params {
-        if !is_connector_option_key(&key)
-            && !matches!(key.as_str(), "driver" | "Driver" | "protocol" | "Protocol")
+    for (key, value) in &params {
+        if !is_connector_option_key(key)
+            && !key.eq_ignore_ascii_case("driver")
+            && !key.eq_ignore_ascii_case("protocol")
         {
-            if !is_valid_odbc_key(&key) {
+            if !is_valid_odbc_key(key) {
                 throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
             }
-            ret.push_str(&format!("{}={};", key, odbc_conn_value(&value)));
+            ret.push_str(&format!("{}={};", key, odbc_conn_value(value)));
         }
     }
     ret

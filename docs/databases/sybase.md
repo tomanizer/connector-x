@@ -42,6 +42,8 @@ Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC conn
 
 `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
+Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. Accepted Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Sybase driver is a runtime dependency and is not bundled in ConnectorX wheels.

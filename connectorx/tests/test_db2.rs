@@ -67,6 +67,21 @@ fn test_db2_url_to_odbc_conn_string_rejects_invalid_keys() {
     .is_err());
 }
 
+#[test]
+fn test_db2_url_to_odbc_conn_string_rejects_duplicate_params() {
+    let err =
+        db2_conn_string("db2://user:pass@example.com:50000/db?driver=IBM%20DB2&Driver=BadDriver")
+            .unwrap_err()
+            .to_string();
+    assert!(err.contains("duplicate ODBC URL query parameter"));
+    assert!(err.contains("driver"));
+
+    let err = db2_conn_string("db2://user:pass@example.com:50000/db?protocol=TCPIP&Protocol=IPC")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("protocol"));
+}
+
 fn basic_type_query() -> CXQuery<String> {
     CXQuery::naked(
         "select id, flag, name from ( \

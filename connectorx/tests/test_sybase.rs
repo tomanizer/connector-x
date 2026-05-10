@@ -71,6 +71,24 @@ fn test_sybase_url_to_odbc_conn_string_braces_encoded_driver_path() {
     );
 }
 
+#[test]
+fn test_sybase_url_to_odbc_conn_string_rejects_duplicate_params() {
+    let err = sybase_conn_string(
+        "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&Driver=BadDriver",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate ODBC URL query parameter"));
+    assert!(err.contains("driver"));
+
+    let err = sybase_conn_string(
+        "sybase://sa:sybase@127.0.0.1:5000/tempdb?tds_version=5.0&TDS_Version=7.4",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("tds_version"));
+}
+
 fn basic_type_query() -> CXQuery<String> {
     CXQuery::naked(
         "select convert(int, 1) as id, convert(bit, 1) as flag, convert(varchar(16), 'alpha') as name \
