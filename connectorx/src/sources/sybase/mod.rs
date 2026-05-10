@@ -384,7 +384,6 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(feature = "dst_arrow")]
 use {
-    arrow::array::{ArrayRef, LargeBinaryBuilder},
     crate::{
         destinations::arrow::ArrowTypeSystem,
         sources::odbc_core::{
@@ -393,6 +392,7 @@ use {
             build_timestamp_micro_array, require_nullable, OdbcArrowPolicy,
         },
     },
+    arrow::array::{ArrayRef, LargeBinaryBuilder},
     odbc_api::buffers::AnySlice,
 };
 
@@ -408,7 +408,10 @@ pub(crate) fn sybase_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = SybaseOptions::from_env();
     let conn_str = sybase_conn_string(&conn[..])?;
-    Ok(odbc_core::odbc_get_arrow_impl::<SybaseTypeSystem, SybaseSourceError>(
+    Ok(odbc_core::odbc_get_arrow_impl::<
+        SybaseTypeSystem,
+        SybaseSourceError,
+    >(
         &conn_str,
         origin_query,
         queries,
@@ -468,9 +471,7 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
             | SybaseTypeSystem::Text(..) => build_string_array(column, nrows, nullable),
-            SybaseTypeSystem::Binary(..) => {
-                build_sybase_binary_array::<E>(column, nrows, nullable)
-            }
+            SybaseTypeSystem::Binary(..) => build_sybase_binary_array::<E>(column, nrows, nullable),
             SybaseTypeSystem::Date(..) => build_date32_array(column, nrows, nullable),
             SybaseTypeSystem::Time(..) => build_time64_micro_array(column, nrows, nullable),
             SybaseTypeSystem::Timestamp(..) => build_timestamp_micro_array(column, nrows, nullable),
@@ -546,7 +547,10 @@ fn build_sybase_binary_array<E: odbc_core::OdbcCoreError>(
 fn parse_hex_bytes_generic<E: odbc_core::OdbcCoreError>(bytes: &[u8]) -> Result<Vec<u8>, E> {
     let bytes = odbc_core::trim_ascii(bytes);
     if bytes.len() % 2 != 0 {
-        return Err(E::parse_value(odbc_core::bytes_to_string(bytes), "hex bytes"));
+        return Err(E::parse_value(
+            odbc_core::bytes_to_string(bytes),
+            "hex bytes",
+        ));
     }
     bytes
         .chunks_exact(2)

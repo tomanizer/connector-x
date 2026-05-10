@@ -6,11 +6,6 @@ mod typesystem;
 pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
 
-#[cfg(feature = "dst_arrow")]
-use crate::{
-    destinations::arrow::ArrowDestination,
-    errors::OutResult,
-};
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
@@ -21,6 +16,8 @@ use crate::{
     },
     sql::{count_query, CXQuery},
 };
+#[cfg(feature = "dst_arrow")]
+use crate::{destinations::arrow::ArrowDestination, errors::OutResult};
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
@@ -255,7 +252,10 @@ pub(crate) fn odbc_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = OdbcOptions::from_env();
     let conn_str = odbc_conn_string(&conn[..])?;
-    Ok(odbc_core::odbc_get_arrow_impl::<OdbcTypeSystem, OdbcSourceError>(
+    Ok(odbc_core::odbc_get_arrow_impl::<
+        OdbcTypeSystem,
+        OdbcSourceError,
+    >(
         &conn_str,
         origin_query,
         queries,
@@ -266,9 +266,6 @@ pub(crate) fn odbc_get_arrow(
 }
 
 odbc_core::impl_odbc_arrow_policy!(OdbcTypeSystem);
-
-
-
 
 impl OdbcCoreError for OdbcSourceError {
     fn get_nrows_failed() -> Self {

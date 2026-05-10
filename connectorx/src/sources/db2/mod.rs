@@ -363,7 +363,10 @@ pub(crate) fn db2_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
     let conn_str = db2_conn_string(&conn[..])?;
-    Ok(odbc_core::odbc_get_arrow_impl::<Db2TypeSystem, Db2SourceError>(
+    Ok(odbc_core::odbc_get_arrow_impl::<
+        Db2TypeSystem,
+        Db2SourceError,
+    >(
         &conn_str,
         origin_query,
         queries,

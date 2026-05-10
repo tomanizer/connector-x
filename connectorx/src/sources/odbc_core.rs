@@ -1715,16 +1715,6 @@ pub(crate) use impl_string_produce;
 // ==========================================================================
 
 #[cfg(feature = "dst_arrow")]
-use arrow::{
-    array::{
-        ArrayRef, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
-        Int64Builder, LargeBinaryBuilder, StringBuilder, Time64MicrosecondBuilder,
-        TimestampMicrosecondBuilder,
-    },
-    datatypes::Schema,
-    record_batch::RecordBatch,
-};
-#[cfg(feature = "dst_arrow")]
 use crate::{
     constants::{DEFAULT_ARROW_DECIMAL, DEFAULT_ARROW_DECIMAL_SCALE, SECONDS_IN_DAY},
     data_order::DataOrder,
@@ -1733,6 +1723,16 @@ use crate::{
         Destination,
     },
     utils::decimal_to_i128,
+};
+#[cfg(feature = "dst_arrow")]
+use arrow::{
+    array::{
+        ArrayRef, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
+        Int64Builder, LargeBinaryBuilder, StringBuilder, Time64MicrosecondBuilder,
+        TimestampMicrosecondBuilder,
+    },
+    datatypes::Schema,
+    record_batch::RecordBatch,
 };
 #[cfg(feature = "dst_arrow")]
 use odbc_api::sys::NULL_DATA;
@@ -1760,7 +1760,10 @@ pub(crate) trait OdbcArrowPolicy: OdbcTypePolicy {
 // --- helper functions used by the generic array builders ------------------
 
 #[cfg(feature = "dst_arrow")]
-pub(crate) fn require_nullable<E: OdbcCoreError>(nullable: bool, ty: &'static str) -> Result<(), E> {
+pub(crate) fn require_nullable<E: OdbcCoreError>(
+    nullable: bool,
+    ty: &'static str,
+) -> Result<(), E> {
     if nullable {
         Ok(())
     } else {
@@ -1814,7 +1817,10 @@ fn append_decimal<E: OdbcCoreError>(
     builder: &mut Decimal128Builder,
     decimal: Decimal,
 ) -> Result<(), E> {
-    builder.append_value(decimal_to_i128(decimal, DEFAULT_ARROW_DECIMAL_SCALE as u32)?);
+    builder.append_value(decimal_to_i128(
+        decimal,
+        DEFAULT_ARROW_DECIMAL_SCALE as u32,
+    )?);
     Ok(())
 }
 
@@ -1906,8 +1912,7 @@ pub(crate) fn build_int64_array<E: OdbcCoreError>(
         }
         AnySlice::NullableI64(values) => {
             let (vals, indicators) = values.raw_values();
-            let validity =
-                validity_from_indicators::<E>(&indicators[..nrows], nullable, "i64")?;
+            let validity = validity_from_indicators::<E>(&indicators[..nrows], nullable, "i64")?;
             builder.append_values(&vals[..nrows], &validity);
         }
         AnySlice::NullableU8(values) => {
@@ -1923,7 +1928,8 @@ pub(crate) fn build_int64_array<E: OdbcCoreError>(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell_arrow!(E,
+                append_direct_cell_arrow!(
+                    E,
                     other,
                     row_index,
                     builder,
@@ -1948,13 +1954,13 @@ pub(crate) fn build_float32_array<E: OdbcCoreError>(
         AnySlice::F32(values) => builder.append_values(&values[..nrows], &vec![true; nrows]),
         AnySlice::NullableF32(values) => {
             let (vals, indicators) = values.raw_values();
-            let validity =
-                validity_from_indicators::<E>(&indicators[..nrows], nullable, "f32")?;
+            let validity = validity_from_indicators::<E>(&indicators[..nrows], nullable, "f32")?;
             builder.append_values(&vals[..nrows], &validity);
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell_arrow!(E,
+                append_direct_cell_arrow!(
+                    E,
                     other,
                     row_index,
                     builder,
@@ -1995,13 +2001,13 @@ pub(crate) fn build_float64_array<E: OdbcCoreError>(
         }
         AnySlice::NullableF64(values) => {
             let (vals, indicators) = values.raw_values();
-            let validity =
-                validity_from_indicators::<E>(&indicators[..nrows], nullable, "f64")?;
+            let validity = validity_from_indicators::<E>(&indicators[..nrows], nullable, "f64")?;
             builder.append_values(&vals[..nrows], &validity);
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell_arrow!(E,
+                append_direct_cell_arrow!(
+                    E,
                     other,
                     row_index,
                     builder,
@@ -2021,8 +2027,7 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
     nrows: usize,
     nullable: bool,
 ) -> Result<ArrayRef, E> {
-    let mut builder =
-        Decimal128Builder::with_capacity(nrows).with_data_type(DEFAULT_ARROW_DECIMAL);
+    let mut builder = Decimal128Builder::with_capacity(nrows).with_data_type(DEFAULT_ARROW_DECIMAL);
     match column {
         AnySlice::Text(view) => {
             for row_index in 0..nrows {
@@ -2096,7 +2101,8 @@ pub(crate) fn build_bool_array<E: OdbcCoreError>(
         }
         other => {
             for row_index in 0..nrows {
-                append_direct_cell_arrow!(E,
+                append_direct_cell_arrow!(
+                    E,
                     other,
                     row_index,
                     builder,
@@ -2214,17 +2220,14 @@ pub(crate) fn build_date32_array<E: OdbcCoreError>(
     match column {
         AnySlice::Date(values) => {
             for &v in &values[..nrows] {
-                builder.append_value(naive_date_to_arrow_i32::<E>(
-                    odbc_date_to_naive::<E>(v)?,
-                )?);
+                builder.append_value(naive_date_to_arrow_i32::<E>(odbc_date_to_naive::<E>(v)?)?);
             }
         }
         AnySlice::NullableDate(values) => {
             for value in values.take(nrows) {
                 match value {
-                    Some(&v) => builder.append_value(naive_date_to_arrow_i32::<E>(
-                        odbc_date_to_naive::<E>(v)?,
-                    )?),
+                    Some(&v) => builder
+                        .append_value(naive_date_to_arrow_i32::<E>(odbc_date_to_naive::<E>(v)?)?),
                     None => {
                         require_nullable::<E>(nullable, "NaiveDate")?;
                         builder.append_null();
@@ -2235,9 +2238,9 @@ pub(crate) fn build_date32_array<E: OdbcCoreError>(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => builder.append_value(naive_date_to_arrow_i32::<E>(
-                        cell_date::<E>(cell)?,
-                    )?),
+                    Some(cell) => {
+                        builder.append_value(naive_date_to_arrow_i32::<E>(cell_date::<E>(cell)?)?)
+                    }
                     None => {
                         require_nullable::<E>(nullable, "NaiveDate")?;
                         builder.append_null();
@@ -2278,9 +2281,7 @@ pub(crate) fn build_time64_micro_array<E: OdbcCoreError>(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => {
-                        builder.append_value(naive_time_to_micro(cell_time::<E>(cell)?))
-                    }
+                    Some(cell) => builder.append_value(naive_time_to_micro(cell_time::<E>(cell)?)),
                     None => {
                         require_nullable::<E>(nullable, "NaiveTime")?;
                         builder.append_null();
@@ -2327,11 +2328,8 @@ pub(crate) fn build_timestamp_micro_array<E: OdbcCoreError>(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => builder.append_value(
-                        cell_timestamp::<E>(cell)?
-                            .and_utc()
-                            .timestamp_micros(),
-                    ),
+                    Some(cell) => builder
+                        .append_value(cell_timestamp::<E>(cell)?.and_utc().timestamp_micros()),
                     None => {
                         require_nullable::<E>(nullable, "NaiveDateTime")?;
                         builder.append_null();
@@ -2360,10 +2358,9 @@ macro_rules! impl_odbc_arrow_policy {
                 use $crate::destinations::arrow::ArrowTypeSystem;
                 let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
                 match self {
-                    Self::TinyInt(..)
-                    | Self::SmallInt(..)
-                    | Self::Int(..)
-                    | Self::BigInt(..) => ArrowTypeSystem::Int64(nullable),
+                    Self::TinyInt(..) | Self::SmallInt(..) | Self::Int(..) | Self::BigInt(..) => {
+                        ArrowTypeSystem::Int64(nullable)
+                    }
                     Self::Real(..) => ArrowTypeSystem::Float32(nullable),
                     Self::Double(..) => ArrowTypeSystem::Float64(nullable),
                     Self::Numeric(..) | Self::Decimal(..) => ArrowTypeSystem::Decimal(nullable),
@@ -2384,17 +2381,15 @@ macro_rules! impl_odbc_arrow_policy {
                 nrows: usize,
             ) -> Result<::std::sync::Arc<dyn ::arrow::array::Array>, E> {
                 use $crate::sources::odbc_core::{
-                    build_binary_array, build_bool_array, build_date32_array,
-                    build_decimal_array, build_float32_array, build_float64_array,
-                    build_int64_array, build_string_array, build_time64_micro_array,
-                    build_timestamp_micro_array,
+                    build_binary_array, build_bool_array, build_date32_array, build_decimal_array,
+                    build_float32_array, build_float64_array, build_int64_array,
+                    build_string_array, build_time64_micro_array, build_timestamp_micro_array,
                 };
                 let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
                 match self {
-                    Self::TinyInt(..)
-                    | Self::SmallInt(..)
-                    | Self::Int(..)
-                    | Self::BigInt(..) => build_int64_array(column, nrows, nullable),
+                    Self::TinyInt(..) | Self::SmallInt(..) | Self::Int(..) | Self::BigInt(..) => {
+                        build_int64_array(column, nrows, nullable)
+                    }
                     Self::Real(..) => build_float32_array(column, nrows, nullable),
                     Self::Double(..) => build_float64_array(column, nrows, nullable),
                     Self::Numeric(..) | Self::Decimal(..) => {
@@ -2438,12 +2433,8 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
     E: OdbcCoreError + Send + 'static,
 {
-    let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
-        conn,
-        &queries[0].to_string(),
-        max_str_len,
-        map_type,
-    )?;
+    let (names, schema, column_buffer_max_lens) =
+        fetch_metadata::<TS, E, _>(conn, &queries[0].to_string(), max_str_len, map_type)?;
 
     let arrow_types: Vec<ArrowTypeSystem> = schema.iter().map(|&ty| ty.arrow_type()).collect();
 
@@ -2520,4 +2511,3 @@ where
     }
     Ok(())
 }
-
