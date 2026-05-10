@@ -39,6 +39,8 @@ ConnectorX expands this URL into an ODBC connection string using `Driver`, `Host
 
 Additional URL query parameters are appended to the ODBC connection string, so settings such as `Security=SSL` can be passed through.
 
+`replace_invalid_utf16=true` is a ConnectorX-only URL option. It is not passed to the Db2 ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers; use this option only when you explicitly want invalid sequences replaced with U+FFFD.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Db2 ODBC/CLI driver is a runtime dependency and is not bundled in ConnectorX wheels.
@@ -76,6 +78,8 @@ The ODBC path currently maps these Db2 types:
 * Date/time: `date`, `time`, `timestamp`
 
 Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be reported by the ODBC driver as generic or vendor-specific types. ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
+
+Db2 graphic and wide-character buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Db2 URL only for explicit replacement-character compatibility.
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 

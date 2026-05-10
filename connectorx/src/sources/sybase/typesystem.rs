@@ -203,6 +203,44 @@ mod tests {
     }
 
     #[test]
+    fn maps_sybase_unicode_text_types_to_text_variants() {
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::WChar {
+                    length: std::num::NonZeroUsize::new(8),
+                },
+                Nullability::NoNulls,
+                "unichar_col",
+                false
+            )
+            .unwrap(),
+            SybaseTypeSystem::Char(false)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::WVarchar {
+                    length: std::num::NonZeroUsize::new(32),
+                },
+                Nullability::Nullable,
+                "univarchar_col",
+                false
+            )
+            .unwrap(),
+            SybaseTypeSystem::Varchar(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::WLongVarchar { length: None },
+                Nullability::Nullable,
+                "unitext_col",
+                false
+            )
+            .unwrap(),
+            SybaseTypeSystem::Text(true)
+        ));
+    }
+
+    #[test]
     fn maps_freetds_time2_extension_and_text_fallbacks() {
         assert!(matches!(
             SybaseTypeSystem::from_odbc(

@@ -1,8 +1,44 @@
+use anyhow::{anyhow, Result};
+use url::Url;
+
+pub(crate) const REPLACE_INVALID_UTF16_PARAM: &str = "replace_invalid_utf16";
+
 pub(crate) fn is_raw_odbc_conn_string(conn: &str) -> bool {
     let lower = conn.trim_start().to_ascii_lowercase();
     ["driver=", "dsn=", "filedsn=", "database="]
         .iter()
         .any(|prefix| lower.starts_with(prefix))
+}
+
+#[cfg(any(feature = "src_odbc", feature = "src_db2"))]
+pub(crate) fn is_connector_option_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case("cxprotocol") || key.eq_ignore_ascii_case(REPLACE_INVALID_UTF16_PARAM)
+}
+
+pub(crate) fn connection_bool_param(conn: &str, key: &str) -> Result<Option<bool>> {
+    if is_raw_odbc_conn_string(conn) {
+        return Ok(None);
+    }
+
+    let url = Url::parse(conn)?;
+    url_bool_param(&url, key)
+}
+
+pub(crate) fn url_bool_param(url: &Url, key: &str) -> Result<Option<bool>> {
+    url.query_pairs()
+        .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
+        .map(|(_, value)| parse_bool_param(key, &value))
+        .transpose()
+}
+
+fn parse_bool_param(key: &str, value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(anyhow!(
+            "{key} must be a boolean value (true/false, 1/0, yes/no, or on/off)"
+        )),
+    }
 }
 
 pub(crate) fn odbc_conn_value(value: &str) -> String {

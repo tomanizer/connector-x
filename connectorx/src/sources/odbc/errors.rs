@@ -15,6 +15,17 @@ pub enum OdbcSourceError {
     #[error("Cannot parse ODBC value {value:?} as {ty}")]
     ParseValue { value: String, ty: &'static str },
 
+    #[error(
+        "Invalid UTF-16 sequence for source={source_name} column_name={column_name} row_index={row_index} byte_offset={byte_offset} surrogate={surrogate:#06X}. Set replace_invalid_utf16=true to replace invalid UTF-16 with U+FFFD."
+    )]
+    InvalidUtf16 {
+        source_name: &'static str,
+        column_name: String,
+        row_index: usize,
+        byte_offset: usize,
+        surrogate: u16,
+    },
+
     #[error(transparent)]
     ConnectorXError(#[from] crate::errors::ConnectorXError),
 

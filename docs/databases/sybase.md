@@ -38,6 +38,8 @@ conn = ConnectionUrl(
 `tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.
 Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
+`replace_invalid_utf16=true` is a ConnectorX-only URL option. It is not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers; use this option only when you explicitly want invalid sequences replaced with U+FFFD.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Sybase driver is a runtime dependency and is not bundled in ConnectorX wheels.
@@ -81,6 +83,8 @@ The ODBC path currently maps these Sybase/ASE types:
 * Date/time: `date`, `time`, `datetime`, `smalldatetime`, `bigtime`, `bigdatetime`
 
 `unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output.
+
+Sybase Unicode text buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility.
 
 ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.
 
