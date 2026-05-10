@@ -28,6 +28,8 @@ ConnectorX expands the URL into an ODBC connection string using `Driver` or `DSN
 
 All generated ODBC values are escaped when required, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
+ODBC URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. Generic ODBC first-class URL parameters are `driver`, `dsn`, `server_key`, `odbc_connect`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the ODBC driver connection string.
+
 Python users can also build ODBC URLs with `ConnectionUrl`:
 
 ```python

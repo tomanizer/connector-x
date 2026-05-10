@@ -12,9 +12,9 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{
-            connection_bool_param, connection_u32_param, connection_usize_param,
-            is_connector_option_key, is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair,
-            url_bool_param, url_usize_param, LOGIN_TIMEOUT_SECS_PARAM, MAX_CONNECTIONS_PARAM,
+            connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
+            is_valid_odbc_key, param_bool_param, param_u32_param, param_usize_param, param_value,
+            push_odbc_pair, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM, MAX_CONNECTIONS_PARAM,
             QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
@@ -106,12 +106,20 @@ impl OdbcSource {
 
     #[throws(OdbcSourceError)]
     pub fn with_options(conn: &str, nconn: usize, options: OdbcOptions) -> Self {
-        let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
+        let params = connection_query_pairs(conn)?;
+        let params = params.as_deref();
+        let replace_invalid_utf16 = params
+            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF16_PARAM))
+            .transpose()?
+            .flatten()
             .unwrap_or(options.replace_invalid_utf16);
-        let max_connections =
-            connection_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+        let max_connections = params
+            .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.max_connections);
         let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
-        let execution_options = odbc_execution_options(conn, options)?;
+        let execution_options = odbc_execution_options_from_params(params, options)?;
         Self {
             conn: odbc_conn_string(conn)?,
             origin_query: None,
@@ -337,13 +345,15 @@ pub(crate) fn odbc_get_arrow(
     queries: &[CXQuery<String>],
 ) -> OutResult<ArrowDestination> {
     let options = OdbcOptions::from_env();
+    let params = url_query_pairs(conn)?;
     let conn_str = odbc_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
-    let replace_invalid_utf16 =
-        url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
-    let max_connections = url_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
+        .unwrap_or(options.replace_invalid_utf16);
+    let max_connections =
+        param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
-    let execution_options = odbc_execution_options(conn.as_str(), options)?;
+    let execution_options = odbc_execution_options_from_params(Some(&params), options)?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         OdbcTypeSystem,
         OdbcSourceError,
@@ -548,9 +558,26 @@ pub(crate) fn fetch_i64_pair(
 
 #[throws(OdbcSourceError)]
 pub(crate) fn odbc_execution_options(conn: &str, options: OdbcOptions) -> OdbcExecutionOptions {
+    let params = connection_query_pairs(conn)?;
+    odbc_execution_options_from_params(params.as_deref(), options)?
+}
+
+#[throws(OdbcSourceError)]
+fn odbc_execution_options_from_params(
+    params: Option<&[(String, String)]>,
+    options: OdbcOptions,
+) -> OdbcExecutionOptions {
     OdbcExecutionOptions::new(
-        connection_u32_param(conn, LOGIN_TIMEOUT_SECS_PARAM)?.or(options.login_timeout_secs),
-        connection_usize_param(conn, QUERY_TIMEOUT_SECS_PARAM)?.or(options.query_timeout_secs),
+        params
+            .map(|params| param_u32_param(params, LOGIN_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.login_timeout_secs),
+        params
+            .map(|params| param_usize_param(params, QUERY_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.query_timeout_secs),
     )?
 }
 
@@ -561,10 +588,7 @@ pub fn odbc_conn_string(conn: &str) -> String {
     }
 
     let url = Url::parse(conn)?;
-    let params = url
-        .query_pairs()
-        .map(|(k, v)| (k.into_owned(), v.into_owned()))
-        .collect::<Vec<_>>();
+    let params = url_query_pairs(&url)?;
 
     if let Some(raw_conn) = param_value(&params, "odbc_connect") {
         if !is_raw_odbc_conn_string(raw_conn) {
@@ -628,13 +652,6 @@ pub fn odbc_conn_string(conn: &str) -> String {
         }
     }
     ret
-}
-
-fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    params
-        .iter()
-        .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
-        .map(|(_, value)| value.as_str())
 }
 
 #[cfg(test)]

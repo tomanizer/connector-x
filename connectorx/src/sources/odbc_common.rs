@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashSet};
+
 use anyhow::{anyhow, Result};
 use url::Url;
 
@@ -22,37 +24,49 @@ pub(crate) fn is_connector_option_key(key: &str) -> bool {
         || key.eq_ignore_ascii_case(QUERY_TIMEOUT_SECS_PARAM)
 }
 
-pub(crate) fn connection_bool_param(conn: &str, key: &str) -> Result<Option<bool>> {
+pub(crate) fn connection_query_pairs(conn: &str) -> Result<Option<Vec<(String, String)>>> {
     if is_raw_odbc_conn_string(conn) {
         return Ok(None);
     }
 
     let url = Url::parse(conn)?;
-    url_bool_param(&url, key)
+    Ok(Some(url_query_pairs(&url)?))
 }
 
-pub(crate) fn connection_usize_param(conn: &str, key: &str) -> Result<Option<usize>> {
-    if is_raw_odbc_conn_string(conn) {
-        return Ok(None);
+pub(crate) fn url_query_pairs(url: &Url) -> Result<Vec<(String, String)>> {
+    let mut seen = HashSet::new();
+    let mut duplicates = BTreeSet::new();
+    let mut params = Vec::new();
+
+    for (key, value) in url.query_pairs() {
+        let key = key.into_owned();
+        let normalized_key = key.to_ascii_lowercase();
+        if !seen.insert(normalized_key.clone()) {
+            duplicates.insert(normalized_key);
+        }
+        params.push((key, value.into_owned()));
     }
 
-    let url = Url::parse(conn)?;
-    url_usize_param(&url, key)
-}
-
-pub(crate) fn connection_u32_param(conn: &str, key: &str) -> Result<Option<u32>> {
-    if is_raw_odbc_conn_string(conn) {
-        return Ok(None);
+    if !duplicates.is_empty() {
+        let duplicated_keys = duplicates.into_iter().collect::<Vec<_>>().join(", ");
+        return Err(anyhow!(
+            "duplicate ODBC URL query parameter(s): {duplicated_keys}"
+        ));
     }
 
-    let url = Url::parse(conn)?;
-    url_u32_param(&url, key)
+    Ok(params)
 }
 
-pub(crate) fn url_bool_param(url: &Url, key: &str) -> Result<Option<bool>> {
-    url.query_pairs()
+pub(crate) fn param_value<'a>(params: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    params
+        .iter()
         .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
-        .map(|(_, value)| parse_bool_param(key, &value))
+        .map(|(_, value)| value.as_str())
+}
+
+pub(crate) fn param_bool_param(params: &[(String, String)], key: &str) -> Result<Option<bool>> {
+    param_value(params, key)
+        .map(|value| parse_bool_param(key, value))
         .transpose()
 }
 
@@ -66,17 +80,15 @@ fn parse_bool_param(key: &str, value: &str) -> Result<bool> {
     }
 }
 
-pub(crate) fn url_usize_param(url: &Url, key: &str) -> Result<Option<usize>> {
-    url.query_pairs()
-        .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
-        .map(|(_, value)| parse_usize_param(key, &value))
+pub(crate) fn param_usize_param(params: &[(String, String)], key: &str) -> Result<Option<usize>> {
+    param_value(params, key)
+        .map(|value| parse_usize_param(key, value))
         .transpose()
 }
 
-pub(crate) fn url_u32_param(url: &Url, key: &str) -> Result<Option<u32>> {
-    url.query_pairs()
-        .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
-        .map(|(_, value)| parse_u32_param(key, &value))
+pub(crate) fn param_u32_param(params: &[(String, String)], key: &str) -> Result<Option<u32>> {
+    param_value(params, key)
+        .map(|value| parse_u32_param(key, value))
         .transpose()
 }
 
