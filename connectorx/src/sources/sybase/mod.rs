@@ -294,6 +294,22 @@ impl OdbcCoreError for SybaseSourceError {
         Self::ParseValue { value, ty }
     }
 
+    fn invalid_partition_bound(
+        source_name: &'static str,
+        column_name: &str,
+        bound_name: &'static str,
+        value: String,
+        reason: &'static str,
+    ) -> Self {
+        Self::InvalidPartitionBound {
+            source_name,
+            column_name: column_name.to_string(),
+            bound_name,
+            value,
+            reason,
+        }
+    }
+
     fn invalid_utf16(
         source_name: &'static str,
         column_name: Option<&str>,
@@ -448,8 +464,17 @@ use {
     odbc_api::buffers::AnySlice,
 };
 
-pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), SybaseSourceError> {
-    odbc_core::fetch_i64_pair::<SybaseSourceError>(conn, query)
+pub(crate) fn fetch_i64_pair(
+    conn: &str,
+    query: &str,
+    column_name: &str,
+) -> Result<(i64, i64), SybaseSourceError> {
+    odbc_core::fetch_i64_pair::<SybaseSourceError>(
+        conn,
+        query,
+        SybaseTypeSystem::source_name(),
+        column_name,
+    )
 }
 
 #[cfg(feature = "dst_arrow")]

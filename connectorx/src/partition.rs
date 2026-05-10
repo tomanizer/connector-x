@@ -496,7 +496,7 @@ fn mssql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
 fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let conn = sybase_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &MsSqlDialect {})?;
-    sybase_fetch_i64_pair(&conn, range_query.as_str())?
+    sybase_fetch_i64_pair(&conn, range_query.as_str(), col)?
 }
 
 #[cfg(feature = "src_db2")]
@@ -504,7 +504,7 @@ fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) 
 fn db2_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let conn = db2_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
-    db2_fetch_i64_pair(&conn, range_query.as_str())?
+    db2_fetch_i64_pair(&conn, range_query.as_str(), col)?
 }
 
 #[cfg(feature = "src_odbc")]
@@ -512,7 +512,7 @@ fn db2_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
 fn odbc_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let conn = odbc_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
-    odbc_fetch_i64_pair(&conn, range_query.as_str())?
+    odbc_fetch_i64_pair(&conn, range_query.as_str(), col)?
 }
 
 #[cfg(feature = "src_oracle")]

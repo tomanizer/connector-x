@@ -90,6 +90,8 @@ The ODBC-family connectors use one shared fetch and conversion layer. Standard O
 
 Nullability reported as unknown is treated as nullable. If a driver reports a value as nullable but later returns `NULL` for a non-null ConnectorX destination type, ConnectorX returns an error instead of fabricating a default.
 
+Automatic partitioning for generic ODBC, Db2, and Sybase requires `MIN(partition_on)` and `MAX(partition_on)` to return non-NULL `i64` integer bounds. Empty strings, SQL `NULL`, decimal values, fractional values, and exponent notation are rejected with a partition-bound error instead of being coerced or truncated. Cast decimal partition columns to a suitable integer expression or pass an explicit `partition_range` only when that conversion is semantically correct.
+
 Vendor-specific ODBC types may be reported as unknown or other. ConnectorX rejects those types by default so driver-specific values are not silently returned as strings. Cast them in the query to a supported standard type when you need a specific output type. For compatibility with older behavior, set the matching opt-in environment variable to `true`: `ODBC_TYPE_FALLBACK_TO_VARCHAR`, `DB2_TYPE_FALLBACK_TO_VARCHAR`, or `SYBASE_TYPE_FALLBACK_TO_VARCHAR`.
 
 Wide text buffers are decoded as UTF-16. Invalid UTF-16 sequences are rejected by default with an error that includes the source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the ODBC, Db2, or Sybase URL only when you explicitly want invalid sequences replaced with U+FFFD for compatibility with legacy data or driver encoding bugs.
