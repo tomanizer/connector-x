@@ -16,6 +16,8 @@ use crate::{
     },
     sql::{count_query, CXQuery},
 };
+#[cfg(feature = "dst_arrow")]
+use crate::{destinations::arrow::ArrowDestination, errors::OutResult};
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
@@ -352,6 +354,26 @@ odbc_core::impl_bytes_clone_produce!(Db2SourceParser, Db2SourceError);
 pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), Db2SourceError> {
     odbc_core::fetch_i64_pair::<Db2SourceError>(conn, query)
 }
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn db2_get_arrow(
+    conn: &Url,
+    origin_query: Option<String>,
+    queries: &[CXQuery<String>],
+) -> OutResult<ArrowDestination> {
+    let options = Db2Options::from_env();
+    let conn_str = db2_conn_string(&conn[..])?;
+    Ok(odbc_core::odbc_get_arrow_impl::<Db2TypeSystem, Db2SourceError>(
+        &conn_str,
+        origin_query,
+        queries,
+        options.max_str_len,
+        options.batch_size,
+        Db2TypeSystem::from_odbc,
+    )?)
+}
+
+odbc_core::impl_odbc_arrow_policy!(Db2TypeSystem);
 
 #[throws(Db2SourceError)]
 pub fn db2_conn_string(conn: &str) -> String {

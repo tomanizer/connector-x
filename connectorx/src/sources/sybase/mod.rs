@@ -16,6 +16,8 @@ use crate::{
     },
     sql::{count_query, CXQuery},
 };
+#[cfg(feature = "dst_arrow")]
+use crate::{destinations::arrow::ArrowDestination, errors::OutResult};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
 use odbc_api::{
@@ -404,6 +406,26 @@ fn hex_value(byte: u8) -> Option<u8> {
 pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), SybaseSourceError> {
     odbc_core::fetch_i64_pair::<SybaseSourceError>(conn, query)
 }
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn sybase_get_arrow(
+    conn: &Url,
+    origin_query: Option<String>,
+    queries: &[CXQuery<String>],
+) -> OutResult<ArrowDestination> {
+    let options = SybaseOptions::from_env();
+    let conn_str = sybase_conn_string(&conn[..])?;
+    Ok(odbc_core::odbc_get_arrow_impl::<SybaseTypeSystem, SybaseSourceError>(
+        &conn_str,
+        origin_query,
+        queries,
+        options.max_str_len,
+        options.batch_size,
+        SybaseTypeSystem::from_odbc,
+    )?)
+}
+
+odbc_core::impl_odbc_arrow_policy!(SybaseTypeSystem);
 
 #[throws(SybaseSourceError)]
 pub fn sybase_conn_string(conn: &str) -> String {

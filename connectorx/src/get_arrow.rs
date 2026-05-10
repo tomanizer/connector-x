@@ -222,25 +222,13 @@ pub fn get_arrow(
         }
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => {
-            let source = SybaseSource::new(&source_conn.conn[..], queries.len())?;
-            let dispatcher = Dispatcher::<_, _, SybaseArrowTransport>::new(
-                source,
-                &mut destination,
-                queries,
-                origin_query,
-            );
-            dispatcher.run()?;
+            destination =
+                crate::sources::sybase::sybase_get_arrow(&source_conn.conn, origin_query, queries)?;
         }
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => {
-            let source = Db2Source::new(&source_conn.conn[..], queries.len())?;
-            let dispatcher = Dispatcher::<_, _, Db2ArrowTransport>::new(
-                source,
-                &mut destination,
-                queries,
-                origin_query,
-            );
-            dispatcher.run()?;
+            destination =
+                crate::sources::db2::db2_get_arrow(&source_conn.conn, origin_query, queries)?;
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
