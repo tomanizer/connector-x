@@ -102,6 +102,37 @@ pub(crate) fn connection_limiter(
     Ok(OdbcConnectionLimiter::new(max_connections))
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OdbcExecutionOptions {
+    pub(crate) login_timeout_secs: Option<u32>,
+    pub(crate) query_timeout_secs: Option<usize>,
+}
+
+impl OdbcExecutionOptions {
+    pub(crate) fn new(
+        login_timeout_secs: Option<u32>,
+        query_timeout_secs: Option<usize>,
+    ) -> Result<Self, anyhow::Error> {
+        if matches!(login_timeout_secs, Some(0)) {
+            return Err(anyhow!("login_timeout_secs must be at least 1"));
+        }
+        if matches!(query_timeout_secs, Some(0)) {
+            return Err(anyhow!("query_timeout_secs must be at least 1"));
+        }
+        Ok(Self {
+            login_timeout_secs,
+            query_timeout_secs,
+        })
+    }
+
+    pub(crate) fn connection_options(self) -> ConnectionOptions {
+        ConnectionOptions {
+            login_timeout_sec: self.login_timeout_secs,
+            ..ConnectionOptions::default()
+        }
+    }
+}
+
 pub trait OdbcCoreError:
     From<ConnectorXError>
     + From<odbc_api::Error>
@@ -115,6 +146,13 @@ pub trait OdbcCoreError:
     fn get_nrows_failed() -> Self;
     fn no_result_set(query: String) -> Self;
     fn parse_value(value: String, ty: &'static str) -> Self;
+    fn connection_timeout(source_name: &'static str, timeout_secs: u32, cause: String) -> Self;
+    fn query_timeout(
+        source_name: &'static str,
+        query: String,
+        timeout_secs: usize,
+        cause: String,
+    ) -> Self;
     fn invalid_partition_bound(
         source_name: &'static str,
         column_name: &str,
@@ -933,16 +971,73 @@ impl OdbcValue<'_> {
     }
 }
 
-pub(crate) fn execute_query<E>(conn: &str, query: &str) -> Result<OdbcCursor, E>
+pub(crate) fn execute_query<E>(
+    source_name: &'static str,
+    conn: &str,
+    query: &str,
+    execution_options: OdbcExecutionOptions,
+) -> Result<OdbcCursor, E>
 where
     E: OdbcCoreError,
 {
     let env = shared_environment::<E>()?;
-    let connection = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
-    Ok(connection
-        .into_cursor(query, (), None)
-        .map_err(|e| e.error)?
-        .ok_or_else(|| E::no_result_set(query.to_string()))?)
+    let connection =
+        match env.connect_with_connection_string(conn, execution_options.connection_options()) {
+            Ok(connection) => connection,
+            Err(error) => {
+                if let Some(timeout_secs) = execution_options.login_timeout_secs {
+                    if is_odbc_timeout_error(&error) {
+                        return Err(E::connection_timeout(
+                            source_name,
+                            timeout_secs,
+                            odbc_error_message(&error),
+                        ));
+                    }
+                }
+                return Err(error.into());
+            }
+        };
+
+    match connection.into_cursor(query, (), execution_options.query_timeout_secs) {
+        Ok(Some(cursor)) => Ok(cursor),
+        Ok(None) => Err(E::no_result_set(query.to_string())),
+        Err(error_with_connection) => {
+            let error = error_with_connection.error;
+            if let Some(timeout_secs) = execution_options.query_timeout_secs {
+                if is_odbc_timeout_error(&error) {
+                    return Err(E::query_timeout(
+                        source_name,
+                        query.to_string(),
+                        timeout_secs,
+                        odbc_error_message(&error),
+                    ));
+                }
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn odbc_error_message(error: &odbc_api::Error) -> String {
+    let display = error.to_string();
+    let debug = format!("{error:?}");
+    if debug == display {
+        display
+    } else {
+        format!("{display}; {debug}")
+    }
+}
+
+fn is_odbc_timeout_error(error: &odbc_api::Error) -> bool {
+    is_odbc_timeout_message(&odbc_error_message(error))
+}
+
+fn is_odbc_timeout_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("hyt00")
+        || message.contains("hyt01")
+        || message.contains("timeout")
+        || message.contains("timed out")
 }
 
 pub(crate) fn shared_environment<E>() -> Result<&'static Environment, E>
@@ -953,10 +1048,12 @@ where
 }
 
 pub(crate) fn fetch_metadata<T, E, F>(
+    source_name: &'static str,
     conn: &str,
     query: &str,
     default_max_len: usize,
     connection_limiter: &Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
     map_type: F,
 ) -> Result<(Vec<String>, Vec<T>, Vec<usize>), E>
 where
@@ -965,7 +1062,7 @@ where
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query::<E>(conn, query)?;
+    let mut cursor = execute_query::<E>(source_name, conn, query, execution_options)?;
     let ncols = cursor.num_result_cols()?;
     if ncols < 0 {
         return Err(anyhow!("ODBC returned negative column count: {}", ncols).into());
@@ -994,10 +1091,12 @@ where
 }
 
 pub(crate) fn fetch_count<E, D>(
+    source_name: &'static str,
     conn: &str,
     query: &str,
     dialect: &D,
     connection_limiter: &Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
 ) -> Result<usize, E>
 where
     E: OdbcCoreError,
@@ -1005,19 +1104,27 @@ where
 {
     let cxq = CXQuery::Naked(query.to_string());
     let cquery = count_query(&cxq, dialect)?;
-    fetch_count_query(conn, cquery.as_str(), connection_limiter)
+    fetch_count_query(
+        source_name,
+        conn,
+        cquery.as_str(),
+        connection_limiter,
+        execution_options,
+    )
 }
 
 pub(crate) fn fetch_count_query<E>(
+    source_name: &'static str,
     conn: &str,
     query: &str,
     connection_limiter: &Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
 ) -> Result<usize, E>
 where
     E: OdbcCoreError,
 {
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query::<E>(conn, query)?;
+    let mut cursor = execute_query::<E>(source_name, conn, query, execution_options)?;
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(64))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
     let batch = cursor.fetch()?.ok_or_else(E::get_nrows_failed)?;
@@ -1032,13 +1139,14 @@ pub(crate) fn fetch_i64_pair<E>(
     query: &str,
     source_name: &'static str,
     column_name: &str,
+    execution_options: OdbcExecutionOptions,
 ) -> Result<(i64, i64), E>
 where
     E: OdbcCoreError,
 {
     let connection_limiter = OdbcConnectionLimiter::new(1);
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query::<E>(conn, query)?;
+    let mut cursor = execute_query::<E>(source_name, conn, query, execution_options)?;
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(128))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
     let batch = cursor.fetch()?.ok_or_else(E::get_nrows_failed)?;
@@ -1470,6 +1578,10 @@ pub(crate) fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.parse().ok()
 }
 
+pub(crate) fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name).ok()?.parse().ok()
+}
+
 pub(crate) fn env_bool(name: &str) -> Option<bool> {
     match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -1603,11 +1715,23 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     #[derive(Debug)]
     enum TestError {
         ParseValue {
             value: String,
             ty: &'static str,
+        },
+        ConnectionTimeout {
+            source_name: &'static str,
+            timeout_secs: u32,
+            cause: String,
+        },
+        QueryTimeout {
+            source_name: &'static str,
+            query: String,
+            timeout_secs: usize,
+            cause: String,
         },
         InvalidPartitionBound {
             source_name: &'static str,
@@ -1637,6 +1761,28 @@ mod tests {
 
         fn parse_value(value: String, ty: &'static str) -> Self {
             Self::ParseValue { value, ty }
+        }
+
+        fn connection_timeout(source_name: &'static str, timeout_secs: u32, cause: String) -> Self {
+            Self::ConnectionTimeout {
+                source_name,
+                timeout_secs,
+                cause,
+            }
+        }
+
+        fn query_timeout(
+            source_name: &'static str,
+            query: String,
+            timeout_secs: usize,
+            cause: String,
+        ) -> Self {
+            Self::QueryTimeout {
+                source_name,
+                query,
+                timeout_secs,
+                cause,
+            }
         }
 
         fn invalid_partition_bound(
@@ -1711,6 +1857,10 @@ mod tests {
     fn parse_value_error<T>(result: Result<T, TestError>) -> (String, &'static str) {
         match result {
             Err(TestError::ParseValue { value, ty }) => (value, ty),
+            Err(TestError::ConnectionTimeout { .. }) => {
+                panic!("unexpected connection timeout error")
+            }
+            Err(TestError::QueryTimeout { .. }) => panic!("unexpected query timeout error"),
             Err(TestError::InvalidPartitionBound { .. }) => {
                 panic!("unexpected partition bound error")
             }
@@ -1755,6 +1905,27 @@ mod tests {
         assert_eq!(connection_limiter(None, 0).unwrap().max_connections(), 1);
         assert_eq!(connection_limiter(None, 3).unwrap().max_connections(), 3);
         assert_eq!(connection_limiter(Some(2), 8).unwrap().max_connections(), 2);
+    }
+
+    #[test]
+    fn execution_options_map_login_timeout_to_connection_options() {
+        let options = OdbcExecutionOptions::new(Some(7), Some(11)).unwrap();
+
+        assert_eq!(options.connection_options().login_timeout_sec, Some(7));
+    }
+
+    #[test]
+    fn execution_options_reject_zero_timeouts() {
+        assert!(OdbcExecutionOptions::new(Some(0), None).is_err());
+        assert!(OdbcExecutionOptions::new(None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn timeout_classifier_matches_odbc_timeout_states_and_text() {
+        assert!(is_odbc_timeout_message("HYT00: timeout expired"));
+        assert!(is_odbc_timeout_message("HYT01 connection timeout"));
+        assert!(is_odbc_timeout_message("Login timed out"));
+        assert!(!is_odbc_timeout_message("28000 invalid authorization"));
     }
 
     #[test]
@@ -2754,6 +2925,7 @@ pub(crate) fn build_string_array<E: OdbcCoreError>(
 }
 
 #[cfg(feature = "dst_arrow")]
+#[allow(dead_code)]
 pub(crate) fn build_binary_array<E: OdbcCoreError>(
     column: AnySlice<'_>,
     nrows: usize,
@@ -2943,6 +3115,7 @@ pub(crate) fn build_timestamp_micro_array<E: OdbcCoreError>(
 /// `Decimal`, `Bit`, `Char`, `Varchar`, `Text`, `Binary`, `Date`, `Time`,
 /// `Timestamp` — each carrying a single `bool` nullable flag, except
 /// `Numeric` and `Decimal`, which carry `(nullable, precision, scale)`.
+#[allow(unused_macros)]
 macro_rules! impl_odbc_arrow_policy {
     ($TS:ty) => {
         #[cfg(feature = "dst_arrow")]
@@ -3042,6 +3215,7 @@ macro_rules! impl_odbc_arrow_policy {
         }
     };
 }
+#[allow(unused_imports)]
 pub(crate) use impl_odbc_arrow_policy;
 
 // --- generic Arrow extraction implementation ------------------------------
@@ -3062,6 +3236,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     max_str_len: usize,
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
     replace_invalid_utf16: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<ArrowDestination, E>
@@ -3070,10 +3245,12 @@ where
     E: OdbcCoreError + Send + 'static,
 {
     let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+        TS::source_name(),
         conn,
         &queries[0].to_string(),
         max_str_len,
         &connection_limiter,
+        execution_options,
         map_type,
     )?;
 
@@ -3101,6 +3278,7 @@ where
             &column_buffer_max_lens,
             batch_size,
             Arc::clone(&connection_limiter),
+            execution_options,
             replace_invalid_utf16,
             Arc::clone(&record_schema),
             &destination,
@@ -3119,6 +3297,7 @@ fn arrow_fetch_partition<TS, E>(
     column_buffer_max_lens: &[usize],
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     destination: &ArrowDestination,
@@ -3128,7 +3307,7 @@ where
     E: OdbcCoreError + Send,
 {
     let _connection_permit = connection_limiter.acquire();
-    let cursor = execute_query::<E>(conn, query)?;
+    let cursor = execute_query::<E>(TS::source_name(), conn, query, execution_options)?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
         schema

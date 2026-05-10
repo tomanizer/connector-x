@@ -3,6 +3,8 @@ use url::Url;
 
 pub(crate) const REPLACE_INVALID_UTF16_PARAM: &str = "replace_invalid_utf16";
 pub(crate) const MAX_CONNECTIONS_PARAM: &str = "max_connections";
+pub(crate) const LOGIN_TIMEOUT_SECS_PARAM: &str = "login_timeout_secs";
+pub(crate) const QUERY_TIMEOUT_SECS_PARAM: &str = "query_timeout_secs";
 
 pub(crate) fn is_raw_odbc_conn_string(conn: &str) -> bool {
     let lower = conn.trim_start().to_ascii_lowercase();
@@ -16,6 +18,8 @@ pub(crate) fn is_connector_option_key(key: &str) -> bool {
     key.eq_ignore_ascii_case("cxprotocol")
         || key.eq_ignore_ascii_case(REPLACE_INVALID_UTF16_PARAM)
         || key.eq_ignore_ascii_case(MAX_CONNECTIONS_PARAM)
+        || key.eq_ignore_ascii_case(LOGIN_TIMEOUT_SECS_PARAM)
+        || key.eq_ignore_ascii_case(QUERY_TIMEOUT_SECS_PARAM)
 }
 
 pub(crate) fn connection_bool_param(conn: &str, key: &str) -> Result<Option<bool>> {
@@ -34,6 +38,15 @@ pub(crate) fn connection_usize_param(conn: &str, key: &str) -> Result<Option<usi
 
     let url = Url::parse(conn)?;
     url_usize_param(&url, key)
+}
+
+pub(crate) fn connection_u32_param(conn: &str, key: &str) -> Result<Option<u32>> {
+    if is_raw_odbc_conn_string(conn) {
+        return Ok(None);
+    }
+
+    let url = Url::parse(conn)?;
+    url_u32_param(&url, key)
 }
 
 pub(crate) fn url_bool_param(url: &Url, key: &str) -> Result<Option<bool>> {
@@ -60,10 +73,30 @@ pub(crate) fn url_usize_param(url: &Url, key: &str) -> Result<Option<usize>> {
         .transpose()
 }
 
+pub(crate) fn url_u32_param(url: &Url, key: &str) -> Result<Option<u32>> {
+    url.query_pairs()
+        .find(|(param_key, _)| param_key.eq_ignore_ascii_case(key))
+        .map(|(_, value)| parse_u32_param(key, &value))
+        .transpose()
+}
+
 fn parse_usize_param(key: &str, value: &str) -> Result<usize> {
     value
         .parse::<usize>()
         .map_err(|_| anyhow!("{key} must be a positive integer"))
+        .and_then(|value| {
+            if value == 0 {
+                Err(anyhow!("{key} must be at least 1"))
+            } else {
+                Ok(value)
+            }
+        })
+}
+
+fn parse_u32_param(key: &str, value: &str) -> Result<u32> {
+    value
+        .parse::<u32>()
+        .map_err(|_| anyhow!("{key} must be a positive integer up to {}", u32::MAX))
         .and_then(|value| {
             if value == 0 {
                 Err(anyhow!("{key} must be at least 1"))

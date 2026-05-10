@@ -98,6 +98,18 @@ Wide text buffers are decoded as UTF-16. Invalid UTF-16 sequences are rejected b
 
 Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that names the relevant max-length setting. Increase the setting or cast/substr the selected column in the query.
 
+## Timeouts
+
+ConnectorX can set ODBC login and statement timeouts for generic ODBC, Db2, and Sybase connections. Use URL options for per-source control:
+
+```python
+conn = "odbc://user:password@server/database?driver=PostgreSQL%20Unicode&login_timeout_secs=10&query_timeout_secs=120"
+```
+
+`login_timeout_secs` is passed to the ODBC connection attribute before login. `query_timeout_secs` is passed to each statement execution, including metadata, row-count, partition-range, and data-fetch queries. Both values must be positive integers in seconds. They are ConnectorX-only options and are not appended to generated ODBC connection strings.
+
+Timeout enforcement ultimately depends on the ODBC driver. When a driver reports a standard timeout diagnostic such as `HYT00`, `HYT01`, or timeout text, ConnectorX returns a typed timeout error that includes the source name, configured timeout, and query for statement timeouts.
+
 ## Performance
 
 The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and text columns use text buffers for driver compatibility.
@@ -109,9 +121,11 @@ Tuning environment variables:
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
 * `ODBC_MAX_CONNECTIONS`: maximum active ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
+* `ODBC_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
+* `ODBC_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `ODBC_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-For URL-style generic ODBC, `max_connections=N` overrides `ODBC_MAX_CONNECTIONS` for that source instance and is not passed through to the ODBC driver.
+For URL-style generic ODBC, `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` override the matching environment variables for that source instance and are not passed through to the ODBC driver.
 
 To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
 
