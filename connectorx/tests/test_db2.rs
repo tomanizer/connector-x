@@ -14,7 +14,7 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::db2::{db2_conn_string, Db2Source},
+    sources::db2::{db2_conn_string, Db2Options, Db2Source},
     sql::CXQuery,
     transports::Db2ArrowTransport,
 };
@@ -338,7 +338,7 @@ fn test_db2_arrow_date_decimal_and_text_variants() {
 }
 
 #[test]
-fn test_db2_testcontainer_vendor_type_fallbacks() {
+fn test_db2_testcontainer_vendor_type_fallback_opt_in() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
@@ -358,7 +358,15 @@ fn test_db2_testcontainer_vendor_type_fallbacks() {
          ) q",
     )];
 
-    let source = Db2Source::new(&conn, 1).unwrap();
+    let source = Db2Source::with_options(
+        &conn,
+        1,
+        Db2Options {
+            unknown_type_fallback_to_varchar: true,
+            ..Db2Options::default()
+        },
+    )
+    .unwrap();
     let mut destination = ArrowDestination::new();
     let dispatcher =
         Dispatcher::<_, _, Db2ArrowTransport>::new(source, &mut destination, &queries, None);

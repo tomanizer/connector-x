@@ -75,9 +75,9 @@ The ODBC path currently maps these Db2 types:
 * Binary: `binary`, `varbinary`, `blob`
 * Date/time: `date`, `time`, `timestamp`
 
-Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be reported by the ODBC driver as generic or vendor-specific types. Cast them in the query to a supported type if needed.
+Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be reported by the ODBC driver as generic or vendor-specific types. ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
 
-See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
+See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 
 ## Performance Tuning
 
@@ -87,6 +87,7 @@ The defaults are tuned for throughput over small memory use:
 
 * `DB2_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `DB2_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
 Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound.
 If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.

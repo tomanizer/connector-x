@@ -6,6 +6,7 @@ mod typesystem;
 pub use self::errors::SybaseSourceError;
 pub use self::typesystem::SybaseTypeSystem;
 
+use self::typesystem::SYBASE_UNKNOWN_TYPE_FALLBACK_ENV;
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
@@ -39,6 +40,7 @@ pub type SybaseSourceParser = odbc_core::OdbcParser<SybaseTypeSystem, SybaseSour
 pub struct SybaseOptions {
     pub batch_size: usize,
     pub max_str_len: usize,
+    pub unknown_type_fallback_to_varchar: bool,
 }
 
 impl SybaseOptions {
@@ -48,6 +50,8 @@ impl SybaseOptions {
                 .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
                 .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
+            unknown_type_fallback_to_varchar: odbc_core::env_bool(SYBASE_UNKNOWN_TYPE_FALLBACK_ENV)
+                .unwrap_or(false),
         }
     }
 }
@@ -57,6 +61,7 @@ impl Default for SybaseOptions {
         Self {
             batch_size: SYBASE_DEFAULT_BATCH_SIZE,
             max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
+            unknown_type_fallback_to_varchar: false,
         }
     }
 }
@@ -70,6 +75,7 @@ pub struct SybaseSource {
     column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
+    unknown_type_fallback_to_varchar: bool,
 }
 
 impl SybaseSource {
@@ -89,6 +95,7 @@ impl SybaseSource {
             column_buffer_max_lens: vec![],
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
+            unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
         }
     }
 
@@ -128,12 +135,21 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
+        let unknown_type_fallback_to_varchar = self.unknown_type_fallback_to_varchar;
         let (names, schema, column_buffer_max_lens) =
             odbc_core::fetch_metadata::<SybaseTypeSystem, SybaseSourceError, _>(
                 &self.conn,
                 &first_query,
                 self.max_str_len,
-                SybaseTypeSystem::from_odbc,
+                |data_type, nullability, column_name| {
+                    SybaseTypeSystem::from_odbc(
+                        data_type,
+                        nullability,
+                        column_name,
+                        unknown_type_fallback_to_varchar,
+                    )
+                    .map_err(Into::into)
+                },
             )?;
         self.names = names;
         self.schema = schema;
@@ -409,6 +425,7 @@ pub(crate) fn sybase_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = SybaseOptions::from_env();
     let conn_str = sybase_conn_string(&conn[..])?;
+    let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     Ok(odbc_core::odbc_get_arrow_impl::<
         SybaseTypeSystem,
         SybaseSourceError,
@@ -418,7 +435,15 @@ pub(crate) fn sybase_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
-        SybaseTypeSystem::from_odbc,
+        move |data_type, nullability, column_name| {
+            SybaseTypeSystem::from_odbc(
+                data_type,
+                nullability,
+                column_name,
+                unknown_type_fallback_to_varchar,
+            )
+            .map_err(Into::into)
+        },
     )?)
 }
 
@@ -645,12 +670,14 @@ mod tests {
             SybaseOptions {
                 batch_size: 9,
                 max_str_len: 8192,
+                unknown_type_fallback_to_varchar: true,
             },
         )
         .unwrap();
 
         assert_eq!(source.batch_size, 9);
         assert_eq!(source.max_str_len, 8192);
+        assert!(source.unknown_type_fallback_to_varchar);
     }
 
     #[test]
@@ -660,6 +687,7 @@ mod tests {
             SybaseOptions {
                 batch_size: SYBASE_DEFAULT_BATCH_SIZE,
                 max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
+                unknown_type_fallback_to_varchar: false,
             }
         );
     }

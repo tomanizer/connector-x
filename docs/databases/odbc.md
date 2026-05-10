@@ -86,11 +86,11 @@ The ODBC-family connectors use one shared fetch and conversion layer. Standard O
 | char/varchar/long varchar and wide variants | UTF-8 `String` | UTF-8 `String` | UTF-8 `String` |
 | binary/varbinary/long varbinary | Arrow large binary | Arrow large binary | Arrow large binary through text-compatible FreeTDS path |
 | date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp through text-compatible FreeTDS path |
-| unknown/vendor-specific | `String` fallback | `String` fallback | `String` fallback, except FreeTDS `TIME2` maps to time |
+| unknown/vendor-specific | error by default; optional `String` fallback | error by default; optional `String` fallback | error by default; optional `String` fallback, except FreeTDS `TIME2` maps to time |
 
 Nullability reported as unknown is treated as nullable. If a driver reports a value as nullable but later returns `NULL` for a non-null ConnectorX destination type, ConnectorX returns an error instead of fabricating a default.
 
-Vendor-specific ODBC types may be reported as unknown or other. Cast them in the query to a supported standard type when you need a specific output type.
+Vendor-specific ODBC types may be reported as unknown or other. ConnectorX rejects those types by default so driver-specific values are not silently returned as strings. Cast them in the query to a supported standard type when you need a specific output type. For compatibility with older behavior, set the matching opt-in environment variable to `true`: `ODBC_TYPE_FALLBACK_TO_VARCHAR`, `DB2_TYPE_FALLBACK_TO_VARCHAR`, or `SYBASE_TYPE_FALLBACK_TO_VARCHAR`.
 
 Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that names the relevant max-length setting. Increase the setting or cast/substr the selected column in the query.
 
@@ -102,6 +102,7 @@ Tuning environment variables:
 
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `ODBC_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
 To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
 

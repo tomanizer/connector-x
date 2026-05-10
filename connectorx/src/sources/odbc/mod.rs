@@ -6,6 +6,7 @@ mod typesystem;
 pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
 
+use self::typesystem::ODBC_UNKNOWN_TYPE_FALLBACK_ENV;
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
@@ -40,6 +41,7 @@ pub type OdbcSourceParser = odbc_core::OdbcParser<OdbcTypeSystem, OdbcSourceErro
 pub struct OdbcOptions {
     pub batch_size: usize,
     pub max_str_len: usize,
+    pub unknown_type_fallback_to_varchar: bool,
 }
 
 impl OdbcOptions {
@@ -48,6 +50,8 @@ impl OdbcOptions {
             batch_size: odbc_core::env_usize("ODBC_BATCH_SIZE").unwrap_or(ODBC_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(OdbcTypeSystem::max_str_len_env())
                 .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
+            unknown_type_fallback_to_varchar: odbc_core::env_bool(ODBC_UNKNOWN_TYPE_FALLBACK_ENV)
+                .unwrap_or(false),
         }
     }
 }
@@ -57,6 +61,7 @@ impl Default for OdbcOptions {
         Self {
             batch_size: ODBC_DEFAULT_BATCH_SIZE,
             max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
+            unknown_type_fallback_to_varchar: false,
         }
     }
 }
@@ -70,6 +75,7 @@ pub struct OdbcSource {
     column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
+    unknown_type_fallback_to_varchar: bool,
 }
 
 impl OdbcSource {
@@ -89,6 +95,7 @@ impl OdbcSource {
             column_buffer_max_lens: vec![],
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
+            unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
         }
     }
 
@@ -127,12 +134,21 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
+        let unknown_type_fallback_to_varchar = self.unknown_type_fallback_to_varchar;
         let (names, schema, column_buffer_max_lens) =
             odbc_core::fetch_metadata::<OdbcTypeSystem, OdbcSourceError, _>(
                 &self.conn,
                 &first_query,
                 self.max_str_len,
-                OdbcTypeSystem::from_odbc,
+                |data_type, nullability, column_name| {
+                    OdbcTypeSystem::from_odbc(
+                        data_type,
+                        nullability,
+                        column_name,
+                        unknown_type_fallback_to_varchar,
+                    )
+                    .map_err(Into::into)
+                },
             )?;
         self.names = names;
         self.schema = schema;
@@ -252,6 +268,7 @@ pub(crate) fn odbc_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = OdbcOptions::from_env();
     let conn_str = odbc_conn_string(&conn[..])?;
+    let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     Ok(odbc_core::odbc_get_arrow_impl::<
         OdbcTypeSystem,
         OdbcSourceError,
@@ -261,7 +278,15 @@ pub(crate) fn odbc_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
-        OdbcTypeSystem::from_odbc,
+        move |data_type, nullability, column_name| {
+            OdbcTypeSystem::from_odbc(
+                data_type,
+                nullability,
+                column_name,
+                unknown_type_fallback_to_varchar,
+            )
+            .map_err(Into::into)
+        },
     )?)
 }
 
@@ -472,6 +497,7 @@ mod tests {
             OdbcOptions {
                 batch_size: 2,
                 max_str_len: 8,
+                unknown_type_fallback_to_varchar: true,
             },
         )
         .unwrap();
@@ -481,14 +507,17 @@ mod tests {
             OdbcOptions {
                 batch_size: 32,
                 max_str_len: 4096,
+                unknown_type_fallback_to_varchar: false,
             },
         )
         .unwrap();
 
         assert_eq!(small.batch_size, 2);
         assert_eq!(small.max_str_len, 8);
+        assert!(small.unknown_type_fallback_to_varchar);
         assert_eq!(large.batch_size, 32);
         assert_eq!(large.max_str_len, 4096);
+        assert!(!large.unknown_type_fallback_to_varchar);
     }
 
     #[test]
@@ -498,6 +527,7 @@ mod tests {
             OdbcOptions {
                 batch_size: ODBC_DEFAULT_BATCH_SIZE,
                 max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
+                unknown_type_fallback_to_varchar: false,
             }
         );
     }
