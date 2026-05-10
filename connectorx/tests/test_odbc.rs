@@ -125,6 +125,16 @@ fn assert_postgres_testcontainer_rows(batches: &[arrow::record_batch::RecordBatc
     );
 }
 
+fn assert_truncation_error_mentions_column(err: &(impl std::fmt::Display + ?Sized), column_name: &str) {
+    let message = err.to_string();
+    assert!(
+        message.contains(&format!("column \"{column_name}\"")),
+        "{}",
+        message
+    );
+    assert!(message.contains("ODBC_MAX_STR_LEN"), "{}", message);
+}
+
 #[test]
 fn test_odbc_url_to_odbc_conn_string_escapes_values() {
     let conn = odbc_conn_string(
@@ -436,4 +446,58 @@ fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
+}
+
+#[test]
+fn test_odbc_testcontainer_truncation_error_includes_column_name_get_arrow() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC truncation get_arrow test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let _guard = lock_odbc_env();
+    let conn = test_db::postgres_odbc_url();
+    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let source_conn = parse_source(&conn, None).unwrap();
+    let err = get_arrow(
+        &source_conn,
+        None,
+        &[CXQuery::naked(
+            "select cast(long_text as text) as truncation_target from cx_odbc_edge where id = 1",
+        )],
+        None,
+    )
+    .unwrap_err();
+
+    assert_truncation_error_mentions_column(&err, "truncation_target");
+}
+
+#[test]
+fn test_odbc_testcontainer_truncation_error_includes_column_name_streaming() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC truncation streaming test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let _guard = lock_odbc_env();
+    let conn = test_db::postgres_odbc_conn();
+    let _env_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let queries = [CXQuery::naked(
+        "select cast(long_text as text) as truncation_target from cx_odbc_edge where id = 1",
+    )];
+    let source = OdbcSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, OdbcArrowTransport>::new(source, &mut destination, &queries, None);
+    let err = dispatcher.run().unwrap_err();
+
+    assert_truncation_error_mentions_column(&err, "truncation_target");
 }
