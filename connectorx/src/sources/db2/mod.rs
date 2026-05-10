@@ -12,8 +12,9 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{
-            connection_bool_param, is_connector_option_key, is_raw_odbc_conn_string,
-            is_valid_odbc_key, odbc_conn_value, url_bool_param, REPLACE_INVALID_UTF16_PARAM,
+            connection_bool_param, connection_usize_param, is_connector_option_key,
+            is_raw_odbc_conn_string, is_valid_odbc_key, odbc_conn_value, url_bool_param,
+            url_usize_param, MAX_CONNECTIONS_PARAM, REPLACE_INVALID_UTF16_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
         Source, SourcePartition,
@@ -44,6 +45,7 @@ pub type Db2SourceParser = odbc_core::OdbcParser<Db2TypeSystem, Db2SourceError>;
 pub struct Db2Options {
     pub batch_size: usize,
     pub max_str_len: usize,
+    pub max_connections: Option<usize>,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
 }
@@ -54,6 +56,7 @@ impl Db2Options {
             batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
                 .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            max_connections: odbc_core::env_usize("DB2_MAX_CONNECTIONS"),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(DB2_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
@@ -66,6 +69,7 @@ impl Default for Db2Options {
         Self {
             batch_size: DB2_DEFAULT_BATCH_SIZE,
             max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+            max_connections: None,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
         }
@@ -81,6 +85,7 @@ pub struct Db2Source {
     column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
+    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     unknown_type_fallback_to_varchar: bool,
     replace_invalid_utf16: bool,
 }
@@ -92,9 +97,12 @@ impl Db2Source {
     }
 
     #[throws(Db2SourceError)]
-    pub fn with_options(conn: &str, _nconn: usize, options: Db2Options) -> Self {
+    pub fn with_options(conn: &str, nconn: usize, options: Db2Options) -> Self {
         let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
             .unwrap_or(options.replace_invalid_utf16);
+        let max_connections =
+            connection_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+        let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
         Self {
             conn: db2_conn_string(conn)?,
             origin_query: None,
@@ -104,6 +112,7 @@ impl Db2Source {
             column_buffer_max_lens: vec![],
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
+            connection_limiter,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
             replace_invalid_utf16,
         }
@@ -150,6 +159,7 @@ where
                 &self.conn,
                 &first_query,
                 self.max_str_len,
+                &self.connection_limiter,
                 |data_type, nullability, column_name| {
                     Db2TypeSystem::from_odbc(
                         data_type,
@@ -172,6 +182,7 @@ where
                 &self.conn,
                 q,
                 &GenericDialect {},
+                &self.connection_limiter,
             )?),
             None => None,
         }
@@ -197,6 +208,7 @@ where
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
+                    Arc::clone(&self.connection_limiter),
                     self.replace_invalid_utf16,
                 )
             })
@@ -213,17 +225,19 @@ pub struct Db2SourcePartition {
     nrows: usize,
     ncols: usize,
     batch_size: usize,
+    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     replace_invalid_utf16: bool,
 }
 
 impl Db2SourcePartition {
-    pub fn new(
+    pub(crate) fn new(
         conn: String,
         query: &CXQuery<String>,
         names: &[String],
         schema: &[Db2TypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
+        connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
         replace_invalid_utf16: bool,
     ) -> Self {
         Self {
@@ -235,6 +249,7 @@ impl Db2SourcePartition {
             nrows: 0,
             ncols: schema.len(),
             batch_size,
+            connection_limiter,
             replace_invalid_utf16,
         }
     }
@@ -248,11 +263,16 @@ impl SourcePartition for Db2SourcePartition {
     #[throws(Db2SourceError)]
     fn result_rows(&mut self) {
         let cquery = count_query(&self.query, &GenericDialect {})?;
-        self.nrows = odbc_core::fetch_count_query::<Db2SourceError>(&self.conn, cquery.as_str())?;
+        self.nrows = odbc_core::fetch_count_query::<Db2SourceError>(
+            &self.conn,
+            cquery.as_str(),
+            &self.connection_limiter,
+        )?;
     }
 
     #[throws(Db2SourceError)]
     fn parser(&mut self) -> Self::Parser<'_> {
+        let connection_permit = self.connection_limiter.acquire();
         let cursor = Db2Source::execute_query(&self.conn, self.query.as_str())?;
         let buffer = ColumnarAnyBuffer::try_from_descs(
             self.batch_size,
@@ -267,6 +287,7 @@ impl SourcePartition for Db2SourcePartition {
             Arc::clone(&self.names),
             Arc::clone(&self.schema),
             self.replace_invalid_utf16,
+            connection_permit,
         )
     }
 
@@ -442,6 +463,8 @@ pub(crate) fn db2_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 =
         url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
+    let max_connections = url_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         Db2TypeSystem,
         Db2SourceError,
@@ -451,6 +474,7 @@ pub(crate) fn db2_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
+        connection_limiter,
         replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             Db2TypeSystem::from_odbc(
@@ -530,6 +554,7 @@ mod tests {
             Db2Options {
                 batch_size: 7,
                 max_str_len: 2048,
+                max_connections: Some(2),
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
             },
@@ -538,6 +563,7 @@ mod tests {
 
         assert_eq!(source.batch_size, 7);
         assert_eq!(source.max_str_len, 2048);
+        assert_eq!(source.connection_limiter.max_connections(), 2);
         assert!(source.unknown_type_fallback_to_varchar);
         assert!(source.replace_invalid_utf16);
     }
@@ -549,6 +575,7 @@ mod tests {
             Db2Options {
                 batch_size: DB2_DEFAULT_BATCH_SIZE,
                 max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+                max_connections: None,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
             }
@@ -557,7 +584,7 @@ mod tests {
 
     #[test]
     fn replace_invalid_utf16_url_option_is_connector_only() {
-        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true";
+        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true&max_connections=3";
         assert_eq!(
             db2_conn_string(conn).unwrap(),
             "Driver={IBM DB2 ODBC DRIVER};Hostname={127.0.0.1};Port=50000;Protocol={TCPIP};UID={db2inst1};PWD={password};Database={testdb};"
@@ -565,5 +592,6 @@ mod tests {
 
         let source = Db2Source::with_options(conn, 1, Db2Options::default()).unwrap();
         assert!(source.replace_invalid_utf16);
+        assert_eq!(source.connection_limiter.max_connections(), 3);
     }
 }
