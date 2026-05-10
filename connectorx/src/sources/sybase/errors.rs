@@ -16,6 +16,23 @@ pub enum SybaseSourceError {
     ParseValue { value: String, ty: &'static str },
 
     #[error(
+        "Sybase ODBC connection timed out for source={source_name} after {timeout_secs}s: {cause}"
+    )]
+    ConnectionTimeout {
+        source_name: &'static str,
+        timeout_secs: u32,
+        cause: String,
+    },
+
+    #[error("Sybase ODBC query timed out for source={source_name} after {timeout_secs}s query={query:?}: {cause}")]
+    QueryTimeout {
+        source_name: &'static str,
+        query: String,
+        timeout_secs: usize,
+        cause: String,
+    },
+
+    #[error(
         "Invalid Sybase partition bound for source={source_name} column_name={column_name} bound={bound_name} value={value:?}: {reason}"
     )]
     InvalidPartitionBound {

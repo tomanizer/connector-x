@@ -40,6 +40,8 @@ Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC conn
 
 `replace_invalid_utf16=true` is a ConnectorX-only URL option. It is not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers; use this option only when you explicitly want invalid sequences replaced with U+FFFD.
 
+`max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Sybase driver is a runtime dependency and is not bundled in ConnectorX wheels.
@@ -101,9 +103,11 @@ The defaults are tuned for throughput over small memory use:
 * `SYBASE_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`.
 * `SYBASE_MAX_CONNECTIONS`: maximum active Sybase ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
+* `SYBASE_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
+* `SYBASE_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `SYBASE_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
+Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Sybase URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking

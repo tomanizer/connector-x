@@ -8,19 +8,26 @@ use crate::sources::bigquery::BigQueryDialect;
 #[cfg(feature = "src_clickhouse")]
 use crate::sources::clickhouse::{ClickHouseSource, ClickHouseSourceError};
 #[cfg(feature = "src_db2")]
-use crate::sources::db2::{db2_conn_string, fetch_i64_pair as db2_fetch_i64_pair};
+use crate::sources::db2::{
+    db2_conn_string, db2_execution_options, fetch_i64_pair as db2_fetch_i64_pair, Db2Options,
+};
 #[cfg(feature = "src_mssql")]
 use crate::sources::mssql::{mssql_config, FloatN, IntN, MsSQLTypeSystem};
 #[cfg(feature = "src_mysql")]
 use crate::sources::mysql::{MySQLSourceError, MySQLTypeSystem};
 #[cfg(feature = "src_odbc")]
-use crate::sources::odbc::{fetch_i64_pair as odbc_fetch_i64_pair, odbc_conn_string};
+use crate::sources::odbc::{
+    fetch_i64_pair as odbc_fetch_i64_pair, odbc_conn_string, odbc_execution_options, OdbcOptions,
+};
 #[cfg(feature = "src_oracle")]
 use crate::sources::oracle::{OracleDialect, OracleSource};
 #[cfg(feature = "src_postgres")]
 use crate::sources::postgres::{rewrite_tls_args, PostgresTypeSystem};
 #[cfg(feature = "src_sybase")]
-use crate::sources::sybase::{fetch_i64_pair as sybase_fetch_i64_pair, sybase_conn_string};
+use crate::sources::sybase::{
+    fetch_i64_pair as sybase_fetch_i64_pair, sybase_conn_string, sybase_execution_options,
+    SybaseOptions,
+};
 #[cfg(feature = "src_trino")]
 use crate::sources::trino::TrinoDialect;
 #[cfg(feature = "src_sqlite")]
@@ -494,25 +501,28 @@ fn mssql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
 #[cfg(feature = "src_sybase")]
 #[throws(ConnectorXOutError)]
 fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
+    let execution_options = sybase_execution_options(conn.as_str(), SybaseOptions::from_env())?;
     let conn = sybase_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &MsSqlDialect {})?;
-    sybase_fetch_i64_pair(&conn, range_query.as_str(), col)?
+    sybase_fetch_i64_pair(&conn, range_query.as_str(), col, execution_options)?
 }
 
 #[cfg(feature = "src_db2")]
 #[throws(ConnectorXOutError)]
 fn db2_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
+    let execution_options = db2_execution_options(conn.as_str(), Db2Options::from_env())?;
     let conn = db2_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
-    db2_fetch_i64_pair(&conn, range_query.as_str(), col)?
+    db2_fetch_i64_pair(&conn, range_query.as_str(), col, execution_options)?
 }
 
 #[cfg(feature = "src_odbc")]
 #[throws(ConnectorXOutError)]
 fn odbc_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
+    let execution_options = odbc_execution_options(conn.as_str(), OdbcOptions::from_env())?;
     let conn = odbc_conn_string(conn.as_str())?;
     let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
-    odbc_fetch_i64_pair(&conn, range_query.as_str(), col)?
+    odbc_fetch_i64_pair(&conn, range_query.as_str(), col, execution_options)?
 }
 
 #[cfg(feature = "src_oracle")]

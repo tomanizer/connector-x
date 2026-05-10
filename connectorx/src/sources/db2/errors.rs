@@ -16,6 +16,23 @@ pub enum Db2SourceError {
     ParseValue { value: String, ty: &'static str },
 
     #[error(
+        "Db2 ODBC connection timed out for source={source_name} after {timeout_secs}s: {cause}"
+    )]
+    ConnectionTimeout {
+        source_name: &'static str,
+        timeout_secs: u32,
+        cause: String,
+    },
+
+    #[error("Db2 ODBC query timed out for source={source_name} after {timeout_secs}s query={query:?}: {cause}")]
+    QueryTimeout {
+        source_name: &'static str,
+        query: String,
+        timeout_secs: usize,
+        cause: String,
+    },
+
+    #[error(
         "Invalid Db2 partition bound for source={source_name} column_name={column_name} bound={bound_name} value={value:?}: {reason}"
     )]
     InvalidPartitionBound {

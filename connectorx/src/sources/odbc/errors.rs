@@ -15,6 +15,21 @@ pub enum OdbcSourceError {
     #[error("Cannot parse ODBC value {value:?} as {ty}")]
     ParseValue { value: String, ty: &'static str },
 
+    #[error("ODBC connection timed out for source={source_name} after {timeout_secs}s: {cause}")]
+    ConnectionTimeout {
+        source_name: &'static str,
+        timeout_secs: u32,
+        cause: String,
+    },
+
+    #[error("ODBC query timed out for source={source_name} after {timeout_secs}s query={query:?}: {cause}")]
+    QueryTimeout {
+        source_name: &'static str,
+        query: String,
+        timeout_secs: usize,
+        cause: String,
+    },
+
     #[error(
         "Invalid ODBC partition bound for source={source_name} column_name={column_name} bound={bound_name} value={value:?}: {reason}"
     )]
