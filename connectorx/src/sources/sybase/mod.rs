@@ -11,7 +11,10 @@ use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{
-        odbc_common::{is_raw_odbc_conn_string, odbc_conn_value},
+        odbc_common::{
+            connection_bool_param, is_raw_odbc_conn_string, odbc_conn_value, url_bool_param,
+            REPLACE_INVALID_UTF16_PARAM,
+        },
         odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
         Produce, Source, SourcePartition,
     },
@@ -41,6 +44,7 @@ pub struct SybaseOptions {
     pub batch_size: usize,
     pub max_str_len: usize,
     pub unknown_type_fallback_to_varchar: bool,
+    pub replace_invalid_utf16: bool,
 }
 
 impl SybaseOptions {
@@ -52,6 +56,7 @@ impl SybaseOptions {
                 .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(SYBASE_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
+            replace_invalid_utf16: false,
         }
     }
 }
@@ -62,6 +67,7 @@ impl Default for SybaseOptions {
             batch_size: SYBASE_DEFAULT_BATCH_SIZE,
             max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
             unknown_type_fallback_to_varchar: false,
+            replace_invalid_utf16: false,
         }
     }
 }
@@ -76,6 +82,7 @@ pub struct SybaseSource {
     batch_size: usize,
     max_str_len: usize,
     unknown_type_fallback_to_varchar: bool,
+    replace_invalid_utf16: bool,
 }
 
 impl SybaseSource {
@@ -86,6 +93,8 @@ impl SybaseSource {
 
     #[throws(SybaseSourceError)]
     pub fn with_options(conn: &str, _nconn: usize, options: SybaseOptions) -> Self {
+        let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
+            .unwrap_or(options.replace_invalid_utf16);
         Self {
             conn: sybase_conn_string(conn)?,
             origin_query: None,
@@ -96,6 +105,7 @@ impl SybaseSource {
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
+            replace_invalid_utf16,
         }
     }
 
@@ -188,6 +198,7 @@ where
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
+                    self.replace_invalid_utf16,
                 )
             })
             .collect()
@@ -203,6 +214,7 @@ pub struct SybaseSourcePartition {
     nrows: usize,
     ncols: usize,
     batch_size: usize,
+    replace_invalid_utf16: bool,
 }
 
 impl SybaseSourcePartition {
@@ -213,6 +225,7 @@ impl SybaseSourcePartition {
         schema: &[SybaseTypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
+        replace_invalid_utf16: bool,
     ) -> Self {
         Self {
             conn,
@@ -223,6 +236,7 @@ impl SybaseSourcePartition {
             nrows: 0,
             ncols: schema.len(),
             batch_size,
+            replace_invalid_utf16,
         }
     }
 }
@@ -250,7 +264,12 @@ impl SourcePartition for SybaseSourcePartition {
                 .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        SybaseSourceParser::new(cursor, Arc::clone(&self.names), Arc::clone(&self.schema))
+        SybaseSourceParser::new(
+            cursor,
+            Arc::clone(&self.names),
+            Arc::clone(&self.schema),
+            self.replace_invalid_utf16,
+        )
     }
 
     fn nrows(&self) -> usize {
@@ -273,6 +292,22 @@ impl OdbcCoreError for SybaseSourceError {
 
     fn parse_value(value: String, ty: &'static str) -> Self {
         Self::ParseValue { value, ty }
+    }
+
+    fn invalid_utf16(
+        source_name: &'static str,
+        column_name: Option<&str>,
+        row_index: usize,
+        byte_offset: usize,
+        surrogate: u16,
+    ) -> Self {
+        Self::InvalidUtf16 {
+            source_name,
+            column_name: column_name.unwrap_or("<unknown>").to_string(),
+            row_index,
+            byte_offset,
+            surrogate,
+        }
     }
 }
 
@@ -426,6 +461,8 @@ pub(crate) fn sybase_get_arrow(
     let options = SybaseOptions::from_env();
     let conn_str = sybase_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
+    let replace_invalid_utf16 =
+        url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
     Ok(odbc_core::odbc_get_arrow_impl::<
         SybaseTypeSystem,
         SybaseSourceError,
@@ -435,6 +472,7 @@ pub(crate) fn sybase_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
+        replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             SybaseTypeSystem::from_odbc(
                 data_type,
@@ -506,6 +544,9 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
         self,
         column: AnySlice<'_>,
         nrows: usize,
+        col_index: usize,
+        column_name: Option<&str>,
+        replace_invalid_utf16: bool,
     ) -> Result<ArrayRef, E> {
         let nullable = OdbcTypePolicy::nullable(self);
         match self {
@@ -516,13 +557,29 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Real(..) => build_float32_array(column, nrows, nullable),
             SybaseTypeSystem::Double(..) => build_float64_array(column, nrows, nullable),
             SybaseTypeSystem::Numeric(_, precision, scale)
-            | SybaseTypeSystem::Decimal(_, precision, scale) => {
-                build_decimal_array(column, nrows, nullable, precision, scale)
-            }
+            | SybaseTypeSystem::Decimal(_, precision, scale) => build_decimal_array(
+                column,
+                nrows,
+                nullable,
+                precision,
+                scale,
+                <Self as OdbcTypePolicy>::source_name(),
+                col_index,
+                column_name,
+                replace_invalid_utf16,
+            ),
             SybaseTypeSystem::Bit(..) => build_bool_array(column, nrows, nullable),
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => build_string_array(column, nrows, nullable),
+            | SybaseTypeSystem::Text(..) => build_string_array(
+                column,
+                nrows,
+                nullable,
+                <Self as OdbcTypePolicy>::source_name(),
+                col_index,
+                column_name,
+                replace_invalid_utf16,
+            ),
             SybaseTypeSystem::Binary(..) => build_sybase_binary_array::<E>(column, nrows, nullable),
             SybaseTypeSystem::Date(..) => build_date32_array(column, nrows, nullable),
             SybaseTypeSystem::Time(..) => build_time64_micro_array(column, nrows, nullable),
@@ -671,6 +728,7 @@ mod tests {
                 batch_size: 9,
                 max_str_len: 8192,
                 unknown_type_fallback_to_varchar: true,
+                replace_invalid_utf16: true,
             },
         )
         .unwrap();
@@ -678,6 +736,7 @@ mod tests {
         assert_eq!(source.batch_size, 9);
         assert_eq!(source.max_str_len, 8192);
         assert!(source.unknown_type_fallback_to_varchar);
+        assert!(source.replace_invalid_utf16);
     }
 
     #[test]
@@ -688,8 +747,22 @@ mod tests {
                 batch_size: SYBASE_DEFAULT_BATCH_SIZE,
                 max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
                 unknown_type_fallback_to_varchar: false,
+                replace_invalid_utf16: false,
             }
         );
+    }
+
+    #[test]
+    fn replace_invalid_utf16_url_option_is_connector_only() {
+        let conn =
+            "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&replace_invalid_utf16=true";
+        assert_eq!(
+            sybase_conn_string(conn).unwrap(),
+            "Driver={FreeTDS};Server={127.0.0.1};Port=5000;TDS_Version={5.0};UID={sa};PWD={sybase};Database={tempdb};"
+        );
+
+        let source = SybaseSource::with_options(conn, 1, SybaseOptions::default()).unwrap();
+        assert!(source.replace_invalid_utf16);
     }
 
     #[test]

@@ -48,6 +48,13 @@ pub trait OdbcCoreError:
     fn get_nrows_failed() -> Self;
     fn no_result_set(query: String) -> Self;
     fn parse_value(value: String, ty: &'static str) -> Self;
+    fn invalid_utf16(
+        source_name: &'static str,
+        column_name: Option<&str>,
+        row_index: usize,
+        byte_offset: usize,
+        surrogate: u16,
+    ) -> Self;
 }
 
 /// Backend-specific ODBC metadata and buffer policy for the shared parser.
@@ -87,6 +94,7 @@ pub struct OdbcParser<TS, E> {
     ncols: usize,
     current_cell: usize,
     is_finished: bool,
+    replace_invalid_utf16: bool,
     _marker: PhantomData<(TS, E)>,
 }
 
@@ -95,7 +103,12 @@ where
     TS: OdbcTypePolicy,
     E: OdbcCoreError,
 {
-    pub(crate) fn new(cursor: OdbcBlockCursor, names: Arc<[String]>, schema: Arc<[TS]>) -> Self {
+    pub(crate) fn new(
+        cursor: OdbcBlockCursor,
+        names: Arc<[String]>,
+        schema: Arc<[TS]>,
+        replace_invalid_utf16: bool,
+    ) -> Self {
         let ncols = schema.len();
         debug_assert_eq!(names.len(), ncols);
         Self {
@@ -106,6 +119,7 @@ where
             ncols,
             current_cell: 0,
             is_finished: false,
+            replace_invalid_utf16,
             _marker: PhantomData,
         }
     }
@@ -193,6 +207,7 @@ where
                     self.schema.get(col_index).copied(),
                     TS::source_name(),
                     TS::max_str_len_env(),
+                    self.replace_invalid_utf16,
                 )?;
             }
             self.batch.truncate_columns(num_cols);
@@ -233,6 +248,7 @@ impl OdbcBatch {
         column_type: Option<impl Debug + Copy>,
         source_name: &'static str,
         max_str_len_env: &'static str,
+        replace_invalid_utf16: bool,
     ) -> Result<(), E>
     where
         E: OdbcCoreError,
@@ -246,10 +262,25 @@ impl OdbcBatch {
             column_type,
         )?;
         if col_index == self.columns.len() {
-            self.columns
-                .push(OdbcColumn::from_slice(column, self.nrows));
+            let mut value = OdbcColumn::Unsupported;
+            value.replace_from_slice::<E>(
+                column,
+                self.nrows,
+                source_name,
+                col_index,
+                column_name,
+                replace_invalid_utf16,
+            )?;
+            self.columns.push(value);
         } else {
-            self.columns[col_index].replace_from_slice(column, self.nrows);
+            self.columns[col_index].replace_from_slice::<E>(
+                column,
+                self.nrows,
+                source_name,
+                col_index,
+                column_name,
+                replace_invalid_utf16,
+            )?;
         }
         Ok(())
     }
@@ -391,13 +422,18 @@ macro_rules! ensure_column {
 }
 
 impl OdbcColumn {
-    fn from_slice(column: AnySlice<'_>, nrows: usize) -> Self {
-        let mut value = Self::Unsupported;
-        value.replace_from_slice(column, nrows);
-        value
-    }
-
-    fn replace_from_slice(&mut self, column: AnySlice<'_>, nrows: usize) {
+    fn replace_from_slice<E>(
+        &mut self,
+        column: AnySlice<'_>,
+        nrows: usize,
+        source_name: &'static str,
+        col_index: usize,
+        column_name: Option<&str>,
+        replace_invalid_utf16: bool,
+    ) -> Result<(), E>
+    where
+        E: OdbcCoreError,
+    {
         match column {
             AnySlice::Text(view) => {
                 let values = self.ensure_bytes();
@@ -410,12 +446,15 @@ impl OdbcColumn {
                     match view.get(row_index) {
                         Some(chars) => {
                             let slot = values[row_index].get_or_insert_with(Vec::new);
-                            slot.clear();
-                            for item in std::char::decode_utf16(chars.iter().copied()) {
-                                let ch = item.unwrap_or(std::char::REPLACEMENT_CHARACTER);
-                                let mut bytes = [0; 4];
-                                slot.extend_from_slice(ch.encode_utf8(&mut bytes).as_bytes());
-                            }
+                            decode_utf16_to_utf8::<E>(
+                                chars,
+                                slot,
+                                source_name,
+                                col_index,
+                                column_name,
+                                row_index,
+                                replace_invalid_utf16,
+                            )?;
                         }
                         None => values[row_index] = None,
                     }
@@ -507,6 +546,7 @@ impl OdbcColumn {
             }
             AnySlice::Numeric(_) | AnySlice::NullableNumeric(_) => *self = Self::Unsupported,
         }
+        Ok(())
     }
 
     ensure_column!(ensure_bytes, Bytes, Option<Vec<u8>>);
@@ -607,6 +647,132 @@ impl OdbcColumn {
 fn copy_slice<T: Copy>(values: &mut Vec<T>, source: &[T], nrows: usize) {
     values.clear();
     values.extend_from_slice(&source[..nrows]);
+}
+
+pub(crate) fn decode_utf16_to_string<E>(
+    chars: &[u16],
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    row_index: usize,
+    replace_invalid_utf16: bool,
+) -> Result<String, E>
+where
+    E: OdbcCoreError,
+{
+    let mut bytes = Vec::with_capacity(chars.len() * 2);
+    decode_utf16_to_utf8::<E>(
+        chars,
+        &mut bytes,
+        source_name,
+        col_index,
+        column_name,
+        row_index,
+        replace_invalid_utf16,
+    )?;
+    String::from_utf8(bytes).map_err(|err| E::parse_value(err.to_string(), "UTF-16 text"))
+}
+
+pub(crate) fn decode_utf16_to_utf8<E>(
+    chars: &[u16],
+    output: &mut Vec<u8>,
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    row_index: usize,
+    replace_invalid_utf16: bool,
+) -> Result<(), E>
+where
+    E: OdbcCoreError,
+{
+    output.clear();
+    let mut code_unit_index = 0;
+    let mut warned = false;
+    while code_unit_index < chars.len() {
+        let unit = chars[code_unit_index];
+        let decoded = if (0xD800..=0xDBFF).contains(&unit) {
+            match chars.get(code_unit_index + 1).copied() {
+                Some(next) if (0xDC00..=0xDFFF).contains(&next) => {
+                    code_unit_index += 2;
+                    let scalar =
+                        0x10000 + ((((unit - 0xD800) as u32) << 10) | ((next - 0xDC00) as u32));
+                    char::from_u32(scalar)
+                }
+                _ => {
+                    handle_invalid_utf16::<E>(
+                        source_name,
+                        col_index,
+                        column_name,
+                        row_index,
+                        code_unit_index,
+                        unit,
+                        replace_invalid_utf16,
+                        &mut warned,
+                    )?;
+                    code_unit_index += 1;
+                    Some(std::char::REPLACEMENT_CHARACTER)
+                }
+            }
+        } else if (0xDC00..=0xDFFF).contains(&unit) {
+            handle_invalid_utf16::<E>(
+                source_name,
+                col_index,
+                column_name,
+                row_index,
+                code_unit_index,
+                unit,
+                replace_invalid_utf16,
+                &mut warned,
+            )?;
+            code_unit_index += 1;
+            Some(std::char::REPLACEMENT_CHARACTER)
+        } else {
+            code_unit_index += 1;
+            char::from_u32(u32::from(unit))
+        };
+
+        if let Some(ch) = decoded {
+            let mut bytes = [0; 4];
+            output.extend_from_slice(ch.encode_utf8(&mut bytes).as_bytes());
+        }
+    }
+    Ok(())
+}
+
+fn handle_invalid_utf16<E>(
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    row_index: usize,
+    code_unit_index: usize,
+    surrogate: u16,
+    replace_invalid_utf16: bool,
+    warned: &mut bool,
+) -> Result<(), E>
+where
+    E: OdbcCoreError,
+{
+    let byte_offset = code_unit_index * 2;
+    if replace_invalid_utf16 {
+        if !*warned {
+            let column = column_description(col_index, column_name, None::<()>);
+            log::warn!(
+                "{source_name} {column} row_index={row_index} contains invalid UTF-16 at \
+                 byte_offset={byte_offset}; replacing invalid sequence with U+FFFD because \
+                 replace_invalid_utf16=true"
+            );
+            *warned = true;
+        }
+        Ok(())
+    } else {
+        Err(E::invalid_utf16(
+            source_name,
+            column_name,
+            row_index,
+            byte_offset,
+            surrogate,
+        ))
+    }
 }
 
 fn fill_from_iter<T>(values: &mut Vec<T>, source: impl IntoIterator<Item = T>) {
@@ -1285,7 +1451,17 @@ mod tests {
 
     #[derive(Debug)]
     enum TestError {
-        ParseValue { value: String, ty: &'static str },
+        ParseValue {
+            value: String,
+            ty: &'static str,
+        },
+        InvalidUtf16 {
+            source_name: &'static str,
+            column_name: String,
+            row_index: usize,
+            byte_offset: usize,
+            surrogate: u16,
+        },
         Other(String),
     }
 
@@ -1300,6 +1476,22 @@ mod tests {
 
         fn parse_value(value: String, ty: &'static str) -> Self {
             Self::ParseValue { value, ty }
+        }
+
+        fn invalid_utf16(
+            source_name: &'static str,
+            column_name: Option<&str>,
+            row_index: usize,
+            byte_offset: usize,
+            surrogate: u16,
+        ) -> Self {
+            Self::InvalidUtf16 {
+                source_name,
+                column_name: column_name.unwrap_or("<unknown>").to_string(),
+                row_index,
+                byte_offset,
+                surrogate,
+            }
         }
     }
 
@@ -1342,6 +1534,7 @@ mod tests {
     fn parse_value_error<T>(result: Result<T, TestError>) -> (String, &'static str) {
         match result {
             Err(TestError::ParseValue { value, ty }) => (value, ty),
+            Err(TestError::InvalidUtf16 { .. }) => panic!("unexpected UTF-16 error"),
             Err(TestError::Other(value)) => panic!("unexpected error: {}", value),
             Ok(_) => panic!("expected parse error"),
         }
@@ -1621,6 +1814,55 @@ mod tests {
         assert_eq!(slot.as_ptr(), first_ptr);
         assert_eq!(slot.capacity(), first_capacity);
     }
+
+    #[test]
+    fn invalid_utf16_errors_by_default_with_column_context() {
+        let mut bytes = Vec::new();
+        let error = decode_utf16_to_utf8::<TestError>(
+            &[b'o' as u16, 0xD800, b'k' as u16],
+            &mut bytes,
+            "Odbc",
+            2,
+            Some("wide_text"),
+            7,
+            false,
+        )
+        .unwrap_err();
+
+        match error {
+            TestError::InvalidUtf16 {
+                source_name,
+                column_name,
+                row_index,
+                byte_offset,
+                surrogate,
+            } => {
+                assert_eq!(source_name, "Odbc");
+                assert_eq!(column_name, "wide_text");
+                assert_eq!(row_index, 7);
+                assert_eq!(byte_offset, 2);
+                assert_eq!(surrogate, 0xD800);
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn invalid_utf16_can_be_replaced_by_explicit_opt_in() {
+        let mut bytes = Vec::new();
+        decode_utf16_to_utf8::<TestError>(
+            &[b'o' as u16, 0xD800, b'k' as u16],
+            &mut bytes,
+            "Odbc",
+            2,
+            Some("wide_text"),
+            7,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8(bytes).unwrap(), "o\u{FFFD}k");
+    }
 }
 
 macro_rules! impl_parse_from_bytes {
@@ -1783,6 +2025,9 @@ pub(crate) trait OdbcArrowPolicy: OdbcTypePolicy {
         self,
         column: AnySlice<'_>,
         nrows: usize,
+        col_index: usize,
+        column_name: Option<&str>,
+        replace_invalid_utf16: bool,
     ) -> Result<ArrayRef, E>;
 }
 
@@ -2062,6 +2307,10 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
     nullable: bool,
     precision: u8,
     scale: i8,
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    replace_invalid_utf16: bool,
 ) -> Result<ArrayRef, E> {
     let mut builder = Decimal128Builder::with_capacity(nrows)
         .with_data_type(ArrowDataType::Decimal128(precision, scale));
@@ -2081,7 +2330,14 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
             for row_index in 0..nrows {
                 match view.get(row_index) {
                     Some(chars) => {
-                        let s = String::from_utf16_lossy(chars);
+                        let s = decode_utf16_to_string::<E>(
+                            chars,
+                            source_name,
+                            col_index,
+                            column_name,
+                            row_index,
+                            replace_invalid_utf16,
+                        )?;
                         append_decimal_value::<E>(&mut builder, s.as_bytes(), scale)?;
                     }
                     None => {
@@ -2158,6 +2414,10 @@ pub(crate) fn build_string_array<E: OdbcCoreError>(
     column: AnySlice<'_>,
     nrows: usize,
     nullable: bool,
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    replace_invalid_utf16: bool,
 ) -> Result<ArrayRef, E> {
     let mut builder = StringBuilder::with_capacity(nrows, nrows * 8);
     match column {
@@ -2175,7 +2435,14 @@ pub(crate) fn build_string_array<E: OdbcCoreError>(
         AnySlice::WText(view) => {
             for row_index in 0..nrows {
                 match view.get(row_index) {
-                    Some(chars) => builder.append_value(String::from_utf16_lossy(chars)),
+                    Some(chars) => builder.append_value(decode_utf16_to_string::<E>(
+                        chars,
+                        source_name,
+                        col_index,
+                        column_name,
+                        row_index,
+                        replace_invalid_utf16,
+                    )?),
                     None => {
                         require_nullable::<E>(nullable, "String")?;
                         builder.append_null();
@@ -2437,6 +2704,9 @@ macro_rules! impl_odbc_arrow_policy {
                 self,
                 column: ::odbc_api::buffers::AnySlice<'_>,
                 nrows: usize,
+                col_index: usize,
+                column_name: Option<&str>,
+                replace_invalid_utf16: bool,
             ) -> Result<::std::sync::Arc<dyn ::arrow::array::Array>, E> {
                 use $crate::sources::odbc_core::{
                     build_binary_array, build_bool_array, build_date32_array, build_decimal_array,
@@ -2444,6 +2714,8 @@ macro_rules! impl_odbc_arrow_policy {
                     build_string_array, build_time64_micro_array, build_timestamp_micro_array,
                 };
                 let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
+                let source_name =
+                    <Self as $crate::sources::odbc_core::OdbcTypePolicy>::source_name();
                 match self {
                     Self::TinyInt(..) | Self::SmallInt(..) | Self::Int(..) | Self::BigInt(..) => {
                         build_int64_array(column, nrows, nullable)
@@ -2451,12 +2723,28 @@ macro_rules! impl_odbc_arrow_policy {
                     Self::Real(..) => build_float32_array(column, nrows, nullable),
                     Self::Double(..) => build_float64_array(column, nrows, nullable),
                     Self::Numeric(_, precision, scale) | Self::Decimal(_, precision, scale) => {
-                        build_decimal_array(column, nrows, nullable, precision, scale)
+                        build_decimal_array(
+                            column,
+                            nrows,
+                            nullable,
+                            precision,
+                            scale,
+                            source_name,
+                            col_index,
+                            column_name,
+                            replace_invalid_utf16,
+                        )
                     }
                     Self::Bit(..) => build_bool_array(column, nrows, nullable),
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
-                        build_string_array(column, nrows, nullable)
-                    }
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => build_string_array(
+                        column,
+                        nrows,
+                        nullable,
+                        source_name,
+                        col_index,
+                        column_name,
+                        replace_invalid_utf16,
+                    ),
                     Self::Binary(..) => build_binary_array(column, nrows, nullable),
                     Self::Date(..) => build_date32_array(column, nrows, nullable),
                     Self::Time(..) => build_time64_micro_array(column, nrows, nullable),
@@ -2485,6 +2773,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     queries: &[CXQuery<String>],
     max_str_len: usize,
     batch_size: usize,
+    replace_invalid_utf16: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<ArrowDestination, E>
 where
@@ -2517,6 +2806,7 @@ where
             &schema,
             &column_buffer_max_lens,
             batch_size,
+            replace_invalid_utf16,
             Arc::clone(&record_schema),
             &destination,
         )
@@ -2533,6 +2823,7 @@ fn arrow_fetch_partition<TS, E>(
     schema: &[TS],
     column_buffer_max_lens: &[usize],
     batch_size: usize,
+    replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     destination: &ArrowDestination,
 ) -> Result<(), E>
@@ -2562,7 +2853,13 @@ where
                 names.get(col_index).map(String::as_str),
                 schema.get(col_index).copied(),
             )?;
-            columns.push(schema[col_index].build_arrow_array::<E>(column, batch.num_rows())?);
+            columns.push(schema[col_index].build_arrow_array::<E>(
+                column,
+                batch.num_rows(),
+                col_index,
+                names.get(col_index).map(String::as_str),
+                replace_invalid_utf16,
+            )?);
         }
         let record_batch = RecordBatch::try_new(Arc::clone(&arrow_schema), columns)
             .map_err(anyhow::Error::from)?;

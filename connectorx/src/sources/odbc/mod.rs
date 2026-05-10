@@ -11,7 +11,10 @@ use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
     sources::{
-        odbc_common::{is_raw_odbc_conn_string, is_valid_odbc_key, push_odbc_pair},
+        odbc_common::{
+            connection_bool_param, is_connector_option_key, is_raw_odbc_conn_string,
+            is_valid_odbc_key, push_odbc_pair, url_bool_param, REPLACE_INVALID_UTF16_PARAM,
+        },
         odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
         Source, SourcePartition,
     },
@@ -42,6 +45,7 @@ pub struct OdbcOptions {
     pub batch_size: usize,
     pub max_str_len: usize,
     pub unknown_type_fallback_to_varchar: bool,
+    pub replace_invalid_utf16: bool,
 }
 
 impl OdbcOptions {
@@ -52,6 +56,7 @@ impl OdbcOptions {
                 .unwrap_or(ODBC_DEFAULT_MAX_STR_LEN),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(ODBC_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
+            replace_invalid_utf16: false,
         }
     }
 }
@@ -62,6 +67,7 @@ impl Default for OdbcOptions {
             batch_size: ODBC_DEFAULT_BATCH_SIZE,
             max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
             unknown_type_fallback_to_varchar: false,
+            replace_invalid_utf16: false,
         }
     }
 }
@@ -76,6 +82,7 @@ pub struct OdbcSource {
     batch_size: usize,
     max_str_len: usize,
     unknown_type_fallback_to_varchar: bool,
+    replace_invalid_utf16: bool,
 }
 
 impl OdbcSource {
@@ -86,6 +93,8 @@ impl OdbcSource {
 
     #[throws(OdbcSourceError)]
     pub fn with_options(conn: &str, _nconn: usize, options: OdbcOptions) -> Self {
+        let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
+            .unwrap_or(options.replace_invalid_utf16);
         Self {
             conn: odbc_conn_string(conn)?,
             origin_query: None,
@@ -96,6 +105,7 @@ impl OdbcSource {
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
+            replace_invalid_utf16,
         }
     }
 
@@ -187,6 +197,7 @@ where
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
+                    self.replace_invalid_utf16,
                 )
             })
             .collect()
@@ -202,6 +213,7 @@ pub struct OdbcSourcePartition {
     nrows: usize,
     ncols: usize,
     batch_size: usize,
+    replace_invalid_utf16: bool,
 }
 
 impl OdbcSourcePartition {
@@ -212,6 +224,7 @@ impl OdbcSourcePartition {
         schema: &[OdbcTypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
+        replace_invalid_utf16: bool,
     ) -> Self {
         Self {
             conn,
@@ -222,6 +235,7 @@ impl OdbcSourcePartition {
             nrows: 0,
             ncols: schema.len(),
             batch_size,
+            replace_invalid_utf16,
         }
     }
 }
@@ -248,7 +262,12 @@ impl SourcePartition for OdbcSourcePartition {
                 .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
         )?;
         let cursor = cursor.bind_buffer(buffer)?;
-        OdbcSourceParser::new(cursor, Arc::clone(&self.names), Arc::clone(&self.schema))
+        OdbcSourceParser::new(
+            cursor,
+            Arc::clone(&self.names),
+            Arc::clone(&self.schema),
+            self.replace_invalid_utf16,
+        )
     }
 
     fn nrows(&self) -> usize {
@@ -269,6 +288,8 @@ pub(crate) fn odbc_get_arrow(
     let options = OdbcOptions::from_env();
     let conn_str = odbc_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
+    let replace_invalid_utf16 =
+        url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
     Ok(odbc_core::odbc_get_arrow_impl::<
         OdbcTypeSystem,
         OdbcSourceError,
@@ -278,6 +299,7 @@ pub(crate) fn odbc_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
+        replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             OdbcTypeSystem::from_odbc(
                 data_type,
@@ -303,6 +325,22 @@ impl OdbcCoreError for OdbcSourceError {
 
     fn parse_value(value: String, ty: &'static str) -> Self {
         Self::ParseValue { value, ty }
+    }
+
+    fn invalid_utf16(
+        source_name: &'static str,
+        column_name: Option<&str>,
+        row_index: usize,
+        byte_offset: usize,
+        surrogate: u16,
+    ) -> Self {
+        Self::InvalidUtf16 {
+            source_name,
+            column_name: column_name.unwrap_or("<unknown>").to_string(),
+            row_index,
+            byte_offset,
+            surrogate,
+        }
     }
 }
 
@@ -464,10 +502,12 @@ pub fn odbc_conn_string(conn: &str) -> String {
         push_odbc_pair(&mut ret, "PWD", &password);
     }
     for (key, value) in &params {
-        if !matches!(
-            key.to_ascii_lowercase().as_str(),
-            "driver" | "dsn" | "server_key" | "cxprotocol"
-        ) {
+        if !is_connector_option_key(key)
+            && !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "driver" | "dsn" | "server_key"
+            )
+        {
             if !is_valid_odbc_key(key) {
                 throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
             }
@@ -498,6 +538,7 @@ mod tests {
                 batch_size: 2,
                 max_str_len: 8,
                 unknown_type_fallback_to_varchar: true,
+                replace_invalid_utf16: true,
             },
         )
         .unwrap();
@@ -508,6 +549,7 @@ mod tests {
                 batch_size: 32,
                 max_str_len: 4096,
                 unknown_type_fallback_to_varchar: false,
+                replace_invalid_utf16: false,
             },
         )
         .unwrap();
@@ -515,9 +557,11 @@ mod tests {
         assert_eq!(small.batch_size, 2);
         assert_eq!(small.max_str_len, 8);
         assert!(small.unknown_type_fallback_to_varchar);
+        assert!(small.replace_invalid_utf16);
         assert_eq!(large.batch_size, 32);
         assert_eq!(large.max_str_len, 4096);
         assert!(!large.unknown_type_fallback_to_varchar);
+        assert!(!large.replace_invalid_utf16);
     }
 
     #[test]
@@ -528,7 +572,20 @@ mod tests {
                 batch_size: ODBC_DEFAULT_BATCH_SIZE,
                 max_str_len: ODBC_DEFAULT_MAX_STR_LEN,
                 unknown_type_fallback_to_varchar: false,
+                replace_invalid_utf16: false,
             }
         );
+    }
+
+    #[test]
+    fn replace_invalid_utf16_url_option_is_connector_only() {
+        let conn = "odbc://example.com/db?driver=PostgreSQL&replace_invalid_utf16=true";
+        assert_eq!(
+            odbc_conn_string(conn).unwrap(),
+            "Driver=PostgreSQL;Server=example.com;Database=db;"
+        );
+
+        let source = OdbcSource::with_options(conn, 1, OdbcOptions::default()).unwrap();
+        assert!(source.replace_invalid_utf16);
     }
 }
