@@ -370,31 +370,10 @@ impl<'r> Produce<'r, Option<Vec<u8>>> for SybaseSourceParser {
 }
 
 fn parse_hex_bytes(bytes: &[u8]) -> Result<Vec<u8>, SybaseSourceError> {
-    let bytes = odbc_core::trim_ascii(bytes);
-    if bytes.len() % 2 != 0 {
-        return Err(SybaseSourceError::ParseValue {
-            value: odbc_core::bytes_to_string(bytes),
-            ty: "hex bytes",
-        });
-    }
-
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let hi = hex_value(chunk[0]).ok_or_else(|| SybaseSourceError::ParseValue {
-                value: odbc_core::bytes_to_string(bytes),
-                ty: "hex bytes",
-            })?;
-            let lo = hex_value(chunk[1]).ok_or_else(|| SybaseSourceError::ParseValue {
-                value: odbc_core::bytes_to_string(bytes),
-                ty: "hex bytes",
-            })?;
-            Ok((hi << 4) | lo)
-        })
-        .collect()
+    parse_hex_bytes_generic::<SybaseSourceError>(bytes)
 }
 
-fn hex_value(byte: u8) -> Option<u8> {
+fn hex_nibble(byte: u8) -> Option<u8> {
     match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),
@@ -402,6 +381,20 @@ fn hex_value(byte: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(feature = "dst_arrow")]
+use {
+    arrow::array::{ArrayRef, LargeBinaryBuilder},
+    crate::{
+        destinations::arrow::ArrowTypeSystem,
+        sources::odbc_core::{
+            build_bool_array, build_date32_array, build_decimal_array, build_float32_array,
+            build_float64_array, build_int64_array, build_string_array, build_time64_micro_array,
+            build_timestamp_micro_array, require_nullable, OdbcArrowPolicy,
+        },
+    },
+    odbc_api::buffers::AnySlice,
+};
 
 pub(crate) fn fetch_i64_pair(conn: &str, query: &str) -> Result<(i64, i64), SybaseSourceError> {
     odbc_core::fetch_i64_pair::<SybaseSourceError>(conn, query)
@@ -425,7 +418,147 @@ pub(crate) fn sybase_get_arrow(
     )?)
 }
 
-odbc_core::impl_odbc_arrow_policy!(SybaseTypeSystem);
+/// Manual `OdbcArrowPolicy` for `SybaseTypeSystem`.
+///
+/// All variants are identical to the generic `impl_odbc_arrow_policy!` except
+/// `Binary`, which must hex-decode text buffers because FreeTDS surfaces binary
+/// values as ASCII hex strings (e.g. `"ABCD"` → `[0xAB, 0xCD]`).
+#[cfg(feature = "dst_arrow")]
+impl OdbcArrowPolicy for SybaseTypeSystem {
+    fn arrow_type(self) -> ArrowTypeSystem {
+        let nullable = OdbcTypePolicy::nullable(self);
+        match self {
+            SybaseTypeSystem::TinyInt(..)
+            | SybaseTypeSystem::SmallInt(..)
+            | SybaseTypeSystem::Int(..)
+            | SybaseTypeSystem::BigInt(..) => ArrowTypeSystem::Int64(nullable),
+            SybaseTypeSystem::Real(..) => ArrowTypeSystem::Float32(nullable),
+            SybaseTypeSystem::Double(..) => ArrowTypeSystem::Float64(nullable),
+            SybaseTypeSystem::Numeric(..) | SybaseTypeSystem::Decimal(..) => {
+                ArrowTypeSystem::Decimal(nullable)
+            }
+            SybaseTypeSystem::Bit(..) => ArrowTypeSystem::Boolean(nullable),
+            SybaseTypeSystem::Char(..)
+            | SybaseTypeSystem::Varchar(..)
+            | SybaseTypeSystem::Text(..) => ArrowTypeSystem::LargeUtf8(nullable),
+            SybaseTypeSystem::Binary(..) => ArrowTypeSystem::LargeBinary(nullable),
+            SybaseTypeSystem::Date(..) => ArrowTypeSystem::Date32(nullable),
+            SybaseTypeSystem::Time(..) => ArrowTypeSystem::Time64Micro(nullable),
+            SybaseTypeSystem::Timestamp(..) => ArrowTypeSystem::Date64Micro(nullable),
+        }
+    }
+
+    fn build_arrow_array<E: odbc_core::OdbcCoreError>(
+        self,
+        column: AnySlice<'_>,
+        nrows: usize,
+    ) -> Result<ArrayRef, E> {
+        let nullable = OdbcTypePolicy::nullable(self);
+        match self {
+            SybaseTypeSystem::TinyInt(..)
+            | SybaseTypeSystem::SmallInt(..)
+            | SybaseTypeSystem::Int(..)
+            | SybaseTypeSystem::BigInt(..) => build_int64_array(column, nrows, nullable),
+            SybaseTypeSystem::Real(..) => build_float32_array(column, nrows, nullable),
+            SybaseTypeSystem::Double(..) => build_float64_array(column, nrows, nullable),
+            SybaseTypeSystem::Numeric(..) | SybaseTypeSystem::Decimal(..) => {
+                build_decimal_array(column, nrows, nullable)
+            }
+            SybaseTypeSystem::Bit(..) => build_bool_array(column, nrows, nullable),
+            SybaseTypeSystem::Char(..)
+            | SybaseTypeSystem::Varchar(..)
+            | SybaseTypeSystem::Text(..) => build_string_array(column, nrows, nullable),
+            SybaseTypeSystem::Binary(..) => {
+                build_sybase_binary_array::<E>(column, nrows, nullable)
+            }
+            SybaseTypeSystem::Date(..) => build_date32_array(column, nrows, nullable),
+            SybaseTypeSystem::Time(..) => build_time64_micro_array(column, nrows, nullable),
+            SybaseTypeSystem::Timestamp(..) => build_timestamp_micro_array(column, nrows, nullable),
+        }
+    }
+}
+
+/// Build an Arrow `LargeBinaryArray` from a Sybase binary column.
+///
+/// FreeTDS typically surfaces `binary`/`varbinary` values through text buffers
+/// as ASCII hex strings (e.g. `"ABCD"` for the bytes `[0xAB, 0xCD]`).  True
+/// ODBC binary buffers (`AnySlice::Binary`) are passed through as-is.
+#[cfg(feature = "dst_arrow")]
+fn build_sybase_binary_array<E: odbc_core::OdbcCoreError>(
+    column: AnySlice<'_>,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = LargeBinaryBuilder::with_capacity(nrows, nrows * 8);
+    match column {
+        AnySlice::Binary(view) => {
+            // True binary buffer – append raw bytes directly.
+            for row_index in 0..nrows {
+                match view.get(row_index) {
+                    Some(bytes) => builder.append_value(bytes),
+                    None => {
+                        require_nullable::<E>(nullable, "Vec<u8>")?;
+                        builder.append_null();
+                    }
+                }
+            }
+        }
+        AnySlice::Text(view) => {
+            // Text buffer with hex-encoded binary data (FreeTDS behaviour).
+            for row_index in 0..nrows {
+                match view.get(row_index) {
+                    Some(hex_text) => {
+                        let decoded = parse_hex_bytes_generic::<E>(hex_text)?;
+                        builder.append_value(&decoded);
+                    }
+                    None => {
+                        require_nullable::<E>(nullable, "Vec<u8>")?;
+                        builder.append_null();
+                    }
+                }
+            }
+        }
+        other => {
+            // Fallback: try to obtain raw bytes from typed cells.
+            for row_index in 0..nrows {
+                use odbc_core::odbc_cell_from_column;
+                match odbc_cell_from_column(other, row_index) {
+                    Some(cell) => {
+                        let bytes = cell.try_bytes().ok_or_else(|| {
+                            crate::errors::ConnectorXError::cannot_produce::<Vec<u8>>(Some(
+                                "Sybase typed value cannot be converted to bytes".to_string(),
+                            ))
+                        })?;
+                        builder.append_value(bytes);
+                    }
+                    None => {
+                        require_nullable::<E>(nullable, "Vec<u8>")?;
+                        builder.append_null();
+                    }
+                }
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+/// Decode an ASCII hex byte string (e.g. `b"ABCD"`) into raw bytes (`[0xAB, 0xCD]`).
+fn parse_hex_bytes_generic<E: odbc_core::OdbcCoreError>(bytes: &[u8]) -> Result<Vec<u8>, E> {
+    let bytes = odbc_core::trim_ascii(bytes);
+    if bytes.len() % 2 != 0 {
+        return Err(E::parse_value(odbc_core::bytes_to_string(bytes), "hex bytes"));
+    }
+    bytes
+        .chunks_exact(2)
+        .map(|chunk| {
+            let hi = hex_nibble(chunk[0])
+                .ok_or_else(|| E::parse_value(odbc_core::bytes_to_string(bytes), "hex bytes"))?;
+            let lo = hex_nibble(chunk[1])
+                .ok_or_else(|| E::parse_value(odbc_core::bytes_to_string(bytes), "hex bytes"))?;
+            Ok((hi << 4) | lo)
+        })
+        .collect()
+}
 
 #[throws(SybaseSourceError)]
 pub fn sybase_conn_string(conn: &str) -> String {
@@ -498,5 +631,34 @@ mod tests {
                 max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
             }
         );
+    }
+
+    #[test]
+    fn parse_hex_bytes_decodes_ascii_hex() {
+        // "ABCD" should decode to [0xAB, 0xCD]
+        let result: Vec<u8> = parse_hex_bytes(b"ABCD").unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
+
+        // lowercase also works
+        let result: Vec<u8> = parse_hex_bytes(b"abcd").unwrap();
+        assert_eq!(result, vec![0xAB, 0xCD]);
+
+        // with whitespace padding
+        let result: Vec<u8> = parse_hex_bytes(b"  0102  ").unwrap();
+        assert_eq!(result, vec![0x01, 0x02]);
+
+        // empty → empty
+        let result: Vec<u8> = parse_hex_bytes(b"").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_hex_bytes_rejects_odd_length() {
+        assert!(parse_hex_bytes(b"ABC").is_err());
+    }
+
+    #[test]
+    fn parse_hex_bytes_rejects_non_hex_chars() {
+        assert!(parse_hex_bytes(b"GG").is_err());
     }
 }

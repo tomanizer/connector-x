@@ -2360,21 +2360,21 @@ macro_rules! impl_odbc_arrow_policy {
                 use $crate::destinations::arrow::ArrowTypeSystem;
                 let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
                 match self {
-                    Self::TinyInt(_)
-                    | Self::SmallInt(_)
-                    | Self::Int(_)
-                    | Self::BigInt(_) => ArrowTypeSystem::Int64(nullable),
-                    Self::Real(_) => ArrowTypeSystem::Float32(nullable),
-                    Self::Double(_) => ArrowTypeSystem::Float64(nullable),
-                    Self::Numeric(_) | Self::Decimal(_) => ArrowTypeSystem::Decimal(nullable),
-                    Self::Bit(_) => ArrowTypeSystem::Boolean(nullable),
-                    Self::Char(_) | Self::Varchar(_) | Self::Text(_) => {
+                    Self::TinyInt(..)
+                    | Self::SmallInt(..)
+                    | Self::Int(..)
+                    | Self::BigInt(..) => ArrowTypeSystem::Int64(nullable),
+                    Self::Real(..) => ArrowTypeSystem::Float32(nullable),
+                    Self::Double(..) => ArrowTypeSystem::Float64(nullable),
+                    Self::Numeric(..) | Self::Decimal(..) => ArrowTypeSystem::Decimal(nullable),
+                    Self::Bit(..) => ArrowTypeSystem::Boolean(nullable),
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
                         ArrowTypeSystem::LargeUtf8(nullable)
                     }
-                    Self::Binary(_) => ArrowTypeSystem::LargeBinary(nullable),
-                    Self::Date(_) => ArrowTypeSystem::Date32(nullable),
-                    Self::Time(_) => ArrowTypeSystem::Time64Micro(nullable),
-                    Self::Timestamp(_) => ArrowTypeSystem::Date64Micro(nullable),
+                    Self::Binary(..) => ArrowTypeSystem::LargeBinary(nullable),
+                    Self::Date(..) => ArrowTypeSystem::Date32(nullable),
+                    Self::Time(..) => ArrowTypeSystem::Time64Micro(nullable),
+                    Self::Timestamp(..) => ArrowTypeSystem::Date64Micro(nullable),
                 }
             }
 
@@ -2391,23 +2391,23 @@ macro_rules! impl_odbc_arrow_policy {
                 };
                 let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
                 match self {
-                    Self::TinyInt(_)
-                    | Self::SmallInt(_)
-                    | Self::Int(_)
-                    | Self::BigInt(_) => build_int64_array(column, nrows, nullable),
-                    Self::Real(_) => build_float32_array(column, nrows, nullable),
-                    Self::Double(_) => build_float64_array(column, nrows, nullable),
-                    Self::Numeric(_) | Self::Decimal(_) => {
+                    Self::TinyInt(..)
+                    | Self::SmallInt(..)
+                    | Self::Int(..)
+                    | Self::BigInt(..) => build_int64_array(column, nrows, nullable),
+                    Self::Real(..) => build_float32_array(column, nrows, nullable),
+                    Self::Double(..) => build_float64_array(column, nrows, nullable),
+                    Self::Numeric(..) | Self::Decimal(..) => {
                         build_decimal_array(column, nrows, nullable)
                     }
-                    Self::Bit(_) => build_bool_array(column, nrows, nullable),
-                    Self::Char(_) | Self::Varchar(_) | Self::Text(_) => {
+                    Self::Bit(..) => build_bool_array(column, nrows, nullable),
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
                         build_string_array(column, nrows, nullable)
                     }
-                    Self::Binary(_) => build_binary_array(column, nrows, nullable),
-                    Self::Date(_) => build_date32_array(column, nrows, nullable),
-                    Self::Time(_) => build_time64_micro_array(column, nrows, nullable),
-                    Self::Timestamp(_) => build_timestamp_micro_array(column, nrows, nullable),
+                    Self::Binary(..) => build_binary_array(column, nrows, nullable),
+                    Self::Date(..) => build_date32_array(column, nrows, nullable),
+                    Self::Time(..) => build_time64_micro_array(column, nrows, nullable),
+                    Self::Timestamp(..) => build_timestamp_micro_array(column, nrows, nullable),
                 }
             }
         }
