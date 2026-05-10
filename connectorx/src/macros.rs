@@ -180,22 +180,36 @@ macro_rules! impl_transport {
         }
     };
 
-    (@cvtts [$TSS:tt, $TSD:tt] $( [$V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident] )*) => {
+    (@cvtts [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*) => {
         fn convert_typesystem(ts: Self::TSS) -> $crate::errors::Result<Self::TSD> {
-            match ts {
-                $(
-                    $TSS::$V1(true, ..) => Ok($TSD::$V2(true)),
-                    $TSS::$V1(false, ..) => Ok($TSD::$V2(false)),
-                )*
-                #[allow(unreachable_patterns)]
-                _ => fehler::throw!($crate::errors::ConnectorXError::NoConversionRule(
-                    format!("{:?}", ts), format!("{}", std::any::type_name::<Self::TSD>())
-                ))
-            }
+            $(
+                if let Some(ts) = impl_transport!(@cvtts_try [$TSS, $TSD] ts, $V1 [$T1] => $V2 [$T2] | conversion $HOW $(| preserve $P)?) {
+                    return Ok(ts);
+                }
+            )*
+            fehler::throw!($crate::errors::ConnectorXError::NoConversionRule(
+                format!("{:?}", ts), format!("{}", std::any::type_name::<Self::TSD>())
+            ))
         }
     };
 
-    (@process [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident ])*) => {
+    (@cvtts_try [$TSS:tt, $TSD:tt] $ts:ident, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident) => {
+        match $ts {
+            $TSS::$V1(true, ..) => Some($TSD::$V2(true)),
+            $TSS::$V1(false, ..) => Some($TSD::$V2(false)),
+            _ => None,
+        }
+    };
+
+    (@cvtts_try [$TSS:tt, $TSD:tt] $ts:ident, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve decimal) => {
+        match $ts {
+            $TSS::$V1(true, precision, scale) => Some($TSD::$V2(true, precision, scale)),
+            $TSS::$V1(false, precision, scale) => Some($TSD::$V2(false, precision, scale)),
+            _ => None,
+        }
+    };
+
+    (@process [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*) => {
         fn process<'s, 'd, 'r>(
             ts1: Self::TSS,
             ts2: Self::TSD,
@@ -204,16 +218,16 @@ macro_rules! impl_transport {
         ) -> Result<(), Self::Error> where Self: 'd {
             match (ts1, ts2) {
                 $(
-                    ($TSS::$V1(true, ..), $TSD::$V2(true)) => {
+                    ($TSS::$V1(true, ..), $TSD::$V2(true, ..)) => {
                         let val: Option<$T1> = $crate::sources::PartitionParser::parse(src)?;
-                        let val: Option<$T2> = <Self as TypeConversion<Option<$T1>, _>>::convert(val);
+                        let val: Option<$T2> = <Self as $crate::typesystem::TypeConversion<Option<$T1>, _>>::convert(val);
                         $crate::destinations::DestinationPartition::write(dst, val)?;
                         Ok(())
                     }
 
-                    ($TSS::$V1(false, ..), $TSD::$V2(false)) => {
+                    ($TSS::$V1(false, ..), $TSD::$V2(false, ..)) => {
                         let val: $T1 = $crate::sources::PartitionParser::parse(src)?;
-                        let val: $T2 = <Self as TypeConversion<$T1, _>>::convert(val);
+                        let val: $T2 = <Self as $crate::typesystem::TypeConversion<$T1, _>>::convert(val);
                         $crate::destinations::DestinationPartition::write(dst, val)?;
                         Ok(())
                     }
@@ -227,7 +241,7 @@ macro_rules! impl_transport {
         }
     };
 
-    (@processor [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident ])*, $([ $($TOKENS:tt)+ ])*) => {
+    (@processor [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*, $([ $($TOKENS:tt)+ ])*) => {
         fn processor<'s, 'd>(
             ts1: Self::TSS,
             ts2: Self::TSD,
@@ -239,11 +253,11 @@ macro_rules! impl_transport {
         > where Self: 'd {
             match (ts1, ts2) {
                 $(
-                    ($TSS::$V1(true, ..), $TSD::$V2(true)) => {
+                    ($TSS::$V1(true, ..), $TSD::$V2(true, ..)) => {
                         impl_transport!(@process_func_branch true [ $($TOKENS)+ ])
                     }
 
-                    ($TSS::$V1(false, ..), $TSD::$V2(false)) => {
+                    ($TSS::$V1(false, ..), $TSD::$V2(false, ..)) => {
                         impl_transport!(@process_func_branch false [ $($TOKENS)+ ])
                     }
                 )*
@@ -256,6 +270,9 @@ macro_rules! impl_transport {
         }
     };
 
+    (@process_func_branch $OPT:ident [ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident ]) => {
+        impl_transport!(@process_func_branch $OPT [ $V1 [$T1] => $V2 [$T2] | conversion $HOW ])
+    };
     (@process_func_branch $OPT:ident [ $V1:tt [&$L1:lifetime $T1:ty] => $V2:tt [&$L2:lifetime $T2:ty] | conversion $HOW:ident ]) => {
         impl_transport!(@process_func_branch $OPT &$T1, &$T2)
     };
@@ -281,6 +298,9 @@ macro_rules! impl_transport {
 
     // TypeConversion
     (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident) => {
+        impl_transport!(@cvt $HOW $TP, $T1, $T2);
+    };
+    (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident) => {
         impl_transport!(@cvt $HOW $TP, $T1, $T2);
     };
     (@cvt auto $TP:ty, $T1:ty, $T2:ty) => {

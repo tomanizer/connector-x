@@ -22,6 +22,7 @@ pub enum ArrowTypeSystem {
     Float32(bool),
     Float64(bool),
     Decimal(bool),
+    Decimal128(bool, u8, i8),
     Boolean(bool),
     LargeUtf8(bool),
     LargeBinary(bool),
@@ -56,7 +57,7 @@ impl_typesystem! {
         { UInt64          => u64                       }
         { Float32         => f32                       }
         { Float64         => f64                       }
-        { Decimal         => Decimal                   }
+        { Decimal | Decimal128 => Decimal              }
         { Boolean         => bool                      }
         { LargeUtf8       => String                    }
         { LargeBinary     => Vec<u8>                   }

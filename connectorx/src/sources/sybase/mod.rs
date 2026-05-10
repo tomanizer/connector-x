@@ -640,8 +640,9 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             | SybaseTypeSystem::BigInt(..) => ArrowTypeSystem::Int64(nullable),
             SybaseTypeSystem::Real(..) => ArrowTypeSystem::Float32(nullable),
             SybaseTypeSystem::Double(..) => ArrowTypeSystem::Float64(nullable),
-            SybaseTypeSystem::Numeric(..) | SybaseTypeSystem::Decimal(..) => {
-                ArrowTypeSystem::Decimal(nullable)
+            SybaseTypeSystem::Numeric(_, precision, scale)
+            | SybaseTypeSystem::Decimal(_, precision, scale) => {
+                ArrowTypeSystem::Decimal128(nullable, precision, scale)
             }
             SybaseTypeSystem::Bit(..) => ArrowTypeSystem::Boolean(nullable),
             SybaseTypeSystem::Char(..)

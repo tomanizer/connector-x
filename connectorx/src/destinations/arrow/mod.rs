@@ -12,7 +12,11 @@ use crate::constants::RECORD_BATCH_SIZE;
 use crate::data_order::DataOrder;
 use crate::typesystem::{Realize, TypeAssoc, TypeSystem};
 use anyhow::anyhow;
-use arrow::{datatypes::Schema, record_batch::RecordBatch};
+use arrow::{
+    array::Decimal128Builder,
+    datatypes::{DataType as ArrowDataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 use arrow_assoc::ArrowAssoc;
 use fehler::{throw, throws};
 use funcs::{FFinishBuilder, FNewBuilder, FNewField};
@@ -33,6 +37,27 @@ use {
 
 type Builder = Box<dyn Any + Send>;
 type Builders = Vec<Builder>;
+
+fn new_field(dt: ArrowTypeSystem, header: &str) -> Result<Field> {
+    match dt {
+        ArrowTypeSystem::Decimal128(nullable, precision, scale) => Ok(Field::new(
+            header,
+            ArrowDataType::Decimal128(precision, scale),
+            nullable,
+        )),
+        _ => Ok(Realize::<FNewField>::realize(dt)?(header)),
+    }
+}
+
+fn new_builder(dt: ArrowTypeSystem, nrows: usize) -> Result<Builder> {
+    match dt {
+        ArrowTypeSystem::Decimal128(_, precision, scale) => Ok(Box::new(
+            Decimal128Builder::with_capacity(nrows)
+                .with_data_type(ArrowDataType::Decimal128(precision, scale)),
+        ) as Builder),
+        _ => Ok(Realize::<FNewBuilder>::realize(dt)?(nrows)),
+    }
+}
 
 pub struct ArrowDestination {
     schema: Vec<ArrowTypeSystem>,
@@ -102,7 +127,7 @@ impl Destination for ArrowDestination {
             .schema
             .iter()
             .zip_eq(&self.names)
-            .map(|(&dt, h)| Ok(Realize::<FNewField>::realize(dt)?(h.as_str())))
+            .map(|(&dt, h)| new_field(dt, h.as_str()))
             .collect::<Result<Vec<_>>>()?;
         self.arrow_schema = Arc::new(Schema::new(fields));
     }
@@ -272,7 +297,7 @@ impl ArrowPartitionWriter {
         let builders = self
             .schema
             .iter()
-            .map(|dt| Ok(Realize::<FNewBuilder>::realize(*dt)?(self.batch_size)))
+            .map(|dt| new_builder(*dt, self.batch_size))
             .collect::<Result<Vec<_>>>()?;
         self.builders.replace(builders);
     }
@@ -339,11 +364,12 @@ where
         loop {
             match &mut self.builders {
                 Some(builders) => {
-                    <T as ArrowAssoc>::append(
+                    <T as ArrowAssoc>::append_with_typesystem(
                         builders[col]
                             .downcast_mut::<T::Builder>()
                             .ok_or_else(|| anyhow!("cannot cast arrow builder for append"))?,
                         value,
+                        self.schema[col],
                     )?;
                     break;
                 }
@@ -359,5 +385,47 @@ where
                 self.allocate()?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::destinations::DestinationPartition;
+    use arrow::array::{Array, Decimal128Array};
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn decimal128_uses_schema_precision_and_scale() {
+        let mut destination = ArrowDestination::new();
+        destination
+            .allocate(
+                1,
+                &["amount"],
+                &[ArrowTypeSystem::Decimal128(false, 18, 4)],
+                DataOrder::RowMajor,
+            )
+            .unwrap();
+
+        {
+            let mut partitions = destination.partition(1).unwrap();
+            let mut partition = partitions.pop().unwrap();
+            partition.write(Decimal::new(1_234_567, 4)).unwrap();
+            partition.finalize().unwrap();
+        }
+
+        let mut batches = destination.arrow().unwrap();
+        assert_eq!(batches.len(), 1);
+        let batch = batches.pop().unwrap();
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            &ArrowDataType::Decimal128(18, 4)
+        );
+        let amount = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Decimal128Array>()
+            .unwrap();
+        assert_eq!(amount.value(0), 1_234_567);
     }
 }

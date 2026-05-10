@@ -144,7 +144,11 @@ fn test_db2_arrow_decimal_timestamp() {
         .as_any()
         .downcast_ref::<Decimal128Array>()
         .unwrap();
-    assert_eq!(amount.value(0), 1_234_567_000_000);
+    assert_eq!(
+        rb.schema().field(0).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 4)
+    );
+    assert_eq!(amount.value(0), 1_234_567);
 
     let created_at = rb
         .column(1)
@@ -336,14 +340,22 @@ fn test_db2_arrow_date_decimal_and_text_variants() {
         .as_any()
         .downcast_ref::<Decimal128Array>()
         .unwrap();
-    assert_eq!(decimal_v.value(0), 1_234_500_000_000);
+    assert_eq!(
+        rb.schema().field(2).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 2)
+    );
+    assert_eq!(decimal_v.value(0), 12_345);
 
     let small_decimal_v = rb
         .column(3)
         .as_any()
         .downcast_ref::<Decimal128Array>()
         .unwrap();
-    assert_eq!(small_decimal_v.value(0), -123_400_000_000);
+    assert_eq!(
+        rb.schema().field(3).data_type(),
+        &arrow::datatypes::DataType::Decimal128(9, 2)
+    );
+    assert_eq!(small_decimal_v.value(0), -1_234);
 
     let char_v = rb.column(4).as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!(char_v.value(0).trim_end(), "xy");
