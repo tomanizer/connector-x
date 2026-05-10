@@ -416,32 +416,55 @@ fn test_odbc_testcontainer_streaming_supports_distinct_source_options() {
     }
 
     let conn = test_db::postgres_odbc_conn();
-    let queries = [CXQuery::naked(
-        "select long_text from cx_odbc_edge where id = 1",
-    )];
+    let queries = [CXQuery::naked("select repeat('x', 16) as long_text")];
 
-    for max_str_len in [4, 128] {
-        let source = OdbcSource::with_options(
-            &conn,
-            1,
-            OdbcOptions {
-                batch_size: 1024,
-                max_str_len,
-            },
-        )
+    let small_source = OdbcSource::with_options(
+        &conn,
+        1,
+        OdbcOptions {
+            batch_size: 1024,
+            max_str_len: 4,
+        },
+    )
+    .unwrap();
+    let mut small_destination = ArrowDestination::new();
+    let small_dispatcher = Dispatcher::<_, _, OdbcArrowTransport>::new(
+        small_source,
+        &mut small_destination,
+        &queries,
+        None,
+    );
+    let err = small_dispatcher.run().unwrap_err();
+    assert!(
+        err.to_string().contains("increase ODBC_MAX_STR_LEN"),
+        "{}",
+        err
+    );
+
+    let large_source = OdbcSource::with_options(
+        &conn,
+        1,
+        OdbcOptions {
+            batch_size: 1024,
+            max_str_len: 128,
+        },
+    )
+    .unwrap();
+    let mut large_destination = ArrowDestination::new();
+    let large_dispatcher = Dispatcher::<_, _, OdbcArrowTransport>::new(
+        large_source,
+        &mut large_destination,
+        &queries,
+        None,
+    );
+    large_dispatcher.run().unwrap();
+
+    let mut batches = large_destination.arrow().unwrap();
+    let batch = batches.pop().unwrap();
+    let long_text = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
         .unwrap();
-        let mut destination = ArrowDestination::new();
-        let dispatcher =
-            Dispatcher::<_, _, OdbcArrowTransport>::new(source, &mut destination, &queries, None);
-        dispatcher.run().unwrap();
-
-        let mut batches = destination.arrow().unwrap();
-        let batch = batches.pop().unwrap();
-        let long_text = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(long_text.value(0).len(), 64);
-    }
+    assert_eq!(long_text.value(0), "xxxxxxxxxxxxxxxx");
 }

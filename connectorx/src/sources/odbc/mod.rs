@@ -66,7 +66,9 @@ pub type OdbcSourceParser = odbc_core::OdbcParser<OdbcTypeSystem, OdbcSourceErro
 
 #[derive(Debug, Clone, Copy)]
 pub struct OdbcOptions {
+    /// Number of rows fetched per ODBC batch.
     pub batch_size: usize,
+    /// Fallback max text/binary buffer length when column metadata does not provide a bound.
     pub max_str_len: usize,
 }
 
