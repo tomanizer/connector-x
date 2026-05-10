@@ -277,8 +277,8 @@ impl OdbcTypePolicy for SybaseTypeSystem {
             | SybaseTypeSystem::BigInt(nullable)
             | SybaseTypeSystem::Real(nullable)
             | SybaseTypeSystem::Double(nullable)
-            | SybaseTypeSystem::Numeric(nullable)
-            | SybaseTypeSystem::Decimal(nullable)
+            | SybaseTypeSystem::Numeric(nullable, ..)
+            | SybaseTypeSystem::Decimal(nullable, ..)
             | SybaseTypeSystem::Bit(nullable)
             | SybaseTypeSystem::Char(nullable)
             | SybaseTypeSystem::Varchar(nullable)
@@ -300,8 +300,8 @@ impl OdbcTypePolicy for SybaseTypeSystem {
             SybaseTypeSystem::Real(_) => BufferDesc::F32 { nullable },
             SybaseTypeSystem::Double(_) => BufferDesc::F64 { nullable },
             SybaseTypeSystem::Bit(_) => BufferDesc::Bit { nullable },
-            SybaseTypeSystem::Numeric(_)
-            | SybaseTypeSystem::Decimal(_)
+            SybaseTypeSystem::Numeric(..)
+            | SybaseTypeSystem::Decimal(..)
             | SybaseTypeSystem::Char(_)
             | SybaseTypeSystem::Varchar(_)
             | SybaseTypeSystem::Text(_)
@@ -393,6 +393,7 @@ use {
         },
     },
     arrow::array::{ArrayRef, LargeBinaryBuilder},
+    arrow::datatypes::{DataType as ArrowDataType, TimeUnit},
     odbc_api::buffers::AnySlice,
 };
 
@@ -451,6 +452,31 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
         }
     }
 
+    fn arrow_data_type(self) -> ArrowDataType {
+        match self {
+            SybaseTypeSystem::TinyInt(..)
+            | SybaseTypeSystem::SmallInt(..)
+            | SybaseTypeSystem::Int(..)
+            | SybaseTypeSystem::BigInt(..) => ArrowDataType::Int64,
+            SybaseTypeSystem::Real(..) => ArrowDataType::Float32,
+            SybaseTypeSystem::Double(..) => ArrowDataType::Float64,
+            SybaseTypeSystem::Numeric(_, precision, scale)
+            | SybaseTypeSystem::Decimal(_, precision, scale) => {
+                ArrowDataType::Decimal128(precision, scale)
+            }
+            SybaseTypeSystem::Bit(..) => ArrowDataType::Boolean,
+            SybaseTypeSystem::Char(..)
+            | SybaseTypeSystem::Varchar(..)
+            | SybaseTypeSystem::Text(..) => ArrowDataType::Utf8,
+            SybaseTypeSystem::Binary(..) => ArrowDataType::LargeBinary,
+            SybaseTypeSystem::Date(..) => ArrowDataType::Date32,
+            SybaseTypeSystem::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),
+            SybaseTypeSystem::Timestamp(..) => {
+                ArrowDataType::Timestamp(TimeUnit::Microsecond, None)
+            }
+        }
+    }
+
     fn build_arrow_array<E: odbc_core::OdbcCoreError>(
         self,
         column: AnySlice<'_>,
@@ -464,8 +490,9 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             | SybaseTypeSystem::BigInt(..) => build_int64_array(column, nrows, nullable),
             SybaseTypeSystem::Real(..) => build_float32_array(column, nrows, nullable),
             SybaseTypeSystem::Double(..) => build_float64_array(column, nrows, nullable),
-            SybaseTypeSystem::Numeric(..) | SybaseTypeSystem::Decimal(..) => {
-                build_decimal_array(column, nrows, nullable)
+            SybaseTypeSystem::Numeric(_, precision, scale)
+            | SybaseTypeSystem::Decimal(_, precision, scale) => {
+                build_decimal_array(column, nrows, nullable, precision, scale)
             }
             SybaseTypeSystem::Bit(..) => build_bool_array(column, nrows, nullable),
             SybaseTypeSystem::Char(..)

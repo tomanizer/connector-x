@@ -275,8 +275,8 @@ impl OdbcTypePolicy for Db2TypeSystem {
             | Db2TypeSystem::BigInt(nullable)
             | Db2TypeSystem::Real(nullable)
             | Db2TypeSystem::Double(nullable)
-            | Db2TypeSystem::Numeric(nullable)
-            | Db2TypeSystem::Decimal(nullable)
+            | Db2TypeSystem::Numeric(nullable, ..)
+            | Db2TypeSystem::Decimal(nullable, ..)
             | Db2TypeSystem::Bit(nullable)
             | Db2TypeSystem::Char(nullable)
             | Db2TypeSystem::Varchar(nullable)
@@ -298,8 +298,8 @@ impl OdbcTypePolicy for Db2TypeSystem {
             Db2TypeSystem::Real(_) => BufferDesc::F32 { nullable },
             Db2TypeSystem::Double(_) => BufferDesc::F64 { nullable },
             Db2TypeSystem::Bit(_) => BufferDesc::Bit { nullable },
-            Db2TypeSystem::Numeric(_)
-            | Db2TypeSystem::Decimal(_)
+            Db2TypeSystem::Numeric(..)
+            | Db2TypeSystem::Decimal(..)
             | Db2TypeSystem::Char(_)
             | Db2TypeSystem::Varchar(_)
             | Db2TypeSystem::Text(_) => BufferDesc::Text { max_str_len },

@@ -471,3 +471,59 @@ fn verify_arrow_results(mut result: Vec<RecordBatch>) {
         .unwrap()
         .eq(&StringArray::from(vec!["alpha", "beta"])));
 }
+
+/// Test that `get_arrow` (which routes through `sybase_get_arrow`) preserves the exact
+/// Arrow schema precision and scale for NUMERIC/DECIMAL columns.
+///
+/// This test requires a live Sybase ODBC connection specified via `SYBASE_URL`.
+/// It is skipped silently when the environment variable is not set.
+#[test]
+fn test_sybase_fast_path_decimal_precision_and_scale() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = sybase_url() else {
+        eprintln!("CONNECTORX_SKIP: skipping Sybase fast-path decimal test: SYBASE_URL is not set");
+        return;
+    };
+
+    // Two NUMERIC columns with different precision/scale, and one DECIMAL.
+    let queries = [CXQuery::naked(
+        "select convert(numeric(18,4), 123.4567) as n18_4, \
+         convert(decimal(18,4), 123.4567) as d18_4",
+    )];
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+
+    let schema = rb.schema();
+
+    // --- n18_4: NUMERIC(18,4) ---
+    assert_eq!(
+        schema.field(0).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 4),
+        "n18_4 field should be Decimal128(18, 4)"
+    );
+    let n18_4 = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(n18_4.value(0), 1_234_567); // 123.4567 * 10^4
+
+    // --- d18_4: DECIMAL(18,4) ---
+    assert_eq!(
+        schema.field(1).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 4),
+        "d18_4 field should be Decimal128(18, 4)"
+    );
+    let d18_4 = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(d18_4.value(0), 1_234_567); // 123.4567 * 10^4
+}

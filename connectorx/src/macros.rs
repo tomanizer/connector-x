@@ -63,7 +63,7 @@ macro_rules! impl_typesystem {
             fn check(ts: $TS) -> $crate::errors::Result<()> {
                 match ts {
                     $(
-                        $TS::$V(false) => Ok(()),
+                        $TS::$V(false, ..) => Ok(()),
                     )+
                     _ => fehler::throw!($crate::errors::ConnectorXError::TypeCheckFailed(format!("{:?}", ts), std::any::type_name::<$NT>()))
                 }
@@ -74,7 +74,7 @@ macro_rules! impl_typesystem {
             fn check(ts: $TS) -> $crate::errors::Result<()> {
                 match ts {
                     $(
-                        $TS::$V(true) => Ok(()),
+                        $TS::$V(true, ..) => Ok(()),
                     )+
                     _ => fehler::throw!($crate::errors::ConnectorXError::TypeCheckFailed(format!("{:?}", ts), std::any::type_name::<$NT>()))
                 }
@@ -93,10 +93,10 @@ macro_rules! impl_typesystem {
                 match self {
                     $(
                         $(
-                            $TS::$V(false) => Ok(F::realize::<$NT>()),
+                            $TS::$V(false, ..) => Ok(F::realize::<$NT>()),
                         )+
                         $(
-                            $TS::$V(true) => Ok(F::realize::<Option<$NT>>()),
+                            $TS::$V(true, ..) => Ok(F::realize::<Option<$NT>>()),
                         )+
                     )+
                 }
@@ -184,8 +184,8 @@ macro_rules! impl_transport {
         fn convert_typesystem(ts: Self::TSS) -> $crate::errors::Result<Self::TSD> {
             match ts {
                 $(
-                    $TSS::$V1(true) => Ok($TSD::$V2(true)),
-                    $TSS::$V1(false) => Ok($TSD::$V2(false)),
+                    $TSS::$V1(true, ..) => Ok($TSD::$V2(true)),
+                    $TSS::$V1(false, ..) => Ok($TSD::$V2(false)),
                 )*
                 #[allow(unreachable_patterns)]
                 _ => fehler::throw!($crate::errors::ConnectorXError::NoConversionRule(
@@ -204,14 +204,14 @@ macro_rules! impl_transport {
         ) -> Result<(), Self::Error> where Self: 'd {
             match (ts1, ts2) {
                 $(
-                    ($TSS::$V1(true), $TSD::$V2(true)) => {
+                    ($TSS::$V1(true, ..), $TSD::$V2(true)) => {
                         let val: Option<$T1> = $crate::sources::PartitionParser::parse(src)?;
                         let val: Option<$T2> = <Self as TypeConversion<Option<$T1>, _>>::convert(val);
                         $crate::destinations::DestinationPartition::write(dst, val)?;
                         Ok(())
                     }
 
-                    ($TSS::$V1(false), $TSD::$V2(false)) => {
+                    ($TSS::$V1(false, ..), $TSD::$V2(false)) => {
                         let val: $T1 = $crate::sources::PartitionParser::parse(src)?;
                         let val: $T2 = <Self as TypeConversion<$T1, _>>::convert(val);
                         $crate::destinations::DestinationPartition::write(dst, val)?;
@@ -239,11 +239,11 @@ macro_rules! impl_transport {
         > where Self: 'd {
             match (ts1, ts2) {
                 $(
-                    ($TSS::$V1(true), $TSD::$V2(true)) => {
+                    ($TSS::$V1(true, ..), $TSD::$V2(true)) => {
                         impl_transport!(@process_func_branch true [ $($TOKENS)+ ])
                     }
 
-                    ($TSS::$V1(false), $TSD::$V2(false)) => {
+                    ($TSS::$V1(false, ..), $TSD::$V2(false)) => {
                         impl_transport!(@process_func_branch false [ $($TOKENS)+ ])
                     }
                 )*
