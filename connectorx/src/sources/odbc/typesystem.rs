@@ -1,9 +1,15 @@
+use anyhow::Result;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use log::warn;
 use odbc_api::{DataType, Nullability};
 use rust_decimal::Decimal;
 
-use crate::constants::{DEFAULT_ARROW_DECIMAL_PRECISION, DEFAULT_ARROW_DECIMAL_SCALE};
+use crate::{
+    constants::{DEFAULT_ARROW_DECIMAL_PRECISION, DEFAULT_ARROW_DECIMAL_SCALE},
+    sources::odbc_core::unknown_odbc_type_error,
+};
+
+pub(crate) const ODBC_UNKNOWN_TYPE_FALLBACK_ENV: &str = "ODBC_TYPE_FALLBACK_TO_VARCHAR";
 
 #[derive(Copy, Clone, Debug)]
 pub enum OdbcTypeSystem {
@@ -49,11 +55,16 @@ impl_typesystem! {
 }
 
 impl OdbcTypeSystem {
-    pub fn from_odbc(ty: DataType, nullability: Nullability) -> Self {
+    pub fn from_odbc(
+        ty: DataType,
+        nullability: Nullability,
+        column_name: &str,
+        unknown_type_fallback_to_varchar: bool,
+    ) -> Result<Self> {
         let nullable = nullability.could_be_nullable();
         use OdbcTypeSystem::*;
 
-        match ty {
+        Ok(match ty {
             DataType::TinyInt => TinyInt(nullable),
             DataType::SmallInt => SmallInt(nullable),
             DataType::Integer => Int(nullable),
@@ -77,8 +88,19 @@ impl OdbcTypeSystem {
             DataType::Date => Date(nullable),
             DataType::Time { .. } => Time(nullable),
             DataType::Timestamp { .. } => Timestamp(nullable),
-            DataType::Unknown | DataType::Other { .. } => Varchar(nullable),
-        }
+            DataType::Unknown | DataType::Other { .. } if unknown_type_fallback_to_varchar => {
+                Varchar(nullable)
+            }
+            DataType::Unknown | DataType::Other { .. } => {
+                return Err(unknown_odbc_type_error(
+                    "Odbc",
+                    ODBC_UNKNOWN_TYPE_FALLBACK_ENV,
+                    column_name,
+                    ty,
+                    nullability,
+                ));
+            }
+        })
     }
 }
 
@@ -121,7 +143,8 @@ mod tests {
     #[test]
     fn maps_core_odbc_types_and_nullability() {
         assert!(matches!(
-            OdbcTypeSystem::from_odbc(DataType::Integer, Nullability::NoNulls),
+            OdbcTypeSystem::from_odbc(DataType::Integer, Nullability::NoNulls, "id", false)
+                .unwrap(),
             OdbcTypeSystem::Int(false)
         ));
         assert!(matches!(
@@ -130,8 +153,11 @@ mod tests {
                     precision: 18,
                     scale: 4
                 },
-                Nullability::Nullable
-            ),
+                Nullability::Nullable,
+                "amount",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Decimal(true, 18, 4)
         ));
         assert!(matches!(
@@ -140,35 +166,97 @@ mod tests {
                     precision: 31,
                     scale: 6
                 },
-                Nullability::NoNulls
-            ),
+                Nullability::NoNulls,
+                "balance",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Numeric(false, 31, 6)
         ));
         assert!(matches!(
-            OdbcTypeSystem::from_odbc(DataType::Float { precision: 24 }, Nullability::Unknown),
+            OdbcTypeSystem::from_odbc(
+                DataType::Float { precision: 24 },
+                Nullability::Unknown,
+                "approx_value",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Real(true)
         ));
         assert!(matches!(
-            OdbcTypeSystem::from_odbc(DataType::Float { precision: 53 }, Nullability::NoNulls),
+            OdbcTypeSystem::from_odbc(
+                DataType::Float { precision: 53 },
+                Nullability::NoNulls,
+                "double_value",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Double(false)
         ));
         assert!(matches!(
             OdbcTypeSystem::from_odbc(
                 DataType::LongVarbinary { length: None },
-                Nullability::Nullable
-            ),
+                Nullability::Nullable,
+                "payload",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Binary(true)
         ));
         assert!(matches!(
-            OdbcTypeSystem::from_odbc(DataType::Timestamp { precision: 6 }, Nullability::NoNulls),
+            OdbcTypeSystem::from_odbc(
+                DataType::Timestamp { precision: 6 },
+                Nullability::NoNulls,
+                "created_at",
+                false
+            )
+            .unwrap(),
             OdbcTypeSystem::Timestamp(false)
         ));
     }
 
     #[test]
-    fn falls_back_unknown_and_vendor_types_to_nullable_text() {
+    fn rejects_unknown_and_vendor_types_by_default() {
+        let error = OdbcTypeSystem::from_odbc(
+            DataType::Unknown,
+            Nullability::Unknown,
+            "unknown_col",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("source=Odbc"));
+        assert!(error.contains("column_name=unknown_col"));
+        assert!(error.contains(ODBC_UNKNOWN_TYPE_FALLBACK_ENV));
+
+        let error = OdbcTypeSystem::from_odbc(
+            DataType::Other {
+                data_type: SqlDataType(-9999),
+                column_size: None,
+                decimal_digits: 0,
+            },
+            Nullability::NoNulls,
+            "vendor_col",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("source=Odbc"));
+        assert!(error.contains("column_name=vendor_col"));
+        assert!(error.contains("odbc_type_code=-9999"));
+        assert!(error.contains("column_size=None"));
+        assert!(error.contains("decimal_digits=0"));
+        assert!(error.contains("nullability=NoNulls"));
+        assert!(error.contains(ODBC_UNKNOWN_TYPE_FALLBACK_ENV));
+    }
+
+    #[test]
+    fn allows_unknown_and_vendor_types_with_permissive_fallback() {
         assert!(matches!(
-            OdbcTypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown),
+            OdbcTypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown, "unknown_col", true)
+                .unwrap(),
             OdbcTypeSystem::Varchar(true)
         ));
         assert!(matches!(
@@ -178,8 +266,11 @@ mod tests {
                     column_size: None,
                     decimal_digits: 0,
                 },
-                Nullability::NoNulls
-            ),
+                Nullability::NoNulls,
+                "vendor_col",
+                true
+            )
+            .unwrap(),
             OdbcTypeSystem::Varchar(false)
         ));
     }

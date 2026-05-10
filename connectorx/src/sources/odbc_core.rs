@@ -5,7 +5,12 @@
 //! columnar batch parsing, primitive conversion, count, and partition helpers.
 
 use std::{
-    borrow::Cow, convert::TryFrom, fmt::Debug, marker::PhantomData, num::ParseFloatError, sync::Arc,
+    borrow::Cow,
+    convert::TryFrom,
+    fmt::Debug,
+    marker::PhantomData,
+    num::{NonZeroUsize, ParseFloatError},
+    sync::Arc,
 };
 
 use anyhow::anyhow;
@@ -706,7 +711,7 @@ pub(crate) fn fetch_metadata<T, E, F>(
 where
     E: OdbcCoreError,
     T: OdbcTypePolicy,
-    F: Fn(DataType, Nullability) -> T,
+    F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
     let mut cursor = execute_query::<E>(conn, query)?;
     let ncols = cursor.num_result_cols()?;
@@ -724,12 +729,13 @@ where
     let mut schema = Vec::with_capacity(ncols as usize);
     let mut buffer_max_lens = Vec::with_capacity(ncols as usize);
     for col in 1..=ncols {
-        names.push(cursor.col_name(col)?);
+        let column_name = cursor.col_name(col)?;
         let data_type = cursor.col_data_type(col)?;
         let nullability = cursor.col_nullability(col)?;
-        let ty = map_type(data_type, nullability);
+        let ty = map_type(data_type, nullability, &column_name)?;
         buffer_max_lens.push(ty.buffer_max_len(data_type, default_max_len));
         schema.push(ty);
+        names.push(column_name);
     }
 
     Ok((names, schema, buffer_max_lens))
@@ -1143,6 +1149,32 @@ where
 
 pub(crate) fn env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok()?.parse().ok()
+}
+
+pub(crate) fn env_bool(name: &str) -> Option<bool> {
+    match std::env::var(name).ok()?.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+pub(crate) fn unknown_odbc_type_error(
+    source_name: &'static str,
+    fallback_env: &'static str,
+    column_name: &str,
+    data_type: DataType,
+    nullability: Nullability,
+) -> anyhow::Error {
+    anyhow!(
+        "Unsupported ODBC type for source={source_name} column_name={column_name} \
+         odbc_type_code={} column_size={:?} decimal_digits={} nullability={:?}. \
+         Set {fallback_env}=true to fallback unknown/vendor-specific ODBC types to VARCHAR.",
+        data_type.data_type().0,
+        data_type.column_size().map(NonZeroUsize::get),
+        data_type.decimal_digits(),
+        nullability
+    )
 }
 
 pub(crate) fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -2453,7 +2485,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     queries: &[CXQuery<String>],
     max_str_len: usize,
     batch_size: usize,
-    map_type: impl Fn(DataType, Nullability) -> TS + Send + Sync,
+    map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<ArrowDestination, E>
 where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,

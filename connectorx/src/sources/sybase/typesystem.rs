@@ -1,9 +1,15 @@
+use anyhow::Result;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use log::warn;
 use odbc_api::{DataType, Nullability};
 use rust_decimal::Decimal;
 
-use crate::constants::{DEFAULT_ARROW_DECIMAL_PRECISION, DEFAULT_ARROW_DECIMAL_SCALE};
+use crate::{
+    constants::{DEFAULT_ARROW_DECIMAL_PRECISION, DEFAULT_ARROW_DECIMAL_SCALE},
+    sources::odbc_core::unknown_odbc_type_error,
+};
+
+pub(crate) const SYBASE_UNKNOWN_TYPE_FALLBACK_ENV: &str = "SYBASE_TYPE_FALLBACK_TO_VARCHAR";
 
 #[derive(Copy, Clone, Debug)]
 pub enum SybaseTypeSystem {
@@ -49,11 +55,16 @@ impl_typesystem! {
 }
 
 impl SybaseTypeSystem {
-    pub fn from_odbc(ty: DataType, nullability: Nullability) -> Self {
+    pub fn from_odbc(
+        ty: DataType,
+        nullability: Nullability,
+        column_name: &str,
+        unknown_type_fallback_to_varchar: bool,
+    ) -> Result<Self> {
         let nullable = nullability.could_be_nullable();
         use SybaseTypeSystem::*;
 
-        match ty {
+        Ok(match ty {
             DataType::TinyInt => TinyInt(nullable),
             DataType::SmallInt => SmallInt(nullable),
             DataType::Integer => Int(nullable),
@@ -79,8 +90,19 @@ impl SybaseTypeSystem {
             DataType::Timestamp { .. } => Timestamp(nullable),
             // FreeTDS reports ASE time and bigtime as the SQL Server TIME2 extension.
             DataType::Other { data_type, .. } if data_type.0 == -154 => Time(nullable),
-            DataType::Unknown | DataType::Other { .. } => Varchar(nullable),
-        }
+            DataType::Unknown | DataType::Other { .. } if unknown_type_fallback_to_varchar => {
+                Varchar(nullable)
+            }
+            DataType::Unknown | DataType::Other { .. } => {
+                return Err(unknown_odbc_type_error(
+                    "Sybase",
+                    SYBASE_UNKNOWN_TYPE_FALLBACK_ENV,
+                    column_name,
+                    ty,
+                    nullability,
+                ));
+            }
+        })
     }
 }
 
@@ -123,7 +145,8 @@ mod tests {
     #[test]
     fn maps_sybase_odbc_types_and_nullability() {
         assert!(matches!(
-            SybaseTypeSystem::from_odbc(DataType::SmallInt, Nullability::NoNulls),
+            SybaseTypeSystem::from_odbc(DataType::SmallInt, Nullability::NoNulls, "id", false)
+                .unwrap(),
             SybaseTypeSystem::SmallInt(false)
         ));
         assert!(matches!(
@@ -132,8 +155,11 @@ mod tests {
                     precision: 18,
                     scale: 4
                 },
-                Nullability::Nullable
-            ),
+                Nullability::Nullable,
+                "amount",
+                false
+            )
+            .unwrap(),
             SybaseTypeSystem::Decimal(true, 18, 4)
         ));
         assert!(matches!(
@@ -142,23 +168,36 @@ mod tests {
                     precision: 18,
                     scale: 4
                 },
-                Nullability::NoNulls
-            ),
+                Nullability::NoNulls,
+                "balance",
+                false
+            )
+            .unwrap(),
             SybaseTypeSystem::Numeric(false, 18, 4)
         ));
         assert!(matches!(
-            SybaseTypeSystem::from_odbc(DataType::Real, Nullability::Unknown),
+            SybaseTypeSystem::from_odbc(DataType::Real, Nullability::Unknown, "ratio", false)
+                .unwrap(),
             SybaseTypeSystem::Real(true)
         ));
         assert!(matches!(
-            SybaseTypeSystem::from_odbc(DataType::Binary { length: None }, Nullability::NoNulls),
+            SybaseTypeSystem::from_odbc(
+                DataType::Binary { length: None },
+                Nullability::NoNulls,
+                "payload",
+                false
+            )
+            .unwrap(),
             SybaseTypeSystem::Binary(false)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
                 DataType::Timestamp { precision: 3 },
-                Nullability::Nullable
-            ),
+                Nullability::Nullable,
+                "created_at",
+                false
+            )
+            .unwrap(),
             SybaseTypeSystem::Timestamp(true)
         ));
     }
@@ -172,12 +211,46 @@ mod tests {
                     column_size: None,
                     decimal_digits: 0,
                 },
-                Nullability::NoNulls
-            ),
+                Nullability::NoNulls,
+                "time_col",
+                false
+            )
+            .unwrap(),
             SybaseTypeSystem::Time(false)
         ));
+    }
+
+    #[test]
+    fn rejects_unknown_and_vendor_types_by_default() {
+        let error = SybaseTypeSystem::from_odbc(
+            DataType::Other {
+                data_type: SqlDataType(-9999),
+                column_size: None,
+                decimal_digits: 0,
+            },
+            Nullability::Nullable,
+            "vendor_col",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("source=Sybase"));
+        assert!(error.contains("column_name=vendor_col"));
+        assert!(error.contains("odbc_type_code=-9999"));
+        assert!(error.contains(SYBASE_UNKNOWN_TYPE_FALLBACK_ENV));
+    }
+
+    #[test]
+    fn allows_unknown_and_vendor_types_with_permissive_fallback() {
         assert!(matches!(
-            SybaseTypeSystem::from_odbc(DataType::Unknown, Nullability::Unknown),
+            SybaseTypeSystem::from_odbc(
+                DataType::Unknown,
+                Nullability::Unknown,
+                "unknown_col",
+                true
+            )
+            .unwrap(),
             SybaseTypeSystem::Varchar(true)
         ));
         assert!(matches!(
@@ -187,8 +260,11 @@ mod tests {
                     column_size: None,
                     decimal_digits: 0,
                 },
-                Nullability::Nullable
-            ),
+                Nullability::Nullable,
+                "vendor_col",
+                true
+            )
+            .unwrap(),
             SybaseTypeSystem::Varchar(true)
         ));
     }

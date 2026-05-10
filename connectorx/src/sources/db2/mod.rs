@@ -6,6 +6,7 @@ mod typesystem;
 pub use self::errors::Db2SourceError;
 pub use self::typesystem::Db2TypeSystem;
 
+use self::typesystem::DB2_UNKNOWN_TYPE_FALLBACK_ENV;
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
@@ -40,6 +41,7 @@ pub type Db2SourceParser = odbc_core::OdbcParser<Db2TypeSystem, Db2SourceError>;
 pub struct Db2Options {
     pub batch_size: usize,
     pub max_str_len: usize,
+    pub unknown_type_fallback_to_varchar: bool,
 }
 
 impl Db2Options {
@@ -48,6 +50,8 @@ impl Db2Options {
             batch_size: odbc_core::env_usize("DB2_BATCH_SIZE").unwrap_or(DB2_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(Db2TypeSystem::max_str_len_env())
                 .unwrap_or(DB2_DEFAULT_MAX_STR_LEN),
+            unknown_type_fallback_to_varchar: odbc_core::env_bool(DB2_UNKNOWN_TYPE_FALLBACK_ENV)
+                .unwrap_or(false),
         }
     }
 }
@@ -57,6 +61,7 @@ impl Default for Db2Options {
         Self {
             batch_size: DB2_DEFAULT_BATCH_SIZE,
             max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+            unknown_type_fallback_to_varchar: false,
         }
     }
 }
@@ -70,6 +75,7 @@ pub struct Db2Source {
     column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
+    unknown_type_fallback_to_varchar: bool,
 }
 
 impl Db2Source {
@@ -89,6 +95,7 @@ impl Db2Source {
             column_buffer_max_lens: vec![],
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
+            unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
         }
     }
 
@@ -127,12 +134,21 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = self.queries[0].to_string();
+        let unknown_type_fallback_to_varchar = self.unknown_type_fallback_to_varchar;
         let (names, schema, column_buffer_max_lens) =
             odbc_core::fetch_metadata::<Db2TypeSystem, Db2SourceError, _>(
                 &self.conn,
                 &first_query,
                 self.max_str_len,
-                Db2TypeSystem::from_odbc,
+                |data_type, nullability, column_name| {
+                    Db2TypeSystem::from_odbc(
+                        data_type,
+                        nullability,
+                        column_name,
+                        unknown_type_fallback_to_varchar,
+                    )
+                    .map_err(Into::into)
+                },
             )?;
         self.names = names;
         self.schema = schema;
@@ -363,6 +379,7 @@ pub(crate) fn db2_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
     let conn_str = db2_conn_string(&conn[..])?;
+    let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     Ok(odbc_core::odbc_get_arrow_impl::<
         Db2TypeSystem,
         Db2SourceError,
@@ -372,7 +389,15 @@ pub(crate) fn db2_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
-        Db2TypeSystem::from_odbc,
+        move |data_type, nullability, column_name| {
+            Db2TypeSystem::from_odbc(
+                data_type,
+                nullability,
+                column_name,
+                unknown_type_fallback_to_varchar,
+            )
+            .map_err(Into::into)
+        },
     )?)
 }
 
@@ -443,12 +468,14 @@ mod tests {
             Db2Options {
                 batch_size: 7,
                 max_str_len: 2048,
+                unknown_type_fallback_to_varchar: true,
             },
         )
         .unwrap();
 
         assert_eq!(source.batch_size, 7);
         assert_eq!(source.max_str_len, 2048);
+        assert!(source.unknown_type_fallback_to_varchar);
     }
 
     #[test]
@@ -458,6 +485,7 @@ mod tests {
             Db2Options {
                 batch_size: DB2_DEFAULT_BATCH_SIZE,
                 max_str_len: DB2_DEFAULT_MAX_STR_LEN,
+                unknown_type_fallback_to_varchar: false,
             }
         );
     }

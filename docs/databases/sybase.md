@@ -84,7 +84,9 @@ The ODBC path currently maps these Sybase/ASE types:
 
 ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.
 
-See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, unknown-type fallback, and truncation behavior.
+ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `SYBASE_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior. The known FreeTDS `TIME2` extension is still mapped to time.
+
+See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 
 ## Performance Tuning
 
@@ -94,6 +96,7 @@ The defaults are tuned for throughput over small memory use:
 
 * `SYBASE_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`.
+* `SYBASE_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
 Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
