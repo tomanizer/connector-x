@@ -102,11 +102,16 @@ Text, wide text, and binary buffers are checked after every fetch. If the ODBC d
 
 The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and text columns use text buffers for driver compatibility.
 
+ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and shares it across generic ODBC, Db2, and Sybase connections. Each active query still uses its own ODBC connection, but concurrent ODBC connections are capped per source instance so partitioned reads do not open unbounded connections.
+
 Tuning environment variables:
 
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `ODBC_MAX_CONNECTIONS`: maximum active ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `ODBC_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
+
+For URL-style generic ODBC, `max_connections=N` overrides `ODBC_MAX_CONNECTIONS` for that source instance and is not passed through to the ODBC driver.
 
 To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
 

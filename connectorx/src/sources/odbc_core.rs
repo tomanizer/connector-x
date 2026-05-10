@@ -10,7 +10,7 @@ use std::{
     fmt::Debug,
     marker::PhantomData,
     num::{NonZeroUsize, ParseFloatError},
-    sync::Arc,
+    sync::{Arc, Condvar, Mutex, MutexGuard},
 };
 
 use anyhow::anyhow;
@@ -20,7 +20,7 @@ use odbc_api::sys::{Date, Time, Timestamp};
 use odbc_api::{
     buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, Indicator, TextRowSet},
     environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl, DataType,
-    Nullability, ResultSetMetadata,
+    Environment, Nullability, ResultSetMetadata,
 };
 use rust_decimal::{Decimal, Error as DecimalParseError};
 use sqlparser::dialect::Dialect;
@@ -34,6 +34,73 @@ use crate::{
 
 pub(crate) type OdbcCursor = CursorImpl<StatementConnection<Connection<'static>>>;
 pub(crate) type OdbcBlockCursor = BlockCursor<OdbcCursor, ColumnarAnyBuffer>;
+
+#[derive(Debug)]
+pub(crate) struct OdbcConnectionLimiter {
+    max_connections: usize,
+    active_connections: Mutex<usize>,
+    available: Condvar,
+}
+
+#[derive(Debug)]
+pub(crate) struct OdbcConnectionPermit {
+    limiter: Arc<OdbcConnectionLimiter>,
+}
+
+impl OdbcConnectionLimiter {
+    pub(crate) fn new(max_connections: usize) -> Arc<Self> {
+        assert!(max_connections > 0);
+        Arc::new(Self {
+            max_connections,
+            active_connections: Mutex::new(0),
+            available: Condvar::new(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_connections(&self) -> usize {
+        self.max_connections
+    }
+
+    pub(crate) fn acquire(self: &Arc<Self>) -> OdbcConnectionPermit {
+        let mut active = self.lock_active_connections();
+        while *active >= self.max_connections {
+            active = self
+                .available
+                .wait(active)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *active += 1;
+        OdbcConnectionPermit {
+            limiter: Arc::clone(self),
+        }
+    }
+
+    fn lock_active_connections(&self) -> MutexGuard<'_, usize> {
+        self.active_connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for OdbcConnectionPermit {
+    fn drop(&mut self) {
+        let mut active = self.limiter.lock_active_connections();
+        *active = active.saturating_sub(1);
+        self.limiter.available.notify_one();
+    }
+}
+
+pub(crate) fn connection_limiter(
+    max_connections: Option<usize>,
+    default_max_connections: usize,
+) -> Result<Arc<OdbcConnectionLimiter>, anyhow::Error> {
+    let max_connections = max_connections.unwrap_or(default_max_connections.max(1));
+    if max_connections == 0 {
+        return Err(anyhow!("max_connections must be at least 1"));
+    }
+    Ok(OdbcConnectionLimiter::new(max_connections))
+}
 
 pub trait OdbcCoreError:
     From<ConnectorXError>
@@ -102,6 +169,7 @@ pub struct OdbcParser<TS, E> {
     current_cell: usize,
     is_finished: bool,
     replace_invalid_utf16: bool,
+    _connection_permit: OdbcConnectionPermit,
     _marker: PhantomData<(TS, E)>,
 }
 
@@ -115,6 +183,7 @@ where
         names: Arc<[String]>,
         schema: Arc<[TS]>,
         replace_invalid_utf16: bool,
+        connection_permit: OdbcConnectionPermit,
     ) -> Self {
         let ncols = schema.len();
         debug_assert_eq!(names.len(), ncols);
@@ -127,6 +196,7 @@ where
             current_cell: 0,
             is_finished: false,
             replace_invalid_utf16,
+            _connection_permit: connection_permit,
             _marker: PhantomData,
         }
     }
@@ -867,7 +937,7 @@ pub(crate) fn execute_query<E>(conn: &str, query: &str) -> Result<OdbcCursor, E>
 where
     E: OdbcCoreError,
 {
-    let env = environment()?;
+    let env = shared_environment::<E>()?;
     let connection = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
     Ok(connection
         .into_cursor(query, (), None)
@@ -875,10 +945,18 @@ where
         .ok_or_else(|| E::no_result_set(query.to_string()))?)
 }
 
+pub(crate) fn shared_environment<E>() -> Result<&'static Environment, E>
+where
+    E: OdbcCoreError,
+{
+    Ok(environment()?)
+}
+
 pub(crate) fn fetch_metadata<T, E, F>(
     conn: &str,
     query: &str,
     default_max_len: usize,
+    connection_limiter: &Arc<OdbcConnectionLimiter>,
     map_type: F,
 ) -> Result<(Vec<String>, Vec<T>, Vec<usize>), E>
 where
@@ -886,6 +964,7 @@ where
     T: OdbcTypePolicy,
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
+    let _connection_permit = connection_limiter.acquire();
     let mut cursor = execute_query::<E>(conn, query)?;
     let ncols = cursor.num_result_cols()?;
     if ncols < 0 {
@@ -914,20 +993,30 @@ where
     Ok((names, schema, buffer_max_lens))
 }
 
-pub(crate) fn fetch_count<E, D>(conn: &str, query: &str, dialect: &D) -> Result<usize, E>
+pub(crate) fn fetch_count<E, D>(
+    conn: &str,
+    query: &str,
+    dialect: &D,
+    connection_limiter: &Arc<OdbcConnectionLimiter>,
+) -> Result<usize, E>
 where
     E: OdbcCoreError,
     D: Dialect,
 {
     let cxq = CXQuery::Naked(query.to_string());
     let cquery = count_query(&cxq, dialect)?;
-    fetch_count_query(conn, cquery.as_str())
+    fetch_count_query(conn, cquery.as_str(), connection_limiter)
 }
 
-pub(crate) fn fetch_count_query<E>(conn: &str, query: &str) -> Result<usize, E>
+pub(crate) fn fetch_count_query<E>(
+    conn: &str,
+    query: &str,
+    connection_limiter: &Arc<OdbcConnectionLimiter>,
+) -> Result<usize, E>
 where
     E: OdbcCoreError,
 {
+    let _connection_permit = connection_limiter.acquire();
     let mut cursor = execute_query::<E>(conn, query)?;
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(64))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
@@ -947,6 +1036,8 @@ pub(crate) fn fetch_i64_pair<E>(
 where
     E: OdbcCoreError,
 {
+    let connection_limiter = OdbcConnectionLimiter::new(1);
+    let _connection_permit = connection_limiter.acquire();
     let mut cursor = execute_query::<E>(conn, query)?;
     let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(128))?;
     let mut cursor = cursor.bind_buffer(buffer)?;
@@ -1475,6 +1566,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
 
     #[derive(Copy, Clone, Debug)]
     enum TestType {
@@ -1638,6 +1730,31 @@ mod tests {
     fn compares_ascii_case_insensitively() {
         assert!(eq_ascii_ignore_case(b"TRUE", b"true"));
         assert!(!eq_ascii_ignore_case(b"truth", b"true"));
+    }
+
+    #[test]
+    fn connection_limiter_blocks_until_a_permit_is_released() {
+        let limiter = OdbcConnectionLimiter::new(1);
+        let permit = limiter.acquire();
+        let limiter_for_thread = Arc::clone(&limiter);
+        let (tx, rx) = mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let _permit = limiter_for_thread.acquire();
+            tx.send(()).unwrap();
+        });
+
+        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err());
+        drop(permit);
+        rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn connection_limiter_uses_query_count_default() {
+        assert_eq!(connection_limiter(None, 0).unwrap().max_connections(), 1);
+        assert_eq!(connection_limiter(None, 3).unwrap().max_connections(), 3);
+        assert_eq!(connection_limiter(Some(2), 8).unwrap().max_connections(), 2);
     }
 
     #[test]
@@ -2944,6 +3061,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     queries: &[CXQuery<String>],
     max_str_len: usize,
     batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
     replace_invalid_utf16: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<ArrowDestination, E>
@@ -2951,8 +3069,13 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
     E: OdbcCoreError + Send + 'static,
 {
-    let (names, schema, column_buffer_max_lens) =
-        fetch_metadata::<TS, E, _>(conn, &queries[0].to_string(), max_str_len, map_type)?;
+    let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+        conn,
+        &queries[0].to_string(),
+        max_str_len,
+        &connection_limiter,
+        map_type,
+    )?;
 
     let arrow_types: Vec<ArrowTypeSystem> = schema.iter().map(|&ty| ty.arrow_type()).collect();
     let fields = names
@@ -2977,6 +3100,7 @@ where
             &schema,
             &column_buffer_max_lens,
             batch_size,
+            Arc::clone(&connection_limiter),
             replace_invalid_utf16,
             Arc::clone(&record_schema),
             &destination,
@@ -2994,6 +3118,7 @@ fn arrow_fetch_partition<TS, E>(
     schema: &[TS],
     column_buffer_max_lens: &[usize],
     batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     destination: &ArrowDestination,
@@ -3002,6 +3127,7 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
     E: OdbcCoreError + Send,
 {
+    let _connection_permit = connection_limiter.acquire();
     let cursor = execute_query::<E>(conn, query)?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,

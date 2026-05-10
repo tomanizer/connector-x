@@ -100,9 +100,10 @@ The defaults are tuned for throughput over small memory use:
 
 * `SYBASE_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
 * `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`.
+* `SYBASE_MAX_CONNECTIONS`: maximum active Sybase ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `SYBASE_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
+Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking

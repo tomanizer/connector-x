@@ -12,7 +12,8 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{
-            connection_bool_param, is_raw_odbc_conn_string, odbc_conn_value, url_bool_param,
+            connection_bool_param, connection_usize_param, is_raw_odbc_conn_string,
+            odbc_conn_value, url_bool_param, url_usize_param, MAX_CONNECTIONS_PARAM,
             REPLACE_INVALID_UTF16_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcTypePolicy},
@@ -43,6 +44,7 @@ pub type SybaseSourceParser = odbc_core::OdbcParser<SybaseTypeSystem, SybaseSour
 pub struct SybaseOptions {
     pub batch_size: usize,
     pub max_str_len: usize,
+    pub max_connections: Option<usize>,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
 }
@@ -54,6 +56,7 @@ impl SybaseOptions {
                 .unwrap_or(SYBASE_DEFAULT_BATCH_SIZE),
             max_str_len: odbc_core::env_usize(SybaseTypeSystem::max_str_len_env())
                 .unwrap_or(SYBASE_DEFAULT_MAX_STR_LEN),
+            max_connections: odbc_core::env_usize("SYBASE_MAX_CONNECTIONS"),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(SYBASE_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
@@ -66,6 +69,7 @@ impl Default for SybaseOptions {
         Self {
             batch_size: SYBASE_DEFAULT_BATCH_SIZE,
             max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
+            max_connections: None,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
         }
@@ -81,6 +85,7 @@ pub struct SybaseSource {
     column_buffer_max_lens: Vec<usize>,
     batch_size: usize,
     max_str_len: usize,
+    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     unknown_type_fallback_to_varchar: bool,
     replace_invalid_utf16: bool,
 }
@@ -92,9 +97,12 @@ impl SybaseSource {
     }
 
     #[throws(SybaseSourceError)]
-    pub fn with_options(conn: &str, _nconn: usize, options: SybaseOptions) -> Self {
+    pub fn with_options(conn: &str, nconn: usize, options: SybaseOptions) -> Self {
         let replace_invalid_utf16 = connection_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?
             .unwrap_or(options.replace_invalid_utf16);
+        let max_connections =
+            connection_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+        let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
         Self {
             conn: sybase_conn_string(conn)?,
             origin_query: None,
@@ -104,6 +112,7 @@ impl SybaseSource {
             column_buffer_max_lens: vec![],
             batch_size: options.batch_size,
             max_str_len: options.max_str_len,
+            connection_limiter,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
             replace_invalid_utf16,
         }
@@ -151,6 +160,7 @@ where
                 &self.conn,
                 &first_query,
                 self.max_str_len,
+                &self.connection_limiter,
                 |data_type, nullability, column_name| {
                     SybaseTypeSystem::from_odbc(
                         data_type,
@@ -173,6 +183,7 @@ where
                 &self.conn,
                 q,
                 &MsSqlDialect {},
+                &self.connection_limiter,
             )?),
             None => None,
         }
@@ -198,6 +209,7 @@ where
                     &self.schema,
                     &self.column_buffer_max_lens,
                     self.batch_size,
+                    Arc::clone(&self.connection_limiter),
                     self.replace_invalid_utf16,
                 )
             })
@@ -214,17 +226,19 @@ pub struct SybaseSourcePartition {
     nrows: usize,
     ncols: usize,
     batch_size: usize,
+    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     replace_invalid_utf16: bool,
 }
 
 impl SybaseSourcePartition {
-    pub fn new(
+    pub(crate) fn new(
         conn: String,
         query: &CXQuery<String>,
         names: &[String],
         schema: &[SybaseTypeSystem],
         column_buffer_max_lens: &[usize],
         batch_size: usize,
+        connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
         replace_invalid_utf16: bool,
     ) -> Self {
         Self {
@@ -236,6 +250,7 @@ impl SybaseSourcePartition {
             nrows: 0,
             ncols: schema.len(),
             batch_size,
+            connection_limiter,
             replace_invalid_utf16,
         }
     }
@@ -249,12 +264,16 @@ impl SourcePartition for SybaseSourcePartition {
     #[throws(SybaseSourceError)]
     fn result_rows(&mut self) {
         let cquery = count_query(&self.query, &MsSqlDialect {})?;
-        self.nrows =
-            odbc_core::fetch_count_query::<SybaseSourceError>(&self.conn, cquery.as_str())?;
+        self.nrows = odbc_core::fetch_count_query::<SybaseSourceError>(
+            &self.conn,
+            cquery.as_str(),
+            &self.connection_limiter,
+        )?;
     }
 
     #[throws(SybaseSourceError)]
     fn parser(&mut self) -> Self::Parser<'_> {
+        let connection_permit = self.connection_limiter.acquire();
         let cursor = SybaseSource::execute_query(&self.conn, self.query.as_str())?;
         let buffer = ColumnarAnyBuffer::try_from_descs(
             self.batch_size,
@@ -269,6 +288,7 @@ impl SourcePartition for SybaseSourcePartition {
             Arc::clone(&self.names),
             Arc::clone(&self.schema),
             self.replace_invalid_utf16,
+            connection_permit,
         )
     }
 
@@ -488,6 +508,8 @@ pub(crate) fn sybase_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 =
         url_bool_param(conn, REPLACE_INVALID_UTF16_PARAM)?.unwrap_or(options.replace_invalid_utf16);
+    let max_connections = url_usize_param(conn, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         SybaseTypeSystem,
         SybaseSourceError,
@@ -497,6 +519,7 @@ pub(crate) fn sybase_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
+        connection_limiter,
         replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             SybaseTypeSystem::from_odbc(
@@ -752,6 +775,7 @@ mod tests {
             SybaseOptions {
                 batch_size: 9,
                 max_str_len: 8192,
+                max_connections: Some(2),
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
             },
@@ -760,6 +784,7 @@ mod tests {
 
         assert_eq!(source.batch_size, 9);
         assert_eq!(source.max_str_len, 8192);
+        assert_eq!(source.connection_limiter.max_connections(), 2);
         assert!(source.unknown_type_fallback_to_varchar);
         assert!(source.replace_invalid_utf16);
     }
@@ -771,6 +796,7 @@ mod tests {
             SybaseOptions {
                 batch_size: SYBASE_DEFAULT_BATCH_SIZE,
                 max_str_len: SYBASE_DEFAULT_MAX_STR_LEN,
+                max_connections: None,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
             }
@@ -780,7 +806,7 @@ mod tests {
     #[test]
     fn replace_invalid_utf16_url_option_is_connector_only() {
         let conn =
-            "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&replace_invalid_utf16=true";
+            "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&replace_invalid_utf16=true&max_connections=3";
         assert_eq!(
             sybase_conn_string(conn).unwrap(),
             "Driver={FreeTDS};Server={127.0.0.1};Port=5000;TDS_Version={5.0};UID={sa};PWD={sybase};Database={tempdb};"
@@ -788,6 +814,7 @@ mod tests {
 
         let source = SybaseSource::with_options(conn, 1, SybaseOptions::default()).unwrap();
         assert!(source.replace_invalid_utf16);
+        assert_eq!(source.connection_limiter.max_connections(), 3);
     }
 
     #[test]
