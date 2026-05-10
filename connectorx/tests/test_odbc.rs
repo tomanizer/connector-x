@@ -297,8 +297,14 @@ fn test_odbc_testcontainer_edge_types() {
         .as_any()
         .downcast_ref::<Decimal128Array>()
         .unwrap();
-    assert_eq!(amount.value(0), 1_234_567_000_000);
-    assert_eq!(amount.value(1), -90_001_000_000);
+    // Column is numeric(18,4): scale=4 is now preserved, so raw i128 values use
+    // scale=4 rather than the old global DEFAULT_ARROW_DECIMAL_SCALE=10.
+    assert_eq!(amount.value(0), 1_234_567); // 123.4567 * 10^4
+    assert_eq!(amount.value(1), -90_001); // -9.0001 * 10^4
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 4)
+    );
 
     let created_at = batch
         .column(1)

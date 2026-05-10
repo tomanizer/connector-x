@@ -298,8 +298,8 @@ impl OdbcTypePolicy for OdbcTypeSystem {
             | OdbcTypeSystem::BigInt(nullable)
             | OdbcTypeSystem::Real(nullable)
             | OdbcTypeSystem::Double(nullable)
-            | OdbcTypeSystem::Numeric(nullable)
-            | OdbcTypeSystem::Decimal(nullable)
+            | OdbcTypeSystem::Numeric(nullable, ..)
+            | OdbcTypeSystem::Decimal(nullable, ..)
             | OdbcTypeSystem::Bit(nullable)
             | OdbcTypeSystem::Char(nullable)
             | OdbcTypeSystem::Varchar(nullable)
@@ -321,8 +321,8 @@ impl OdbcTypePolicy for OdbcTypeSystem {
             OdbcTypeSystem::Real(_) => BufferDesc::F32 { nullable },
             OdbcTypeSystem::Double(_) => BufferDesc::F64 { nullable },
             OdbcTypeSystem::Bit(_) => BufferDesc::Bit { nullable },
-            OdbcTypeSystem::Numeric(_)
-            | OdbcTypeSystem::Decimal(_)
+            OdbcTypeSystem::Numeric(..)
+            | OdbcTypeSystem::Decimal(..)
             | OdbcTypeSystem::Char(_)
             | OdbcTypeSystem::Varchar(_)
             | OdbcTypeSystem::Text(_) => BufferDesc::Text { max_str_len },

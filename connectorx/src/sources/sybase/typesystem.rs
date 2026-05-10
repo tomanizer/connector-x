@@ -1,6 +1,9 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use log::warn;
 use odbc_api::{DataType, Nullability};
 use rust_decimal::Decimal;
+
+use crate::constants::{DEFAULT_ARROW_DECIMAL_PRECISION, DEFAULT_ARROW_DECIMAL_SCALE};
 
 #[derive(Copy, Clone, Debug)]
 pub enum SybaseTypeSystem {
@@ -10,8 +13,12 @@ pub enum SybaseTypeSystem {
     BigInt(bool),
     Real(bool),
     Double(bool),
-    Numeric(bool),
-    Decimal(bool),
+    /// `(nullable, precision, scale)` – precision and scale from the ODBC data-source.
+    /// Falls back to `DEFAULT_ARROW_DECIMAL_PRECISION` / `DEFAULT_ARROW_DECIMAL_SCALE`
+    /// when the driver reports values outside the valid Arrow Decimal128 range.
+    Numeric(bool, u8, i8),
+    /// Same as `Numeric`.
+    Decimal(bool, u8, i8),
     Bit(bool),
     Char(bool),
     Varchar(bool),
@@ -54,8 +61,12 @@ impl SybaseTypeSystem {
             DataType::Real => Real(nullable),
             DataType::Float { precision } if precision <= 24 => Real(nullable),
             DataType::Float { .. } | DataType::Double => Double(nullable),
-            DataType::Numeric { .. } => Numeric(nullable),
-            DataType::Decimal { .. } => Decimal(nullable),
+            DataType::Numeric { precision, scale } => {
+                Numeric(nullable, decimal_precision(precision), decimal_scale(scale))
+            }
+            DataType::Decimal { precision, scale } => {
+                Decimal(nullable, decimal_precision(precision), decimal_scale(scale))
+            }
             DataType::Bit => Bit(nullable),
             DataType::Char { .. } | DataType::WChar { .. } => Char(nullable),
             DataType::Varchar { .. } | DataType::WVarchar { .. } => Varchar(nullable),
@@ -70,6 +81,37 @@ impl SybaseTypeSystem {
             DataType::Other { data_type, .. } if data_type.0 == -154 => Time(nullable),
             DataType::Unknown | DataType::Other { .. } => Varchar(nullable),
         }
+    }
+}
+
+/// Clamp an ODBC precision (`usize`) to a valid Arrow Decimal128 precision (`u8`).
+/// Falls back to `DEFAULT_ARROW_DECIMAL_PRECISION` for out-of-range values, and emits a
+/// `warn!` log so callers can diagnose unexpected driver metadata.
+pub(crate) fn decimal_precision(precision: usize) -> u8 {
+    if (1..=DEFAULT_ARROW_DECIMAL_PRECISION as usize).contains(&precision) {
+        precision as u8
+    } else {
+        warn!(
+            "ODBC decimal precision {precision} is outside Arrow Decimal128 range 1..={}; falling back to DEFAULT_ARROW_DECIMAL_PRECISION ({})",
+            DEFAULT_ARROW_DECIMAL_PRECISION,
+            DEFAULT_ARROW_DECIMAL_PRECISION
+        );
+        DEFAULT_ARROW_DECIMAL_PRECISION
+    }
+}
+
+/// Clamp an ODBC scale (`i16`) to a valid non-negative Arrow Decimal128 scale.
+/// Falls back to `DEFAULT_ARROW_DECIMAL_SCALE` for out-of-range values, and emits a
+/// `warn!` log so callers can diagnose unexpected driver metadata.
+pub(crate) fn decimal_scale(scale: i16) -> i8 {
+    if (0..=i8::MAX as i16).contains(&scale) {
+        scale as i8
+    } else {
+        warn!(
+            "ODBC decimal scale {scale} is outside non-negative i8 range; falling back to DEFAULT_ARROW_DECIMAL_SCALE ({})",
+            DEFAULT_ARROW_DECIMAL_SCALE
+        );
+        DEFAULT_ARROW_DECIMAL_SCALE
     }
 }
 
@@ -92,7 +134,17 @@ mod tests {
                 },
                 Nullability::Nullable
             ),
-            SybaseTypeSystem::Decimal(true)
+            SybaseTypeSystem::Decimal(true, 18, 4)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Numeric {
+                    precision: 18,
+                    scale: 4
+                },
+                Nullability::NoNulls
+            ),
+            SybaseTypeSystem::Numeric(false, 18, 4)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(DataType::Real, Nullability::Unknown),

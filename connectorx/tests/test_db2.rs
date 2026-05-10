@@ -448,3 +448,74 @@ fn verify_arrow_results(mut result: Vec<RecordBatch>) {
         .unwrap()
         .eq(&StringArray::from(vec!["alpha", "beta"])));
 }
+
+/// Test that `get_arrow` (which routes through `db2_get_arrow`) preserves the exact
+/// Arrow schema precision and scale for DECIMAL/NUMERIC columns.
+///
+/// This test requires a live DB2 ODBC connection specified via `DB2_URL`.
+/// It is skipped silently when the environment variable is not set.
+#[test]
+fn test_db2_fast_path_decimal_precision_and_scale() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = db2_url() else {
+        eprintln!("CONNECTORX_SKIP: skipping Db2 fast-path decimal test: DB2_URL is not set");
+        return;
+    };
+
+    // Query two DECIMAL columns with different precision/scale.
+    let queries = [CXQuery::naked(
+        "select cast(123.4567 as decimal(18,4)) as d18_4, \
+         cast(1234567.891011 as decimal(31,6)) as d31_6, \
+         cast(99.99 as numeric(15,2)) as n15_2 \
+         from sysibm.sysdummy1",
+    )];
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+
+    let schema = rb.schema();
+
+    // --- d18_4: DECIMAL(18,4) ---
+    assert_eq!(
+        schema.field(0).data_type(),
+        &arrow::datatypes::DataType::Decimal128(18, 4),
+        "d18_4 field should be Decimal128(18, 4)"
+    );
+    let d18_4 = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(d18_4.value(0), 1_234_567); // 123.4567 * 10^4
+
+    // --- d31_6: DECIMAL(31,6) ---
+    assert_eq!(
+        schema.field(1).data_type(),
+        &arrow::datatypes::DataType::Decimal128(31, 6),
+        "d31_6 field should be Decimal128(31, 6)"
+    );
+    let d31_6 = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(d31_6.value(0), 1_234_567_891_011); // 1234567.891011 * 10^6
+
+    // --- n15_2: NUMERIC(15,2) ---
+    assert_eq!(
+        schema.field(2).data_type(),
+        &arrow::datatypes::DataType::Decimal128(15, 2),
+        "n15_2 field should be Decimal128(15, 2)"
+    );
+    let n15_2 = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert_eq!(n15_2.value(0), 9_999); // 99.99 * 10^2
+}

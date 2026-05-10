@@ -1716,12 +1716,8 @@ pub(crate) use impl_string_produce;
 
 #[cfg(feature = "dst_arrow")]
 use crate::{
-    constants::{DEFAULT_ARROW_DECIMAL, DEFAULT_ARROW_DECIMAL_SCALE, SECONDS_IN_DAY},
-    data_order::DataOrder,
-    destinations::{
-        arrow::{ArrowDestination, ArrowTypeSystem},
-        Destination,
-    },
+    constants::SECONDS_IN_DAY,
+    destinations::arrow::{ArrowDestination, ArrowTypeSystem},
     utils::decimal_to_i128,
 };
 #[cfg(feature = "dst_arrow")]
@@ -1731,7 +1727,7 @@ use arrow::{
         Int64Builder, LargeBinaryBuilder, StringBuilder, Time64MicrosecondBuilder,
         TimestampMicrosecondBuilder,
     },
-    datatypes::Schema,
+    datatypes::{DataType as ArrowDataType, Field, Schema},
     record_batch::RecordBatch,
 };
 #[cfg(feature = "dst_arrow")]
@@ -1750,6 +1746,7 @@ use rayon::prelude::*;
 #[cfg(feature = "dst_arrow")]
 pub(crate) trait OdbcArrowPolicy: OdbcTypePolicy {
     fn arrow_type(self) -> ArrowTypeSystem;
+    fn arrow_data_type(self) -> ArrowDataType;
     fn build_arrow_array<E: OdbcCoreError>(
         self,
         column: AnySlice<'_>,
@@ -1816,11 +1813,15 @@ pub(crate) fn naive_time_to_micro(value: NaiveTime) -> i64 {
 fn append_decimal<E: OdbcCoreError>(
     builder: &mut Decimal128Builder,
     decimal: Decimal,
+    scale: i8,
 ) -> Result<(), E> {
-    builder.append_value(decimal_to_i128(
-        decimal,
-        DEFAULT_ARROW_DECIMAL_SCALE as u32,
-    )?);
+    if scale < 0 {
+        return Err(ConnectorXError::cannot_produce::<Decimal>(Some(format!(
+            "negative decimal scale {scale}"
+        )))
+        .into());
+    }
+    builder.append_value(decimal_to_i128(decimal, scale as u32)?);
     Ok(())
 }
 
@@ -1828,8 +1829,9 @@ fn append_decimal<E: OdbcCoreError>(
 fn append_decimal_value<E: OdbcCoreError>(
     builder: &mut Decimal128Builder,
     bytes: &[u8],
+    scale: i8,
 ) -> Result<(), E> {
-    append_decimal::<E>(builder, parse_decimal::<E>(bytes)?)
+    append_decimal::<E>(builder, parse_decimal::<E>(bytes)?, scale)
 }
 
 // local macro used by the array builder functions below
@@ -2026,13 +2028,16 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
     column: AnySlice<'_>,
     nrows: usize,
     nullable: bool,
+    precision: u8,
+    scale: i8,
 ) -> Result<ArrayRef, E> {
-    let mut builder = Decimal128Builder::with_capacity(nrows).with_data_type(DEFAULT_ARROW_DECIMAL);
+    let mut builder = Decimal128Builder::with_capacity(nrows)
+        .with_data_type(ArrowDataType::Decimal128(precision, scale));
     match column {
         AnySlice::Text(view) => {
             for row_index in 0..nrows {
                 match view.get(row_index) {
-                    Some(bytes) => append_decimal_value::<E>(&mut builder, bytes)?,
+                    Some(bytes) => append_decimal_value::<E>(&mut builder, bytes, scale)?,
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
                         builder.append_null();
@@ -2045,7 +2050,7 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
                 match view.get(row_index) {
                     Some(chars) => {
                         let s = String::from_utf16_lossy(chars);
-                        append_decimal_value::<E>(&mut builder, s.as_bytes())?;
+                        append_decimal_value::<E>(&mut builder, s.as_bytes(), scale)?;
                     }
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
@@ -2062,7 +2067,7 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
                             OdbcValue::Bytes(bytes) => parse_decimal::<E>(bytes.as_ref())?,
                             _ => parse_decimal::<E>(cell.to_utf8_string().as_bytes())?,
                         };
-                        append_decimal::<E>(&mut builder, decimal)?;
+                        append_decimal::<E>(&mut builder, decimal, scale)?;
                     }
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
@@ -2349,7 +2354,8 @@ pub(crate) fn build_timestamp_micro_array<E: OdbcCoreError>(
 /// The type system must expose the canonical variants:
 /// `TinyInt`, `SmallInt`, `Int`, `BigInt`, `Real`, `Double`, `Numeric`,
 /// `Decimal`, `Bit`, `Char`, `Varchar`, `Text`, `Binary`, `Date`, `Time`,
-/// `Timestamp` — each carrying a single `bool` (nullable flag).
+/// `Timestamp` — each carrying a single `bool` nullable flag, except
+/// `Numeric` and `Decimal`, which carry `(nullable, precision, scale)`.
 macro_rules! impl_odbc_arrow_policy {
     ($TS:ty) => {
         #[cfg(feature = "dst_arrow")]
@@ -2375,6 +2381,26 @@ macro_rules! impl_odbc_arrow_policy {
                 }
             }
 
+            fn arrow_data_type(self) -> ::arrow::datatypes::DataType {
+                use ::arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+                match self {
+                    Self::TinyInt(..) | Self::SmallInt(..) | Self::Int(..) | Self::BigInt(..) => {
+                        ArrowDataType::Int64
+                    }
+                    Self::Real(..) => ArrowDataType::Float32,
+                    Self::Double(..) => ArrowDataType::Float64,
+                    Self::Numeric(_, precision, scale) | Self::Decimal(_, precision, scale) => {
+                        ArrowDataType::Decimal128(precision, scale)
+                    }
+                    Self::Bit(..) => ArrowDataType::Boolean,
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => ArrowDataType::Utf8,
+                    Self::Binary(..) => ArrowDataType::LargeBinary,
+                    Self::Date(..) => ArrowDataType::Date32,
+                    Self::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),
+                    Self::Timestamp(..) => ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                }
+            }
+
             fn build_arrow_array<E: $crate::sources::odbc_core::OdbcCoreError>(
                 self,
                 column: ::odbc_api::buffers::AnySlice<'_>,
@@ -2392,8 +2418,8 @@ macro_rules! impl_odbc_arrow_policy {
                     }
                     Self::Real(..) => build_float32_array(column, nrows, nullable),
                     Self::Double(..) => build_float64_array(column, nrows, nullable),
-                    Self::Numeric(..) | Self::Decimal(..) => {
-                        build_decimal_array(column, nrows, nullable)
+                    Self::Numeric(_, precision, scale) | Self::Decimal(_, precision, scale) => {
+                        build_decimal_array(column, nrows, nullable, precision, scale)
                     }
                     Self::Bit(..) => build_bool_array(column, nrows, nullable),
                     Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
@@ -2437,12 +2463,15 @@ where
         fetch_metadata::<TS, E, _>(conn, &queries[0].to_string(), max_str_len, map_type)?;
 
     let arrow_types: Vec<ArrowTypeSystem> = schema.iter().map(|&ty| ty.arrow_type()).collect();
+    let fields = names
+        .iter()
+        .zip(&schema)
+        .map(|(name, &ty)| Field::new(name, ty.arrow_data_type(), ty.nullable()))
+        .collect::<Vec<_>>();
+    let record_schema = Arc::new(Schema::new(fields));
 
     let mut destination = ArrowDestination::new();
-    destination
-        .allocate(0, &names, &arrow_types, DataOrder::RowMajor)
-        .map_err(anyhow::Error::from)?;
-    let record_schema = destination.arrow_schema();
+    destination.allocate_with_schema(names.clone(), arrow_types, Arc::clone(&record_schema));
 
     let names = Arc::from(names.into_boxed_slice());
     let schema = Arc::from(schema.into_boxed_slice());

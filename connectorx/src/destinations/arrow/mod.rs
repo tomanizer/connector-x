@@ -215,6 +215,20 @@ impl ArrowDestination {
         self.arrow_schema.clone()
     }
 
+    /// Used by ODBC-backed fast paths (ODBC, DB2, Sybase) to inject a pre-built Arrow
+    /// schema that carries the exact decimal precision/scale from the source driver,
+    /// bypassing the default [`ArrowAssoc`] schema construction.
+    pub fn allocate_with_schema(
+        &mut self,
+        names: Vec<String>,
+        schema: Vec<ArrowTypeSystem>,
+        arrow_schema: Arc<Schema>,
+    ) {
+        self.names = names;
+        self.schema = schema;
+        self.arrow_schema = arrow_schema;
+    }
+
     pub fn names(&self) -> &[String] {
         self.names.as_slice()
     }
