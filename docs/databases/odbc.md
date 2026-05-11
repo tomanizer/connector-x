@@ -120,12 +120,14 @@ ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and sha
 
 Tuning environment variables:
 
-* `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
-* `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`. Recommended range is `1024` to `16384`; hard maximum is `65536`.
+* `ODBC_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`. Hard maximum is `67108864` bytes.
 * `ODBC_MAX_CONNECTIONS`: maximum active ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `ODBC_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `ODBC_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `ODBC_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
+
+`ODBC_BATCH_SIZE * ODBC_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. If a workload needs very large text, binary, or LOB cells, lower `ODBC_BATCH_SIZE` when raising `ODBC_MAX_STR_LEN`.
 
 For URL-style generic ODBC, `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` override the matching environment variables for that source instance and are not passed through to the ODBC driver.
 

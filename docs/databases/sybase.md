@@ -114,14 +114,14 @@ The ODBC reader fetches rows in batches and binds primitive columns with typed O
 
 The defaults are tuned for throughput over small memory use:
 
-* `SYBASE_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
-* `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`.
+* `SYBASE_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`. Recommended range is `1024` to `16384`; hard maximum is `65536`.
+* `SYBASE_MAX_STR_LEN`: maximum text bytes bound per cell in ODBC text buffers. Defaults to `1024`. Hard maximum is `67108864` bytes.
 * `SYBASE_MAX_CONNECTIONS`: maximum active Sybase ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `SYBASE_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `SYBASE_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `SYBASE_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Sybase URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound.
+`SYBASE_BATCH_SIZE * SYBASE_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Sybase URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound; lower `SYBASE_BATCH_SIZE` when raising `SYBASE_MAX_STR_LEN` for large LOB cells.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking
