@@ -218,6 +218,18 @@ mod tests {
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
+                DataType::WChar {
+                    length: std::num::NonZeroUsize::new(8),
+                },
+                Nullability::Nullable,
+                "nchar_col",
+                false
+            )
+            .unwrap(),
+            SybaseTypeSystem::Char(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
                 DataType::WVarchar {
                     length: std::num::NonZeroUsize::new(32),
                 },
@@ -227,6 +239,18 @@ mod tests {
             )
             .unwrap(),
             SybaseTypeSystem::Varchar(true)
+        ));
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::WVarchar {
+                    length: std::num::NonZeroUsize::new(32),
+                },
+                Nullability::NoNulls,
+                "nvarchar_col",
+                false
+            )
+            .unwrap(),
+            SybaseTypeSystem::Varchar(false)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(

@@ -86,7 +86,9 @@ The ODBC path currently maps these Sybase/ASE types:
 * Binary: `binary`, `varbinary`, `image`
 * Date/time: `date`, `time`, `datetime`, `smalldatetime`, `bigtime`, `bigdatetime`
 
-`unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output.
+`char`, `varchar`, and `text` map to Arrow `LargeUtf8`. Sybase Unicode types reported through ODBC wide-character metadata, including `unichar` and `univarchar`, also map to Arrow `LargeUtf8`. If a driver reports `nchar` or `nvarchar` as ODBC `WCHAR`/`WVARCHAR`, ConnectorX applies the same mapping; SAP ASE deployments should verify whether those names are supported aliases for the configured server and driver.
+
+`unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output. The Sybase live tests cover `unitext` through an explicit `convert(univarchar(...), unitext_column)` projection.
 
 Sybase `timestamp` is a rowversion-like binary value, not a wall-clock timestamp. When the ODBC driver reports it as `binary` or `varbinary`, ConnectorX returns `LargeBinary`. Cast it explicitly in the query if your driver exposes a non-standard representation and you need a different output type.
 
