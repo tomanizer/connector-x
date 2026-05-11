@@ -90,6 +90,8 @@ The ODBC path currently maps these Sybase/ASE types:
 
 Sybase `timestamp` is a rowversion-like binary value, not a wall-clock timestamp. When the ODBC driver reports it as `binary` or `varbinary`, ConnectorX returns `LargeBinary`. Cast it explicitly in the query if your driver exposes a non-standard representation and you need a different output type.
 
+Sybase `binary`, `varbinary`, `image`, and rowversion-like `timestamp` values map to Arrow `LargeBinary`. FreeTDS commonly returns binary-family values through text buffers as ASCII hex; ConnectorX hex-decodes those values before producing Arrow arrays. Drivers that expose true ODBC binary buffers are passed through as raw bytes. `image` is treated as a bounded ODBC binary value, so very large values are still subject to the configured `SYBASE_MAX_STR_LEN` buffer limit and truncation checks.
+
 FreeTDS reports ASE `time` and `bigtime` through the SQL Server `TIME2` extension on common ASE 16 configurations; ConnectorX maps that metadata to Arrow `Time64(Microsecond)`. `datetime`, `smalldatetime`, and `bigdatetime` map to Arrow `Timestamp(Microsecond)`, with the precision bounded by the source type and driver formatting.
 
 Sybase Unicode text buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility.

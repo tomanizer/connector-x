@@ -107,3 +107,44 @@ go
 insert into dbo.cx_odbc_temporal_edge (id)
 values (2)
 go
+
+if object_id('dbo.cx_odbc_binary_edge') is not null
+    drop table dbo.cx_odbc_binary_edge
+go
+
+create table dbo.cx_odbc_binary_edge (
+    id int not null,
+    fixed_bytes binary(8) null,
+    variable_bytes varbinary(8) null,
+    image_bytes image null,
+    row_version timestamp
+)
+go
+
+insert into dbo.cx_odbc_binary_edge (
+    id,
+    fixed_bytes,
+    variable_bytes,
+    image_bytes
+)
+values (
+    1,
+    0x000102030405feff,
+    0x1020304050,
+    0x00010203040506070809a0b0c0d0e0ff
+)
+go
+
+insert into dbo.cx_odbc_binary_edge (
+    id,
+    fixed_bytes,
+    variable_bytes,
+    image_bytes
+)
+values (
+    2,
+    null,
+    null,
+    null
+)
+go
