@@ -434,6 +434,223 @@ fn test_db2_testcontainer_vendor_type_fallback_opt_in() {
 }
 
 #[test]
+fn test_db2_testcontainer_type_edge_supported_fast_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 type edge test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked(
+        "select id, \
+                cast(decfloat16_v as varchar(64)) as decfloat16_text, \
+                cast(decfloat34_v as varchar(128)) as decfloat34_text, \
+                xmlserialize(xml_v as varchar(256)) as xml_text, \
+                clob_v, \
+                blob_v, \
+                graphic_v, \
+                vargraphic_v \
+         from cx_db2_type_edge \
+         order by id",
+    )];
+
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 2);
+    assert_eq!(rb.num_columns(), 8);
+
+    let schema = rb.schema();
+    assert_eq!(
+        schema.field(0).data_type(),
+        &arrow::datatypes::DataType::Int64
+    );
+    for index in [1, 2, 3, 4, 6, 7] {
+        assert_eq!(
+            schema.field(index).data_type(),
+            &arrow::datatypes::DataType::LargeUtf8
+        );
+        assert_eq!(rb.column(index).null_count(), 1);
+    }
+    assert_eq!(
+        schema.field(5).data_type(),
+        &arrow::datatypes::DataType::LargeBinary
+    );
+    assert_eq!(rb.column(5).null_count(), 1);
+
+    let decfloat16 = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert!(decfloat16.value(0).contains("123.5"));
+    assert!(decfloat16.is_null(1));
+
+    let decfloat34 = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert!(decfloat34.value(0).contains("9876543210.123456"));
+    assert!(decfloat34.is_null(1));
+
+    let xml = rb
+        .column(3)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert!(xml.value(0).contains("<name>alpha</name>"));
+    assert!(xml.is_null(1));
+
+    let clob = rb
+        .column(4)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(clob.value(0).len(), "clob-value-".len() * 64);
+    assert!(clob.value(0).starts_with("clob-value-clob-value-"));
+    assert!(clob.is_null(1));
+
+    let blob = rb
+        .column(5)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(blob.value(0), &[0x00, 0x01, 0x02, 0xff]);
+    assert!(blob.is_null(1));
+
+    let graphic = rb
+        .column(6)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(graphic.value(0).trim_end(), "wide-alpha");
+    assert!(graphic.is_null(1));
+
+    let vargraphic = rb
+        .column(7)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(vargraphic.value(0), "varwide-alpha");
+    assert!(vargraphic.is_null(1));
+}
+
+#[test]
+fn test_db2_testcontainer_vendor_types_strict_by_default() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 strict vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    for (column_name, query) in [
+        (
+            "decfloat16_v",
+            "select decfloat16_v from cx_db2_type_edge where id = 1",
+        ),
+        ("xml_v", "select xml_v from cx_db2_type_edge where id = 1"),
+    ] {
+        let err = match get_arrow(&source_conn, None, &[CXQuery::naked(query)], None) {
+            Ok(_) => panic!("{} should be rejected in strict mode", column_name),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("source=Db2"),
+            "{} error should mention source=Db2: {}",
+            column_name,
+            err
+        );
+        assert!(
+            err.contains(column_name),
+            "{} error should mention the column name: {}",
+            column_name,
+            err
+        );
+        assert!(
+            err.contains("DB2_TYPE_FALLBACK_TO_VARCHAR"),
+            "{} error should mention DB2_TYPE_FALLBACK_TO_VARCHAR: {}",
+            column_name,
+            err
+        );
+    }
+}
+
+#[test]
+fn test_db2_testcontainer_decfloat_fallback_preserves_strings() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 DECFLOAT fallback test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select decfloat16_v, decfloat34_v \
+         from cx_db2_type_edge \
+         order by id",
+    )];
+
+    let source = Db2Source::with_options(
+        &conn,
+        1,
+        Db2Options {
+            unknown_type_fallback_to_varchar: true,
+            ..Db2Options::default()
+        },
+    )
+    .unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, Db2ArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_eq!(rb.num_rows(), 2);
+    assert_eq!(rb.num_columns(), 2);
+
+    for index in 0..2 {
+        assert_eq!(
+            rb.schema().field(index).data_type(),
+            &arrow::datatypes::DataType::LargeUtf8
+        );
+        assert_eq!(rb.column(index).null_count(), 1);
+    }
+
+    let decfloat16 = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert!(decfloat16.value(0).contains("123.5"));
+    assert!(decfloat16.is_null(1));
+
+    let decfloat34 = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert!(decfloat34.value(0).contains("9876543210.123456"));
+    assert!(decfloat34.is_null(1));
+}
+
+#[test]
 fn test_db2_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 

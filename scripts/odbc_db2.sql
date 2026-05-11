@@ -72,3 +72,58 @@ values
         decfloat(-0.25),
         xmlparse(document '<root>beta</root>')
     );
+
+create table cx_db2_type_edge (
+    id integer not null primary key,
+    decfloat16_v decfloat(16),
+    decfloat34_v decfloat(34),
+    xml_v xml,
+    clob_v clob(2K),
+    blob_v blob(2K),
+    graphic_v graphic(16),
+    vargraphic_v vargraphic(64)
+);
+
+insert into cx_db2_type_edge (
+    id,
+    decfloat16_v,
+    decfloat34_v,
+    xml_v,
+    clob_v,
+    blob_v,
+    graphic_v,
+    vargraphic_v
+)
+values
+    (
+        1,
+        decfloat(123.5),
+        cast(decfloat(9876543210.123456) as decfloat(34)),
+        xmlparse(document '<root><name>alpha</name></root>'),
+        cast(repeat('clob-value-', 64) as clob(2K)),
+        cast(X'000102FF' as blob(2K)),
+        cast('wide-alpha' as graphic(16)),
+        cast('varwide-alpha' as vargraphic(64))
+    );
+
+insert into cx_db2_type_edge (
+    id,
+    decfloat16_v,
+    decfloat34_v,
+    xml_v,
+    clob_v,
+    blob_v,
+    graphic_v,
+    vargraphic_v
+)
+values
+    (
+        2,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+    );
