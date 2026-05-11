@@ -15,9 +15,10 @@ use connectorx::{
     partition::{partition, PartitionQuery},
     prelude::*,
     sources::db2::{db2_conn_string, Db2Options, Db2Source},
-    sql::CXQuery,
+    sql::{count_query, get_partition_range_query, single_col_partition_query, CXQuery},
     transports::Db2ArrowTransport,
 };
+use sqlparser::dialect::GenericDialect;
 
 mod test_db;
 
@@ -696,6 +697,200 @@ fn test_db2_partition_query() {
         .map(RecordBatch::num_rows)
         .sum::<usize>();
     assert_eq!(rows, 1);
+}
+
+#[test]
+fn test_db2_query_wrapping_sql_shapes() {
+    let query = db2_partition_edge_query();
+
+    let count_sql = count_query(&query, &GenericDialect {}).unwrap().to_string();
+    assert!(count_sql.contains("SELECT count(*) FROM ("));
+    assert!(count_sql.contains("RISK_SCHEMA.RISK_RESULTS"));
+    assert!(count_sql.contains("\"TradeId\""));
+    assert!(count_sql.contains("\"select\""));
+    assert!(count_sql.contains("date('2026-05-08')"));
+    assert!(count_sql.contains("timestamp('2026-05-08 00:00:00')"));
+    assert!(count_sql.contains("ORDER BY TRADE_ID"));
+    assert!(count_sql.contains("FETCH FIRST 4 ROWS ONLY"));
+
+    let range_sql =
+        get_partition_range_query(query.as_str(), "TRADE_ID", &GenericDialect {}).unwrap();
+    assert!(range_sql.contains("SELECT min(CXTMPTAB_RANGE.TRADE_ID)"));
+    assert!(range_sql.contains("max(CXTMPTAB_RANGE.TRADE_ID)"));
+    assert!(range_sql.contains("FROM ("));
+    assert!(range_sql.contains("RISK_SCHEMA.RISK_RESULTS"));
+    assert!(range_sql.contains("ORDER BY TRADE_ID"));
+    assert!(range_sql.contains("FETCH FIRST 4 ROWS ONLY"));
+
+    let part_sql =
+        single_col_partition_query(query.as_str(), "TRADE_ID", 1, 3, &GenericDialect {}).unwrap();
+    assert!(part_sql.contains("SELECT * FROM ("));
+    assert!(part_sql.contains("RISK_SCHEMA.RISK_RESULTS"));
+    assert!(part_sql.contains("ORDER BY TRADE_ID"));
+    assert!(part_sql.contains("FETCH FIRST 4 ROWS ONLY"));
+    assert!(part_sql.contains("1 <= CXTMPTAB_PART.TRADE_ID"));
+    assert!(part_sql.contains("CXTMPTAB_PART.TRADE_ID < 3"));
+
+    let offset_query = CXQuery::naked(
+        "select TRADE_ID \
+         from RISK_SCHEMA.RISK_RESULTS \
+         order by TRADE_ID \
+         offset 1 rows",
+    );
+    let offset_part_sql =
+        single_col_partition_query(offset_query.as_str(), "TRADE_ID", 1, 3, &GenericDialect {})
+            .unwrap();
+    assert!(offset_part_sql.contains("ORDER BY TRADE_ID"));
+    assert!(offset_part_sql.contains("OFFSET 1 ROWS"));
+
+    let cte = db2_cte_partition_edge_query();
+    let cte_count = count_query(&cte, &GenericDialect {}).unwrap().to_string();
+    assert!(cte_count.contains("WITH q AS"));
+    assert!(cte_count.contains("SELECT count(*) FROM ("));
+    assert!(cte_count.contains("RISK_SCHEMA.RISK_RESULTS"));
+
+    let cte_range =
+        get_partition_range_query(cte.as_str(), "TRADE_ID", &GenericDialect {}).unwrap();
+    assert!(cte_range.contains("WITH q AS"));
+    assert!(cte_range.contains("SELECT min(CXTMPTAB_RANGE.TRADE_ID)"));
+    assert!(cte_range.contains("FROM ("));
+}
+
+#[test]
+fn test_db2_testcontainer_query_wrapping_count_range_and_partition() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 query wrapping test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let query = db2_partition_edge_query();
+
+    let count = count_query(&query, &GenericDialect {}).unwrap();
+    let destination = get_arrow(&source_conn, None, &[count], None).unwrap();
+    assert_single_i64(destination.arrow().unwrap(), 4);
+
+    let range = CXQuery::naked(
+        get_partition_range_query(query.as_str(), "TRADE_ID", &GenericDialect {}).unwrap(),
+    );
+    let destination = get_arrow(&source_conn, None, &[range], None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 2);
+    assert_eq!(
+        rb.column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert_eq!(
+        rb.column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        4
+    );
+
+    let part = PartitionQuery::new(query.as_str(), "TRADE_ID", None, None, 2);
+    let queries = partition(&part, &source_conn).unwrap();
+    assert_eq!(queries.len(), 2);
+
+    let destination = get_arrow(&source_conn, Some(query.to_string()), &queries, None).unwrap();
+    let batches = destination.arrow().unwrap();
+    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(rows, 4);
+    assert_partition_trade_ids(&batches);
+}
+
+#[test]
+fn test_db2_testcontainer_query_wrapping_cte_partition() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_db2_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Db2 CTE partition test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::db2_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let query = db2_cte_partition_edge_query();
+
+    let count = count_query(&query, &GenericDialect {}).unwrap();
+    let destination = get_arrow(&source_conn, None, &[count], None).unwrap();
+    assert_single_i64(destination.arrow().unwrap(), 4);
+
+    let part = PartitionQuery::new(query.as_str(), "TRADE_ID", None, None, 2);
+    let queries = partition(&part, &source_conn).unwrap();
+    assert_eq!(queries.len(), 2);
+
+    let destination = get_arrow(&source_conn, Some(query.to_string()), &queries, None).unwrap();
+    let batches = destination.arrow().unwrap();
+    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(rows, 4);
+    assert_partition_trade_ids(&batches);
+}
+
+fn db2_partition_edge_query() -> CXQuery<String> {
+    CXQuery::naked(
+        "select TRADE_ID, \"TradeId\", \"select\", TRADE_LABEL, COB_DATE, CREATED_TS \
+         from RISK_SCHEMA.RISK_RESULTS \
+         where COB_DATE = date('2026-05-08') \
+           and CREATED_TS >= timestamp('2026-05-08 00:00:00') \
+         order by TRADE_ID \
+         fetch first 4 rows only",
+    )
+}
+
+fn db2_cte_partition_edge_query() -> CXQuery<String> {
+    CXQuery::naked(
+        "with q as ( \
+             select TRADE_ID, \"TradeId\", \"select\", TRADE_LABEL, COB_DATE \
+             from RISK_SCHEMA.RISK_RESULTS \
+         ) \
+         select TRADE_ID, \"TradeId\", \"select\", TRADE_LABEL \
+         from q \
+         where COB_DATE = date('2026-05-08') \
+         order by TRADE_ID",
+    )
+}
+
+fn assert_single_i64(mut batches: Vec<RecordBatch>, expected: i64) {
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 1);
+    assert_eq!(
+        rb.column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        expected
+    );
+}
+
+fn assert_partition_trade_ids(batches: &[RecordBatch]) {
+    let mut ids = Vec::new();
+    for rb in batches {
+        let col = rb.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        for row in 0..col.len() {
+            ids.push(col.value(row));
+        }
+    }
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
 }
 
 fn verify_arrow_results(mut result: Vec<RecordBatch>) {

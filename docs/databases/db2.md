@@ -101,6 +101,21 @@ Db2 graphic and wide-character buffers are decoded as UTF-16 when returned throu
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 
+## Query Wrapping And Partitioning
+
+ConnectorX generates DB2 SQL for row counts, partition min/max ranges, and partition predicates by using the shared SQL wrapper with `sqlparser`'s `GenericDialect`. The DB2 test suite covers these generated shapes:
+
+* schema-qualified tables such as `RISK_SCHEMA.RISK_RESULTS`
+* double-quoted identifiers, including mixed-case names such as `"TradeId"`
+* reserved-word column names quoted with double quotes, such as `"select"`
+* `DATE(...)` and `TIMESTAMP(...)` constructor expressions
+* `WITH` / CTE queries
+* nested derived-table wrapping for count, range, and partition predicates
+* `ORDER BY` in the source query
+* `FETCH FIRST n ROWS ONLY` in the source query
+
+Queries that use DB2 syntax outside these tested shapes may still rely on ConnectorX's string-composition fallback when `sqlparser` cannot parse the source SQL. Keep partition columns projected by the source query, and prefer simple integer partition keys for partitioned extraction.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, temporal, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal and text columns use text buffers for driver compatibility.
