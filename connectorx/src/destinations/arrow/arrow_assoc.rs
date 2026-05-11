@@ -44,7 +44,8 @@ fn decimal_scale(dt: ArrowTypeSystem) -> Result<u32> {
         ArrowTypeSystem::Decimal128(_, _, scale) => {
             Err(anyhow::anyhow!("negative Arrow decimal scale {scale}").into())
         }
-        _ => Ok(DEFAULT_ARROW_DECIMAL_SCALE as u32),
+        ArrowTypeSystem::Decimal(_) => Ok(DEFAULT_ARROW_DECIMAL_SCALE as u32),
+        _ => Err(anyhow::anyhow!("decimal scale requested for non-decimal type {dt:?}").into()),
     }
 }
 

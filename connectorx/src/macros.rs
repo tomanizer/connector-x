@@ -182,31 +182,37 @@ macro_rules! impl_transport {
 
     (@cvtts [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*) => {
         fn convert_typesystem(ts: Self::TSS) -> $crate::errors::Result<Self::TSD> {
-            $(
-                if let Some(ts) = impl_transport!(@cvtts_try [$TSS, $TSD] ts, $V1 [$T1] => $V2 [$T2] | conversion $HOW $(| preserve $P)?) {
-                    return Ok(ts);
-                }
-            )*
-            fehler::throw!($crate::errors::ConnectorXError::NoConversionRule(
-                format!("{:?}", ts), format!("{}", std::any::type_name::<Self::TSD>())
-            ))
+            match ts {
+                $(
+                    impl_transport!(@cvtts_pattern [$TSS] $V1 true precision scale $(| preserve $P)?) => {
+                        Ok(impl_transport!(@cvtts_value [$TSD] $V2 true precision scale $(| preserve $P)?))
+                    }
+                    impl_transport!(@cvtts_pattern [$TSS] $V1 false precision scale $(| preserve $P)?) => {
+                        Ok(impl_transport!(@cvtts_value [$TSD] $V2 false precision scale $(| preserve $P)?))
+                    }
+                )*
+                #[allow(unreachable_patterns)]
+                _ => fehler::throw!($crate::errors::ConnectorXError::NoConversionRule(
+                    format!("{:?}", ts), format!("{}", std::any::type_name::<Self::TSD>())
+                ))
+            }
         }
     };
 
-    (@cvtts_try [$TSS:tt, $TSD:tt] $ts:ident, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident) => {
-        match $ts {
-            $TSS::$V1(true, ..) => Some($TSD::$V2(true)),
-            $TSS::$V1(false, ..) => Some($TSD::$V2(false)),
-            _ => None,
-        }
+    (@cvtts_pattern [$TSS:tt] $V1:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident) => {
+        $TSS::$V1($NULLABLE, ..)
     };
 
-    (@cvtts_try [$TSS:tt, $TSD:tt] $ts:ident, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve decimal) => {
-        match $ts {
-            $TSS::$V1(true, precision, scale) => Some($TSD::$V2(true, precision, scale)),
-            $TSS::$V1(false, precision, scale) => Some($TSD::$V2(false, precision, scale)),
-            _ => None,
-        }
+    (@cvtts_pattern [$TSS:tt] $V1:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident | preserve decimal) => {
+        $TSS::$V1($NULLABLE, $PRECISION, $SCALE)
+    };
+
+    (@cvtts_value [$TSD:tt] $V2:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident) => {
+        $TSD::$V2($NULLABLE)
+    };
+
+    (@cvtts_value [$TSD:tt] $V2:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident | preserve decimal) => {
+        $TSD::$V2($NULLABLE, $PRECISION, $SCALE)
     };
 
     (@process [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*) => {
