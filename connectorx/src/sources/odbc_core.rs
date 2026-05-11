@@ -3252,10 +3252,13 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
     E: OdbcCoreError + Send + 'static,
 {
+    let first_query = queries.first().ok_or_else(|| {
+        ConnectorXError::Other(anyhow!("ODBC Arrow stream requires at least one query"))
+    })?;
     let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
         TS::source_name(),
         conn,
-        &queries[0].to_string(),
+        &first_query.to_string(),
         max_str_len,
         &connection_limiter,
         execution_options,
@@ -3574,9 +3577,9 @@ where
             replace_invalid_utf16,
             Arc::clone(&arrow_schema),
         )?;
-        sender
-            .send(Ok(record_batch))
-            .map_err(|err| anyhow!("failed to send ODBC Arrow stream record batch: {err}"))?;
+        if sender.send(Ok(record_batch)).is_err() {
+            return Ok(());
+        }
     }
     Ok(())
 }
