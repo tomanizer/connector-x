@@ -218,7 +218,7 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
                         .as_query()
                         .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                         .clone();
-                    if query.offset.is_none() {
+                    if query.limit.is_none() && query.offset.is_none() && query.fetch.is_none() {
                         query.order_by = vec![]; // mssql offset must appear with order by
                     }
                     let select = query
@@ -391,7 +391,12 @@ pub fn single_col_partition_query<T: Dialect>(
                 right: Box::new(ub),
             };
 
-            if query.limit.is_none() && select.top.is_none() && !query.order_by.is_empty() {
+            if query.limit.is_none()
+                && query.offset.is_none()
+                && query.fetch.is_none()
+                && select.top.is_none()
+                && !query.order_by.is_empty()
+            {
                 // order by in a partition query does not make sense because partition is unordered.
                 // clear the order by beceause mssql does not support order by in a derived table.
                 // also order by in the derived table does not make any difference.
@@ -463,8 +468,8 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                 .clone();
             let ast_range: Statement;
 
-            if query.limit.is_none() && query.offset.is_none() {
-                query.order_by = vec![]; // only omit orderby when there is no limit and offset in the query
+            if query.limit.is_none() && query.offset.is_none() && query.fetch.is_none() {
+                query.order_by = vec![]; // only omit orderby when there is no limit, offset, or fetch in the query
             }
             let projection = vec![
                 SelectItem::UnnamedExpr(Expr::Function(Function {

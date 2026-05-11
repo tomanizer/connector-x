@@ -127,3 +127,122 @@ values
         null,
         null
     );
+
+create schema RISK_SCHEMA;
+
+create table RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID integer not null primary key,
+    COB_DATE date not null,
+    CREATED_TS timestamp not null,
+    "TradeId" integer not null,
+    "select" varchar(16),
+    TRADE_LABEL varchar(32)
+);
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        1,
+        date('2026-05-08'),
+        timestamp('2026-05-08 08:00:00'),
+        101,
+        'reserved-a',
+        'alpha'
+    );
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        2,
+        date('2026-05-08'),
+        timestamp('2026-05-08 09:00:00'),
+        102,
+        'reserved-b',
+        'beta'
+    );
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        3,
+        date('2026-05-08'),
+        timestamp('2026-05-08 10:00:00'),
+        103,
+        'reserved-c',
+        'gamma'
+    );
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        4,
+        date('2026-05-08'),
+        timestamp('2026-05-08 11:00:00'),
+        104,
+        'reserved-d',
+        'delta'
+    );
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        5,
+        date('2026-05-08'),
+        timestamp('2026-05-08 12:00:00'),
+        105,
+        'reserved-e',
+        'epsilon'
+    );
+
+insert into RISK_SCHEMA.RISK_RESULTS (
+    TRADE_ID,
+    COB_DATE,
+    CREATED_TS,
+    "TradeId",
+    "select",
+    TRADE_LABEL
+)
+values
+    (
+        6,
+        date('2026-05-08'),
+        timestamp('2026-05-08 13:00:00'),
+        106,
+        'reserved-f',
+        'zeta'
+    );
