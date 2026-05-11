@@ -7,6 +7,10 @@ pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
 
 use self::typesystem::ODBC_UNKNOWN_TYPE_FALLBACK_ENV;
+#[cfg(feature = "dst_arrow")]
+use crate::{
+    arrow_batch_iter::RecordBatchIterator, destinations::arrow::ArrowDestination, errors::OutResult,
+};
 use crate::{
     data_order::DataOrder,
     errors::ConnectorXError,
@@ -22,8 +26,6 @@ use crate::{
     },
     sql::{count_query, CXQuery},
 };
-#[cfg(feature = "dst_arrow")]
-use crate::{destinations::arrow::ArrowDestination, errors::OutResult};
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
@@ -376,6 +378,45 @@ pub(crate) fn odbc_get_arrow(
             .map_err(Into::into)
         },
     )?)
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn odbc_record_batch_iter(
+    conn: &Url,
+    origin_query: Option<String>,
+    queries: &[CXQuery<String>],
+    batch_size: usize,
+) -> OutResult<Box<dyn RecordBatchIterator>> {
+    let options = OdbcOptions::from_env();
+    let params = url_query_pairs(conn)?;
+    let conn_str = odbc_conn_string(&conn[..])?;
+    let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
+    let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
+        .unwrap_or(options.replace_invalid_utf16);
+    let max_connections =
+        param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
+    let execution_options = odbc_execution_options_from_params(Some(&params), options)?;
+    let iterator = odbc_core::odbc_record_batch_iter_impl::<OdbcTypeSystem, OdbcSourceError>(
+        &conn_str,
+        origin_query,
+        queries,
+        options.max_str_len,
+        batch_size,
+        connection_limiter,
+        execution_options,
+        replace_invalid_utf16,
+        move |data_type, nullability, column_name| {
+            OdbcTypeSystem::from_odbc(
+                data_type,
+                nullability,
+                column_name,
+                unknown_type_fallback_to_varchar,
+            )
+            .map_err(Into::into)
+        },
+    )?;
+    Ok(Box::new(iterator))
 }
 
 odbc_core::impl_odbc_arrow_policy!(OdbcTypeSystem);

@@ -12,7 +12,7 @@ use arrow::{
 use chrono::NaiveDateTime;
 use connectorx::{
     destinations::arrow::ArrowDestination,
-    get_arrow::get_arrow,
+    get_arrow::{get_arrow, new_record_batch_iter},
     partition::{partition, PartitionQuery},
     prelude::*,
     sources::odbc::{odbc_conn_string, OdbcSource},
@@ -456,4 +456,46 @@ fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
         .downcast_ref::<StringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
+}
+
+#[test]
+fn test_odbc_testcontainer_arrow_stream_route() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC arrow_stream route test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::postgres_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked(
+        "select id, name from cx_odbc_test order by id",
+    )];
+    let mut iter = new_record_batch_iter(&source_conn, None, &queries, 1, None);
+    let (schema_batch, names) = iter.get_schema();
+    assert_eq!(schema_batch.num_columns(), 2);
+    assert_eq!(names, &["id".to_string(), "name".to_string()]);
+
+    iter.prepare();
+    let mut rows = Vec::new();
+    while let Some(batch) = iter.next_batch() {
+        assert!(batch.num_rows() <= 1);
+        for row in 0..batch.num_rows() {
+            rows.push((
+                array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                array_value_to_string(batch.column(1).as_ref(), row).unwrap(),
+            ));
+        }
+    }
+
+    assert_eq!(
+        rows,
+        vec![
+            ("1".to_string(), "alpha".to_string()),
+            ("2".to_string(), "beta".to_string())
+        ]
+    );
 }
