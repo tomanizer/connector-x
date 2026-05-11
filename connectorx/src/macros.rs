@@ -207,12 +207,28 @@ macro_rules! impl_transport {
         $TSS::$V1($NULLABLE, $PRECISION, $SCALE)
     };
 
+    (@cvtts_pattern [$TSS:tt] $V1:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident | preserve $P:ident) => {
+        compile_error!(concat!(
+            "unsupported impl_transport! preserve option `",
+            stringify!($P),
+            "`; expected `decimal`"
+        ))
+    };
+
     (@cvtts_value [$TSD:tt] $V2:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident) => {
         $TSD::$V2($NULLABLE)
     };
 
     (@cvtts_value [$TSD:tt] $V2:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident | preserve decimal) => {
         $TSD::$V2($NULLABLE, $PRECISION, $SCALE)
+    };
+
+    (@cvtts_value [$TSD:tt] $V2:tt $NULLABLE:tt $PRECISION:ident $SCALE:ident | preserve $P:ident) => {
+        compile_error!(concat!(
+            "unsupported impl_transport! preserve option `",
+            stringify!($P),
+            "`; expected `decimal`"
+        ))
     };
 
     (@process [$TSS:tt, $TSD:tt] $([ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident $(| preserve $P:ident)? ])*) => {
@@ -276,8 +292,15 @@ macro_rules! impl_transport {
         }
     };
 
-    (@process_func_branch $OPT:ident [ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident ]) => {
+    (@process_func_branch $OPT:ident [ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve decimal ]) => {
         impl_transport!(@process_func_branch $OPT [ $V1 [$T1] => $V2 [$T2] | conversion $HOW ])
+    };
+    (@process_func_branch $OPT:ident [ $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident ]) => {
+        compile_error!(concat!(
+            "unsupported impl_transport! preserve option `",
+            stringify!($P),
+            "`; expected `decimal`"
+        ))
     };
     (@process_func_branch $OPT:ident [ $V1:tt [&$L1:lifetime $T1:ty] => $V2:tt [&$L2:lifetime $T2:ty] | conversion $HOW:ident ]) => {
         impl_transport!(@process_func_branch $OPT &$T1, &$T2)
@@ -306,8 +329,15 @@ macro_rules! impl_transport {
     (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident) => {
         impl_transport!(@cvt $HOW $TP, $T1, $T2);
     };
-    (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident) => {
+    (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve decimal) => {
         impl_transport!(@cvt $HOW $TP, $T1, $T2);
+    };
+    (@cvt $TP:ty, $V1:tt [$T1:ty] => $V2:tt [$T2:ty] | conversion $HOW:ident | preserve $P:ident) => {
+        compile_error!(concat!(
+            "unsupported impl_transport! preserve option `",
+            stringify!($P),
+            "`; expected `decimal`"
+        ));
     };
     (@cvt auto $TP:ty, $T1:ty, $T2:ty) => {
         impl<'tp, 'r> $crate::typesystem::TypeConversion<$T1, $T2> for $TP {
