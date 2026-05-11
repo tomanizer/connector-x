@@ -186,7 +186,7 @@ pub mod prelude {
     #[cfg(feature = "federation")]
     pub use crate::fed_rewriter::{rewrite_sql, FederatedDataSourceInfo, Plan};
     #[cfg(feature = "dst_arrow")]
-    pub use crate::get_arrow::{get_arrow, new_record_batch_iter};
+    pub use crate::get_arrow::{get_arrow, new_record_batch_iter, new_record_batch_iter_result};
     pub use crate::source_router::*;
     #[cfg(feature = "src_bigquery")]
     pub use crate::sources::bigquery::BigQuerySource;

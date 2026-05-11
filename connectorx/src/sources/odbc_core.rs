@@ -2449,6 +2449,7 @@ pub(crate) use impl_string_produce;
 
 #[cfg(feature = "dst_arrow")]
 use crate::{
+    arrow_batch_iter::RecordBatchIterator,
     constants::SECONDS_IN_DAY,
     destinations::arrow::{ArrowDestination, ArrowTypeSystem},
     utils::decimal_to_i128,
@@ -2467,6 +2468,11 @@ use arrow::{
 use odbc_api::sys::NULL_DATA;
 #[cfg(feature = "dst_arrow")]
 use rayon::prelude::*;
+#[cfg(feature = "dst_arrow")]
+use std::{
+    sync::mpsc::{channel, Receiver, Sender},
+    thread,
+};
 
 /// Arrow-specific extension of [`OdbcTypePolicy`].
 ///
@@ -3246,23 +3252,20 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
     E: OdbcCoreError + Send + 'static,
 {
+    let first_query = queries.first().ok_or_else(|| {
+        ConnectorXError::Other(anyhow!("ODBC Arrow stream requires at least one query"))
+    })?;
     let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
         TS::source_name(),
         conn,
-        &queries[0].to_string(),
+        &first_query.to_string(),
         max_str_len,
         &connection_limiter,
         execution_options,
         map_type,
     )?;
 
-    let arrow_types: Vec<ArrowTypeSystem> = schema.iter().map(|&ty| ty.arrow_type()).collect();
-    let fields = names
-        .iter()
-        .zip(&schema)
-        .map(|(name, &ty)| Field::new(name, ty.arrow_data_type(), ty.nullable()))
-        .collect::<Vec<_>>();
-    let record_schema = Arc::new(Schema::new(fields));
+    let (arrow_types, record_schema) = odbc_arrow_schema(&names, &schema);
 
     let mut destination = ArrowDestination::new();
     destination.allocate_with_schema(names.clone(), arrow_types, Arc::clone(&record_schema));
@@ -3288,6 +3291,54 @@ where
     })?;
 
     Ok(destination)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn odbc_arrow_schema<TS>(names: &[String], schema: &[TS]) -> (Vec<ArrowTypeSystem>, Arc<Schema>)
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy,
+{
+    let arrow_types = schema.iter().map(|&ty| ty.arrow_type()).collect();
+    let fields = names
+        .iter()
+        .zip(schema)
+        .map(|(name, &ty)| Field::new(name, ty.arrow_data_type(), ty.nullable()))
+        .collect::<Vec<_>>();
+    (arrow_types, Arc::new(Schema::new(fields)))
+}
+
+#[cfg(feature = "dst_arrow")]
+fn build_record_batch<TS, E>(
+    batch: &ColumnarAnyBuffer,
+    names: &[String],
+    schema: &[TS],
+    replace_invalid_utf16: bool,
+    arrow_schema: Arc<Schema>,
+) -> Result<RecordBatch, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+{
+    let mut columns = Vec::with_capacity(batch.num_cols());
+    for col_index in 0..batch.num_cols() {
+        let column = batch.column(col_index);
+        ensure_column_not_truncated::<E>(
+            &column,
+            TS::source_name(),
+            TS::max_str_len_env(),
+            col_index,
+            names.get(col_index).map(String::as_str),
+            schema.get(col_index).copied(),
+        )?;
+        columns.push(schema[col_index].build_arrow_array::<E>(
+            column,
+            batch.num_rows(),
+            col_index,
+            names.get(col_index).map(String::as_str),
+            replace_invalid_utf16,
+        )?);
+    }
+    Ok(RecordBatch::try_new(arrow_schema, columns).map_err(anyhow::Error::from)?)
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -3320,30 +3371,220 @@ where
     let mut cursor = cursor.bind_buffer(buffer)?;
 
     while let Some(batch) = cursor.fetch()? {
-        let mut columns = Vec::with_capacity(batch.num_cols());
-        for col_index in 0..batch.num_cols() {
-            let column = batch.column(col_index);
-            ensure_column_not_truncated::<E>(
-                &column,
-                TS::source_name(),
-                TS::max_str_len_env(),
-                col_index,
-                names.get(col_index).map(String::as_str),
-                schema.get(col_index).copied(),
-            )?;
-            columns.push(schema[col_index].build_arrow_array::<E>(
-                column,
-                batch.num_rows(),
-                col_index,
-                names.get(col_index).map(String::as_str),
-                replace_invalid_utf16,
-            )?);
-        }
-        let record_batch = RecordBatch::try_new(Arc::clone(&arrow_schema), columns)
-            .map_err(anyhow::Error::from)?;
+        let record_batch = build_record_batch::<TS, E>(
+            batch,
+            names,
+            schema,
+            replace_invalid_utf16,
+            Arc::clone(&arrow_schema),
+        )?;
         destination
             .push_record_batch(record_batch)
             .map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "dst_arrow")]
+struct OdbcRecordBatchStreamPlan<TS, E> {
+    conn: String,
+    queries: Vec<String>,
+    names: Arc<[String]>,
+    schema: Arc<[TS]>,
+    column_buffer_max_lens: Arc<[usize]>,
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    replace_invalid_utf16: bool,
+    arrow_schema: Arc<Schema>,
+    _marker: PhantomData<fn() -> E>,
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) struct OdbcRecordBatchIterator<TS, E> {
+    names: Vec<String>,
+    arrow_schema: Arc<Schema>,
+    receiver: Receiver<Result<RecordBatch, ConnectorXError>>,
+    sender: Option<Sender<Result<RecordBatch, ConnectorXError>>>,
+    plan: Option<OdbcRecordBatchStreamPlan<TS, E>>,
+}
+
+#[cfg(feature = "dst_arrow")]
+impl<TS, E> OdbcRecordBatchIterator<TS, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
+    E: OdbcCoreError + Send + 'static,
+{
+    fn new(
+        names: Vec<String>,
+        arrow_schema: Arc<Schema>,
+        plan: OdbcRecordBatchStreamPlan<TS, E>,
+    ) -> Self {
+        let (sender, receiver) = channel();
+        Self {
+            names,
+            arrow_schema,
+            receiver,
+            sender: Some(sender),
+            plan: Some(plan),
+        }
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+impl<TS, E> RecordBatchIterator for OdbcRecordBatchIterator<TS, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
+    E: OdbcCoreError + Send + 'static,
+{
+    fn get_schema(&self) -> (RecordBatch, &[String]) {
+        (
+            RecordBatch::new_empty(Arc::clone(&self.arrow_schema)),
+            &self.names,
+        )
+    }
+
+    fn prepare(&mut self) {
+        let Some(plan) = self.plan.take() else {
+            return;
+        };
+        let Some(sender) = self.sender.take() else {
+            return;
+        };
+
+        thread::spawn(move || {
+            let result = plan.queries.par_iter().try_for_each(|query| {
+                arrow_stream_fetch_partition::<TS, E>(
+                    &plan.conn,
+                    query,
+                    &plan.names,
+                    &plan.schema,
+                    &plan.column_buffer_max_lens,
+                    plan.batch_size,
+                    Arc::clone(&plan.connection_limiter),
+                    plan.execution_options,
+                    plan.replace_invalid_utf16,
+                    Arc::clone(&plan.arrow_schema),
+                    sender.clone(),
+                )
+            });
+            if let Err(error) = result {
+                let _ = sender.send(Err(ConnectorXError::Other(anyhow!(
+                    "ODBC Arrow stream worker failed: {error:?}"
+                ))));
+            }
+        });
+    }
+
+    fn next_batch(&mut self) -> Option<RecordBatch> {
+        match self.next_batch_result() {
+            Ok(record_batch) => record_batch,
+            Err(error) => {
+                log::error!("ODBC Arrow stream worker failed: {}", error);
+                None
+            }
+        }
+    }
+
+    fn next_batch_result(&mut self) -> crate::errors::Result<Option<RecordBatch>> {
+        if self.plan.is_some() {
+            self.prepare();
+        }
+        match self.receiver.recv() {
+            Ok(Ok(record_batch)) => Ok(Some(record_batch)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn odbc_record_batch_iter_impl<TS, E>(
+    conn: &str,
+    _origin_query: Option<String>,
+    queries: &[CXQuery<String>],
+    max_str_len: usize,
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    replace_invalid_utf16: bool,
+    map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
+) -> Result<OdbcRecordBatchIterator<TS, E>, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
+    E: OdbcCoreError + Send + 'static,
+{
+    let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+        TS::source_name(),
+        conn,
+        &queries[0].to_string(),
+        max_str_len,
+        &connection_limiter,
+        execution_options,
+        map_type,
+    )?;
+    let (_, record_schema) = odbc_arrow_schema(&names, &schema);
+
+    let plan = OdbcRecordBatchStreamPlan {
+        conn: conn.to_string(),
+        queries: queries
+            .iter()
+            .map(|query| query.as_str().to_string())
+            .collect(),
+        names: Arc::from(names.clone().into_boxed_slice()),
+        schema: Arc::from(schema.into_boxed_slice()),
+        column_buffer_max_lens: Arc::from(column_buffer_max_lens.into_boxed_slice()),
+        batch_size,
+        connection_limiter,
+        execution_options,
+        replace_invalid_utf16,
+        arrow_schema: Arc::clone(&record_schema),
+        _marker: PhantomData,
+    };
+
+    Ok(OdbcRecordBatchIterator::new(names, record_schema, plan))
+}
+
+#[cfg(feature = "dst_arrow")]
+fn arrow_stream_fetch_partition<TS, E>(
+    conn: &str,
+    query: &str,
+    names: &[String],
+    schema: &[TS],
+    column_buffer_max_lens: &[usize],
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    replace_invalid_utf16: bool,
+    arrow_schema: Arc<Schema>,
+    sender: Sender<Result<RecordBatch, ConnectorXError>>,
+) -> Result<(), E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+{
+    let _connection_permit = connection_limiter.acquire();
+    let cursor = execute_query::<E>(TS::source_name(), conn, query, execution_options)?;
+    let buffer = ColumnarAnyBuffer::try_from_descs(
+        batch_size,
+        schema
+            .iter()
+            .zip(column_buffer_max_lens)
+            .map(|(ty, &max_len)| ty.buffer_desc(max_len)),
+    )?;
+    let mut cursor = cursor.bind_buffer(buffer)?;
+
+    while let Some(batch) = cursor.fetch()? {
+        let record_batch = build_record_batch::<TS, E>(
+            batch,
+            names,
+            schema,
+            replace_invalid_utf16,
+            Arc::clone(&arrow_schema),
+        )?;
+        if sender.send(Ok(record_batch)).is_err() {
+            return Ok(());
+        }
     }
     Ok(())
 }
