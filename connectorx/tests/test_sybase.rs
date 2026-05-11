@@ -589,6 +589,60 @@ fn test_sybase_testcontainer_timestamp_rowversion_is_binary() {
 }
 
 #[test]
+fn test_sybase_testcontainer_binary_image_and_rowversion_transport() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase binary/image test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select fixed_bytes, variable_bytes, image_bytes, row_version \
+         from dbo.cx_odbc_binary_edge order by id",
+    )];
+
+    let source = SybaseSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, SybaseArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_sybase_binary_edge_batch(&rb);
+}
+
+#[test]
+fn test_sybase_testcontainer_binary_image_and_rowversion_fast_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase binary/image fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked(
+        "select fixed_bytes, variable_bytes, image_bytes, row_version \
+         from dbo.cx_odbc_binary_edge order by id",
+    )];
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_sybase_binary_edge_batch(&rb);
+}
+
+#[test]
 fn test_sybase_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -634,6 +688,61 @@ fn test_sybase_partition_query() {
         .map(RecordBatch::num_rows)
         .sum::<usize>();
     assert_eq!(rows, 1);
+}
+
+fn assert_sybase_binary_edge_batch(rb: &RecordBatch) {
+    assert_eq!(rb.num_rows(), 2);
+    assert_eq!(rb.num_columns(), 4);
+    for index in 0..rb.num_columns() {
+        assert_eq!(
+            rb.schema().field(index).data_type(),
+            &arrow::datatypes::DataType::LargeBinary
+        );
+    }
+
+    let fixed_bytes = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(
+        fixed_bytes.value(0),
+        &[0x00_u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0xfe, 0xff]
+    );
+    assert_eq!(fixed_bytes.value(0).len(), 8);
+    assert!(fixed_bytes.is_null(1));
+
+    let variable_bytes = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(variable_bytes.value(0), &[0x10_u8, 0x20, 0x30, 0x40, 0x50]);
+    assert_eq!(variable_bytes.value(0).len(), 5);
+    assert!(variable_bytes.is_null(1));
+
+    let image_bytes = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(
+        image_bytes.value(0),
+        &[
+            0x00_u8, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0xa0, 0xb0, 0xc0, 0xd0,
+            0xe0, 0xff,
+        ]
+    );
+    assert_eq!(image_bytes.value(0).len(), 16);
+    assert!(image_bytes.is_null(1));
+
+    let row_version = rb
+        .column(3)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(row_version.value(0).len(), 8);
+    assert_eq!(row_version.value(1).len(), 8);
 }
 
 fn verify_arrow_results(mut result: Vec<RecordBatch>) {

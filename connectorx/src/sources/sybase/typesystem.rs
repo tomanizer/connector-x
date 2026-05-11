@@ -285,6 +285,17 @@ mod tests {
             .unwrap(),
             SybaseTypeSystem::Binary(false)
         ));
+
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::LongVarbinary { length: None },
+                Nullability::Nullable,
+                "image_payload",
+                false,
+            )
+            .unwrap(),
+            SybaseTypeSystem::Binary(true)
+        ));
     }
 
     #[test]

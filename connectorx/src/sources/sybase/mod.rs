@@ -975,4 +975,52 @@ mod tests {
     fn parse_hex_bytes_rejects_non_hex_chars() {
         assert!(parse_hex_bytes(b"GG").is_err());
     }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn build_sybase_binary_array_passes_raw_binary_buffers_through() {
+        use arrow::array::{Array, LargeBinaryArray};
+        use odbc_api::buffers::{AnyBuffer, BufferDesc, ColumnBuffer};
+
+        let mut buffer = AnyBuffer::from_desc(2, BufferDesc::Binary { max_bytes: 4 });
+        if let AnyBuffer::Binary(column) = &mut buffer {
+            column.set_value(0, Some(&[0x00, 0x7f, 0x80, 0xff]));
+            column.set_value(1, None);
+        } else {
+            panic!("expected binary buffer");
+        }
+
+        let array = build_sybase_binary_array::<SybaseSourceError>(buffer.view(2), 2, true)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(array.value(0), &[0x00_u8, 0x7f, 0x80, 0xff]);
+        assert!(array.is_null(1));
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn build_sybase_binary_array_decodes_hex_text_buffers() {
+        use arrow::array::{Array, LargeBinaryArray};
+        use odbc_api::buffers::{AnyBuffer, BufferDesc, ColumnBuffer};
+
+        let mut buffer = AnyBuffer::from_desc(2, BufferDesc::Text { max_str_len: 8 });
+        if let AnyBuffer::Text(column) = &mut buffer {
+            column.set_value(0, Some(b"007F80FF"));
+            column.set_value(1, None);
+        } else {
+            panic!("expected text buffer");
+        }
+
+        let array = build_sybase_binary_array::<SybaseSourceError>(buffer.view(2), 2, true)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .unwrap()
+            .clone();
+        assert_eq!(array.value(0), &[0x00_u8, 0x7f, 0x80, 0xff]);
+        assert!(array.is_null(1));
+    }
 }
