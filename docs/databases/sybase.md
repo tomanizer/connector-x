@@ -88,6 +88,10 @@ The ODBC path currently maps these Sybase/ASE types:
 
 `unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output.
 
+Sybase `timestamp` is a rowversion-like binary value, not a wall-clock timestamp. When the ODBC driver reports it as `binary` or `varbinary`, ConnectorX returns `LargeBinary`. Cast it explicitly in the query if your driver exposes a non-standard representation and you need a different output type.
+
+FreeTDS reports ASE `time` and `bigtime` through the SQL Server `TIME2` extension on common ASE 16 configurations; ConnectorX maps that metadata to Arrow `Time64(Microsecond)`. `datetime`, `smalldatetime`, and `bigdatetime` map to Arrow `Timestamp(Microsecond)`, with the precision bounded by the source type and driver formatting.
+
 Sybase Unicode text buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility.
 
 ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.

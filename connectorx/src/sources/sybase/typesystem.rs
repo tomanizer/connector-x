@@ -259,6 +259,35 @@ mod tests {
     }
 
     #[test]
+    fn maps_sybase_timestamp_rowversion_binary_metadata_to_binary() {
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Binary {
+                    length: std::num::NonZeroUsize::new(8),
+                },
+                Nullability::NoNulls,
+                "row_version",
+                false,
+            )
+            .unwrap(),
+            SybaseTypeSystem::Binary(false)
+        ));
+
+        assert!(matches!(
+            SybaseTypeSystem::from_odbc(
+                DataType::Varbinary {
+                    length: std::num::NonZeroUsize::new(8),
+                },
+                Nullability::NoNulls,
+                "row_version",
+                false,
+            )
+            .unwrap(),
+            SybaseTypeSystem::Binary(false)
+        ));
+    }
+
+    #[test]
     fn rejects_unknown_and_vendor_types_by_default() {
         let error = SybaseTypeSystem::from_odbc(
             DataType::Other {

@@ -440,6 +440,155 @@ fn test_sybase_testcontainer_time2_and_null_bit() {
 }
 
 #[test]
+fn test_sybase_testcontainer_temporal_type_family_and_nulls() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase temporal family test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select date_v, time_v, datetime_v, smalldatetime_v, bigtime_v, bigdatetime_v \
+         from dbo.cx_odbc_temporal_edge order by id",
+    )];
+
+    let source = SybaseSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, SybaseArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_eq!(rb.num_rows(), 2);
+    assert_eq!(rb.num_columns(), 6);
+
+    let date_v = rb.column(0).as_any().downcast_ref::<Date32Array>().unwrap();
+    let expected_date = NaiveDate::from_ymd_opt(2024, 2, 3)
+        .unwrap()
+        .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+        .num_days() as i32;
+    assert_eq!(date_v.value(0), expected_date);
+    assert!(date_v.is_null(1));
+
+    let time_v = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<Time64MicrosecondArray>()
+        .unwrap();
+    assert_eq!(
+        time_v.value(0),
+        NaiveTime::parse_from_str("03:04:05", "%H:%M:%S")
+            .unwrap()
+            .num_seconds_from_midnight() as i64
+            * 1_000_000
+    );
+    assert!(time_v.is_null(1));
+
+    let datetime_v = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    assert_eq!(
+        datetime_v.value(0),
+        NaiveDateTime::parse_from_str("2024-02-03 04:05:06.123", "%Y-%m-%d %H:%M:%S%.f")
+            .unwrap()
+            .and_utc()
+            .timestamp_micros()
+    );
+    assert!(datetime_v.is_null(1));
+
+    let smalldatetime_v = rb
+        .column(3)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    assert_eq!(
+        smalldatetime_v.value(0),
+        NaiveDateTime::parse_from_str("2024-02-03 04:05:00", "%Y-%m-%d %H:%M:%S")
+            .unwrap()
+            .and_utc()
+            .timestamp_micros()
+    );
+    assert!(smalldatetime_v.is_null(1));
+
+    let bigtime_v = rb
+        .column(4)
+        .as_any()
+        .downcast_ref::<Time64MicrosecondArray>()
+        .unwrap();
+    assert_eq!(
+        bigtime_v.value(0),
+        NaiveTime::parse_from_str("13:14:15.123456", "%H:%M:%S%.f")
+            .unwrap()
+            .num_seconds_from_midnight() as i64
+            * 1_000_000
+            + 123_456
+    );
+    assert!(bigtime_v.is_null(1));
+
+    let bigdatetime_v = rb
+        .column(5)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    assert_eq!(
+        bigdatetime_v.value(0),
+        NaiveDateTime::parse_from_str("2024-02-03 04:05:06.123456", "%Y-%m-%d %H:%M:%S%.f")
+            .unwrap()
+            .and_utc()
+            .timestamp_micros()
+    );
+    assert!(bigdatetime_v.is_null(1));
+}
+
+#[test]
+fn test_sybase_testcontainer_timestamp_rowversion_is_binary() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase timestamp rowversion test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let queries = [CXQuery::naked(
+        "select row_version from dbo.cx_odbc_temporal_edge where id = 1",
+    )];
+
+    let source = SybaseSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, SybaseArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 1);
+    assert_eq!(
+        rb.schema().field(0).data_type(),
+        &arrow::datatypes::DataType::LargeBinary
+    );
+
+    let row_version = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert!(!row_version.value(0).is_empty());
+}
+
+#[test]
 fn test_sybase_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
