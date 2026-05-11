@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use crate::arrow_batch_iter::{ArrowBatchIter, RecordBatchIterator};
+use crate::arrow_batch_iter::{ArrowBatchIter, ErrorRecordBatchIterator, RecordBatchIterator};
 #[cfg(feature = "src_mysql")]
 use crate::sources::mysql::{BinaryProtocol as MySQLBinaryProtocol, TextProtocol};
 #[cfg(feature = "src_postgres")]
@@ -485,7 +485,11 @@ pub fn new_record_batch_iter(
                 queries,
                 batch_size,
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
+                    anyhow::anyhow!("failed to create Sybase Arrow record batch iterator: {error}"),
+                )))
+            });
         }
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => {
@@ -495,7 +499,11 @@ pub fn new_record_batch_iter(
                 queries,
                 batch_size,
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
+                    anyhow::anyhow!("failed to create Db2 Arrow record batch iterator: {error}"),
+                )))
+            });
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
@@ -505,7 +513,11 @@ pub fn new_record_batch_iter(
                 queries,
                 batch_size,
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
+                    anyhow::anyhow!("failed to create ODBC Arrow record batch iterator: {error}"),
+                )))
+            });
         }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
@@ -547,5 +559,50 @@ pub fn new_record_batch_iter(
         }
         _ => {}
     }
-    panic!("not supported!");
+    Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
+        anyhow::anyhow!(
+            "source {:?} not supported for Arrow record batch iteration",
+            source_conn.ty
+        ),
+    )))
+}
+
+#[allow(unreachable_code, unreachable_patterns, unused_variables, unused_mut)]
+pub fn new_record_batch_iter_result(
+    source_conn: &SourceConn,
+    origin_query: Option<String>,
+    queries: &[CXQuery<String>],
+    batch_size: usize,
+    pre_execution_queries: Option<&[String]>,
+) -> Result<Box<dyn RecordBatchIterator>, ConnectorXOutError> {
+    match source_conn.ty {
+        #[cfg(feature = "src_sybase")]
+        SourceType::Sybase => crate::sources::sybase::sybase_record_batch_iter(
+            &source_conn.conn,
+            origin_query,
+            queries,
+            batch_size,
+        ),
+        #[cfg(feature = "src_db2")]
+        SourceType::Db2 => crate::sources::db2::db2_record_batch_iter(
+            &source_conn.conn,
+            origin_query,
+            queries,
+            batch_size,
+        ),
+        #[cfg(feature = "src_odbc")]
+        SourceType::Odbc => crate::sources::odbc::odbc_record_batch_iter(
+            &source_conn.conn,
+            origin_query,
+            queries,
+            batch_size,
+        ),
+        _ => Ok(new_record_batch_iter(
+            source_conn,
+            origin_query,
+            queries,
+            batch_size,
+            pre_execution_queries,
+        )),
+    }
 }

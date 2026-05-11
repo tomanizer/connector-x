@@ -1,10 +1,12 @@
-use crate::errors::Result as ConnectorXResult;
+use crate::errors::{ConnectorXError, Result as ConnectorXResult};
 use crate::prelude::*;
+use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use itertools::Itertools;
 use log::debug;
 use rayon::prelude::*;
 use std::marker::PhantomData;
+use std::sync::Arc;
 
 pub fn set_global_num_thread(num: usize) {
     rayon::ThreadPoolBuilder::new()
@@ -160,6 +162,47 @@ pub trait RecordBatchIterator: Send {
     fn next_batch(&mut self) -> Option<RecordBatch>;
     fn next_batch_result(&mut self) -> ConnectorXResult<Option<RecordBatch>> {
         Ok(self.next_batch())
+    }
+}
+
+pub struct ErrorRecordBatchIterator {
+    error: Option<ConnectorXError>,
+    names: Vec<String>,
+    schema: Arc<Schema>,
+}
+
+impl ErrorRecordBatchIterator {
+    pub fn new(error: ConnectorXError) -> Self {
+        Self {
+            error: Some(error),
+            names: Vec::new(),
+            schema: Arc::new(Schema::empty()),
+        }
+    }
+}
+
+impl RecordBatchIterator for ErrorRecordBatchIterator {
+    fn get_schema(&self) -> (RecordBatch, &[String]) {
+        (
+            RecordBatch::new_empty(Arc::clone(&self.schema)),
+            &self.names,
+        )
+    }
+
+    fn prepare(&mut self) {}
+
+    fn next_batch(&mut self) -> Option<RecordBatch> {
+        if let Some(error) = self.error.take() {
+            log::error!("Arrow record batch iterator failed: {}", error);
+        }
+        None
+    }
+
+    fn next_batch_result(&mut self) -> ConnectorXResult<Option<RecordBatch>> {
+        match self.error.take() {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 }
 

@@ -3477,8 +3477,13 @@ where
     }
 
     fn next_batch(&mut self) -> Option<RecordBatch> {
-        self.next_batch_result()
-            .unwrap_or_else(|error| panic!("ODBC Arrow stream worker failed: {}", error))
+        match self.next_batch_result() {
+            Ok(record_batch) => record_batch,
+            Err(error) => {
+                log::error!("ODBC Arrow stream worker failed: {}", error);
+                None
+            }
+        }
     }
 
     fn next_batch_result(&mut self) -> crate::errors::Result<Option<RecordBatch>> {

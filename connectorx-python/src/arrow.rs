@@ -110,13 +110,13 @@ pub fn get_arrow_rb_iter<'py>(
     pre_execution_queries: Option<&[String]>,
     batch_size: usize,
 ) -> Bound<'py, PyAny> {
-    let mut arrow_iter: Box<dyn RecordBatchIterator> = new_record_batch_iter(
+    let mut arrow_iter: Box<dyn RecordBatchIterator> = new_record_batch_iter_result(
         source_conn,
         origin_query,
         queries,
         batch_size,
         pre_execution_queries,
-    );
+    )?;
 
     arrow_iter.prepare();
     let py_rb_iter = PyRecordBatchIterator(unsafe {
