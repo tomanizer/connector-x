@@ -45,6 +45,27 @@ Additional URL query parameters are appended to the ODBC connection string, so s
 
 Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string.
 
+## Dedicated Versus Generic ODBC Route
+
+Use `db2://` for Db2 production reads. It uses the same direct Arrow ODBC batch fetch path as generic `odbc://`, but keeps Db2-specific behavior in the places where it matters:
+
+* URL construction uses Db2 keywords such as `Hostname`, `Protocol`, and `Database`.
+* `DB2_*` environment variables and URL options control Db2 buffer size, batch size, connection limits, timeouts, UTF-16 replacement, and unknown-type fallback without affecting other ODBC sources in the same process.
+* Unknown or vendor-specific Db2 types produce Db2-specific diagnostics and mention `DB2_TYPE_FALLBACK_TO_VARCHAR`.
+* Partition count, range, and predicate queries are generated through the Db2 route policy.
+
+Use generic `odbc://` for Db2 mainly as a comparison or troubleshooting route: for example, when you need to pass an exact raw ODBC connection string through `odbc_connect`, compare ConnectorX with another ODBC client, or isolate whether a problem is in the driver metadata versus the Db2 route policy. For supported columns reported with standard ODBC metadata, `db2://` and `odbc://` are expected to produce the same Arrow schema, row count, null counts, and values.
+
+The route-comparison live tests can be run with both source features enabled:
+
+```bash
+DB2_URL="db2://db2inst1:YOUR_PASSWORD@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER" \
+DB2_ODBC_CONN="Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;Database=testdb;UID=db2inst1;PWD=YOUR_PASSWORD;" \
+cargo test -p connectorx --no-default-features --features "src_db2 src_odbc dst_arrow fptr" --test test_odbc_route_compare -- db2
+```
+
+Set `DB2_GENERIC_ODBC_URL` instead of `DB2_ODBC_CONN` when you want the comparison to use a hand-written generic `odbc://` URL.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Db2 ODBC/CLI driver is a runtime dependency and is not bundled in ConnectorX wheels.
