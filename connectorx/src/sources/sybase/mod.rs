@@ -711,7 +711,7 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Bit(..) => ArrowDataType::Boolean,
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => ArrowDataType::Utf8,
+            | SybaseTypeSystem::Text(..) => ArrowDataType::LargeUtf8,
             SybaseTypeSystem::Binary(..) => ArrowDataType::LargeBinary,
             SybaseTypeSystem::Date(..) => ArrowDataType::Date32,
             SybaseTypeSystem::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),

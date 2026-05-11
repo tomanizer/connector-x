@@ -4,7 +4,7 @@ use arrow::{
     array::Array,
     array::{
         BooleanArray, Date32Array, Decimal128Array, Float32Array, Float64Array, Int64Array,
-        LargeBinaryArray, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+        LargeBinaryArray, LargeStringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
     },
     record_batch::RecordBatch,
 };
@@ -375,10 +375,18 @@ fn test_sybase_arrow_date_money_and_text_variants() {
     );
     assert_eq!(smallmoney_v.value(0), -123_400);
 
-    let char_v = rb.column(4).as_any().downcast_ref::<StringArray>().unwrap();
+    let char_v = rb
+        .column(4)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
     assert_eq!(char_v.value(0).trim_end(), "xy");
 
-    let text_v = rb.column(5).as_any().downcast_ref::<StringArray>().unwrap();
+    let text_v = rb
+        .column(5)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
     assert_eq!(text_v.value(0), "long text value");
 }
 
@@ -444,7 +452,12 @@ fn test_sybase_get_arrow_route() {
     let queries = [basic_type_query()];
     let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
 
-    verify_arrow_results(destination.arrow().unwrap());
+    let result = destination.arrow().unwrap();
+    assert_eq!(
+        result[0].schema().field(2).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
+    verify_arrow_results(result);
 }
 
 #[test]
@@ -497,9 +510,9 @@ fn verify_arrow_results(mut result: Vec<RecordBatch>) {
     assert!(rb
         .column(2)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap()
-        .eq(&StringArray::from(vec!["alpha", "beta"])));
+        .eq(&LargeStringArray::from(vec!["alpha", "beta"])));
 }
 
 /// Test that `get_arrow` (which routes through `sybase_get_arrow`) preserves the exact

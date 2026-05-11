@@ -7,9 +7,10 @@ use crate::constants::{DEFAULT_ARROW_DECIMAL, DEFAULT_ARROW_DECIMAL_SCALE, SECON
 use crate::utils::decimal_to_i128;
 use arrow::array::{
     ArrayBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
-    Int16Builder, Int32Builder, Int64Builder, LargeBinaryBuilder, LargeListBuilder, StringBuilder,
-    Time64MicrosecondBuilder, Time64NanosecondBuilder, TimestampMicrosecondBuilder,
-    TimestampNanosecondBuilder, UInt16Builder, UInt32Builder, UInt64Builder,
+    Int16Builder, Int32Builder, Int64Builder, LargeBinaryBuilder, LargeListBuilder,
+    LargeStringBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
+    TimestampMicrosecondBuilder, TimestampNanosecondBuilder, UInt16Builder, UInt32Builder,
+    UInt64Builder,
 };
 use arrow::datatypes::Field;
 use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
@@ -156,10 +157,10 @@ impl ArrowAssoc for Option<Decimal> {
 }
 
 impl ArrowAssoc for &str {
-    type Builder = StringBuilder;
+    type Builder = LargeStringBuilder;
 
     fn builder(nrows: usize) -> Self::Builder {
-        StringBuilder::with_capacity(1024, nrows)
+        LargeStringBuilder::with_capacity(nrows, nrows * 8)
     }
 
     #[throws(ArrowDestinationError)]
@@ -168,15 +169,15 @@ impl ArrowAssoc for &str {
     }
 
     fn field(header: &str) -> Field {
-        Field::new(header, ArrowDataType::Utf8, false)
+        Field::new(header, ArrowDataType::LargeUtf8, false)
     }
 }
 
 impl ArrowAssoc for Option<&str> {
-    type Builder = StringBuilder;
+    type Builder = LargeStringBuilder;
 
     fn builder(nrows: usize) -> Self::Builder {
-        StringBuilder::with_capacity(1024, nrows)
+        LargeStringBuilder::with_capacity(nrows, nrows * 8)
     }
 
     #[throws(ArrowDestinationError)]
@@ -188,15 +189,15 @@ impl ArrowAssoc for Option<&str> {
     }
 
     fn field(header: &str) -> Field {
-        Field::new(header, ArrowDataType::Utf8, true)
+        Field::new(header, ArrowDataType::LargeUtf8, true)
     }
 }
 
 impl ArrowAssoc for String {
-    type Builder = StringBuilder;
+    type Builder = LargeStringBuilder;
 
     fn builder(nrows: usize) -> Self::Builder {
-        StringBuilder::with_capacity(1024, nrows)
+        LargeStringBuilder::with_capacity(nrows, nrows * 8)
     }
 
     #[throws(ArrowDestinationError)]
@@ -205,15 +206,15 @@ impl ArrowAssoc for String {
     }
 
     fn field(header: &str) -> Field {
-        Field::new(header, ArrowDataType::Utf8, false)
+        Field::new(header, ArrowDataType::LargeUtf8, false)
     }
 }
 
 impl ArrowAssoc for Option<String> {
-    type Builder = StringBuilder;
+    type Builder = LargeStringBuilder;
 
     fn builder(nrows: usize) -> Self::Builder {
-        StringBuilder::with_capacity(1024, nrows)
+        LargeStringBuilder::with_capacity(nrows, nrows * 8)
     }
 
     #[throws(ArrowDestinationError)]
@@ -225,7 +226,7 @@ impl ArrowAssoc for Option<String> {
     }
 
     fn field(header: &str) -> Field {
-        Field::new(header, ArrowDataType::Utf8, true)
+        Field::new(header, ArrowDataType::LargeUtf8, true)
     }
 }
 
@@ -704,7 +705,11 @@ macro_rules! impl_arrow_array_assoc {
 }
 
 impl_arrow_array_assoc!(Vec<Option<bool>>, ArrowDataType::Boolean, BooleanBuilder);
-impl_arrow_array_assoc!(Vec<Option<String>>, ArrowDataType::Utf8, StringBuilder);
+impl_arrow_array_assoc!(
+    Vec<Option<String>>,
+    ArrowDataType::LargeUtf8,
+    LargeStringBuilder
+);
 impl_arrow_array_assoc!(Vec<Option<i16>>, ArrowDataType::Int16, Int16Builder);
 impl_arrow_array_assoc!(Vec<Option<i32>>, ArrowDataType::Int32, Int32Builder);
 impl_arrow_array_assoc!(Vec<Option<i64>>, ArrowDataType::Int64, Int64Builder);
