@@ -72,6 +72,16 @@ impl SybaseOptions {
     }
 }
 
+fn validate_sybase_options(options: &SybaseOptions) -> Result<(), anyhow::Error> {
+    odbc_core::validate_batch_and_buffer_limits(
+        SybaseTypeSystem::source_name(),
+        "SYBASE_BATCH_SIZE",
+        options.batch_size,
+        SybaseTypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )
+}
+
 impl Default for SybaseOptions {
     fn default() -> Self {
         Self {
@@ -109,6 +119,7 @@ impl SybaseSource {
 
     #[throws(SybaseSourceError)]
     pub fn with_options(conn: &str, nconn: usize, options: SybaseOptions) -> Self {
+        validate_sybase_options(&options)?;
         let params = connection_query_pairs(conn)?;
         let params = params.as_deref();
         let replace_invalid_utf16 = params
@@ -594,6 +605,7 @@ pub(crate) fn sybase_get_arrow(
     queries: &[CXQuery<String>],
 ) -> OutResult<ArrowDestination> {
     let options = SybaseOptions::from_env();
+    validate_sybase_options(&options)?;
     let params = url_query_pairs(conn)?;
     let conn_str = sybase_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -635,6 +647,13 @@ pub(crate) fn sybase_record_batch_iter(
     batch_size: usize,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = SybaseOptions::from_env();
+    odbc_core::validate_batch_and_buffer_limits(
+        SybaseTypeSystem::source_name(),
+        "batch_size",
+        batch_size,
+        SybaseTypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )?;
     let params = url_query_pairs(conn)?;
     let conn_str = sybase_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -941,6 +960,44 @@ mod tests {
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_batch_and_buffer_options() {
+        let conn = "Driver={FreeTDS};Server=localhost;";
+        let too_many_rows = match SybaseSource::with_options(
+            conn,
+            1,
+            SybaseOptions {
+                batch_size: odbc_core::MAX_BATCH_SIZE + 1,
+                ..SybaseOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized Sybase batch size to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_many_rows.contains("SYBASE_BATCH_SIZE"),
+            "{}",
+            too_many_rows
+        );
+
+        let too_much_buffer = match SybaseSource::with_options(
+            conn,
+            1,
+            SybaseOptions {
+                max_str_len: odbc_core::MAX_STR_LEN + 1,
+                ..SybaseOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized Sybase max string length to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_much_buffer.contains("SYBASE_MAX_STR_LEN"),
+            "{}",
+            too_much_buffer
         );
     }
 

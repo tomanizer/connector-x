@@ -35,6 +35,10 @@ use crate::{
 pub(crate) type OdbcCursor = CursorImpl<StatementConnection<Connection<'static>>>;
 pub(crate) type OdbcBlockCursor = BlockCursor<OdbcCursor, ColumnarAnyBuffer>;
 
+pub(crate) const MAX_BATCH_SIZE: usize = 65_536;
+pub(crate) const MAX_STR_LEN: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_VARIABLE_COLUMN_BUFFER_BYTES: usize = 256 * 1024 * 1024;
+
 #[derive(Debug)]
 pub(crate) struct OdbcConnectionLimiter {
     max_connections: usize,
@@ -100,6 +104,52 @@ pub(crate) fn connection_limiter(
         return Err(anyhow!("max_connections must be at least 1"));
     }
     Ok(OdbcConnectionLimiter::new(max_connections))
+}
+
+pub(crate) fn validate_batch_and_buffer_limits(
+    source_name: &'static str,
+    batch_size_name: &'static str,
+    batch_size: usize,
+    max_str_len_name: &'static str,
+    max_str_len: usize,
+) -> Result<(), anyhow::Error> {
+    if batch_size == 0 {
+        return Err(anyhow!(
+            "{source_name} {batch_size_name} must be at least 1"
+        ));
+    }
+    if batch_size > MAX_BATCH_SIZE {
+        return Err(anyhow!(
+            "{source_name} {batch_size_name}={} exceeds maximum {}; lower {batch_size_name} to avoid oversized ODBC batch buffers",
+            batch_size,
+            MAX_BATCH_SIZE
+        ));
+    }
+    if max_str_len == 0 {
+        return Err(anyhow!(
+            "{source_name} {max_str_len_name} must be at least 1"
+        ));
+    }
+    if max_str_len > MAX_STR_LEN {
+        return Err(anyhow!(
+            "{source_name} {max_str_len_name}={} exceeds maximum {} bytes; use a smaller buffer or cast/substr large columns",
+            max_str_len,
+            MAX_STR_LEN
+        ));
+    }
+    let variable_column_buffer_bytes = batch_size.checked_mul(max_str_len).ok_or_else(|| {
+        anyhow!(
+            "{source_name} {batch_size_name} * {max_str_len_name} overflows usize; lower one of the values"
+        )
+    })?;
+    if variable_column_buffer_bytes > MAX_VARIABLE_COLUMN_BUFFER_BYTES {
+        return Err(anyhow!(
+            "{source_name} {batch_size_name} * {max_str_len_name} reserves {} bytes per variable-width column, exceeding maximum {}; lower one of the values",
+            variable_column_buffer_bytes,
+            MAX_VARIABLE_COLUMN_BUFFER_BYTES
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1905,6 +1955,73 @@ mod tests {
         assert_eq!(connection_limiter(None, 0).unwrap().max_connections(), 1);
         assert_eq!(connection_limiter(None, 3).unwrap().max_connections(), 3);
         assert_eq!(connection_limiter(Some(2), 8).unwrap().max_connections(), 2);
+    }
+
+    #[test]
+    fn validates_odbc_batch_and_buffer_limits() {
+        validate_batch_and_buffer_limits(
+            "Odbc",
+            "ODBC_BATCH_SIZE",
+            16_384,
+            "ODBC_MAX_STR_LEN",
+            16 * 1024,
+        )
+        .unwrap();
+
+        let err = validate_batch_and_buffer_limits(
+            "Odbc",
+            "ODBC_BATCH_SIZE",
+            0,
+            "ODBC_MAX_STR_LEN",
+            1024,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("ODBC_BATCH_SIZE must be at least 1"),
+            "{}",
+            err
+        );
+
+        let err = validate_batch_and_buffer_limits(
+            "Odbc",
+            "ODBC_BATCH_SIZE",
+            MAX_BATCH_SIZE + 1,
+            "ODBC_MAX_STR_LEN",
+            1024,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ODBC_BATCH_SIZE"), "{}", err);
+        assert!(err.contains(&MAX_BATCH_SIZE.to_string()), "{}", err);
+
+        let err = validate_batch_and_buffer_limits(
+            "Odbc",
+            "ODBC_BATCH_SIZE",
+            1024,
+            "ODBC_MAX_STR_LEN",
+            MAX_STR_LEN + 1,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ODBC_MAX_STR_LEN"), "{}", err);
+        assert!(err.contains(&MAX_STR_LEN.to_string()), "{}", err);
+
+        let err = validate_batch_and_buffer_limits(
+            "Odbc",
+            "ODBC_BATCH_SIZE",
+            16_384,
+            "ODBC_MAX_STR_LEN",
+            32 * 1024,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("per variable-width column"), "{}", err);
+        assert!(
+            err.contains(&MAX_VARIABLE_COLUMN_BUFFER_BYTES.to_string()),
+            "{}",
+            err
+        );
     }
 
     #[test]

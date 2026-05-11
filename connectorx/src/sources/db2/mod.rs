@@ -71,6 +71,16 @@ impl Db2Options {
     }
 }
 
+fn validate_db2_options(options: &Db2Options) -> Result<(), anyhow::Error> {
+    odbc_core::validate_batch_and_buffer_limits(
+        Db2TypeSystem::source_name(),
+        "DB2_BATCH_SIZE",
+        options.batch_size,
+        Db2TypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )
+}
+
 impl Default for Db2Options {
     fn default() -> Self {
         Self {
@@ -108,6 +118,7 @@ impl Db2Source {
 
     #[throws(Db2SourceError)]
     pub fn with_options(conn: &str, nconn: usize, options: Db2Options) -> Self {
+        validate_db2_options(&options)?;
         let params = connection_query_pairs(conn)?;
         let params = params.as_deref();
         let replace_invalid_utf16 = params
@@ -548,6 +559,7 @@ pub(crate) fn db2_get_arrow(
     queries: &[CXQuery<String>],
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
+    validate_db2_options(&options)?;
     let params = url_query_pairs(conn)?;
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -589,6 +601,13 @@ pub(crate) fn db2_record_batch_iter(
     batch_size: usize,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = Db2Options::from_env();
+    odbc_core::validate_batch_and_buffer_limits(
+        Db2TypeSystem::source_name(),
+        "batch_size",
+        batch_size,
+        Db2TypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )?;
     let params = url_query_pairs(conn)?;
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -708,6 +727,44 @@ mod tests {
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_batch_and_buffer_options() {
+        let conn = "Driver={IBM DB2 ODBC DRIVER};Database=test;";
+        let too_many_rows = match Db2Source::with_options(
+            conn,
+            1,
+            Db2Options {
+                batch_size: odbc_core::MAX_BATCH_SIZE + 1,
+                ..Db2Options::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized Db2 batch size to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_many_rows.contains("DB2_BATCH_SIZE"),
+            "{}",
+            too_many_rows
+        );
+
+        let too_much_buffer = match Db2Source::with_options(
+            conn,
+            1,
+            Db2Options {
+                max_str_len: odbc_core::MAX_STR_LEN + 1,
+                ..Db2Options::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized Db2 max string length to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_much_buffer.contains("DB2_MAX_STR_LEN"),
+            "{}",
+            too_much_buffer
         );
     }
 

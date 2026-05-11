@@ -71,6 +71,16 @@ impl OdbcOptions {
     }
 }
 
+fn validate_odbc_options(options: &OdbcOptions) -> Result<(), anyhow::Error> {
+    odbc_core::validate_batch_and_buffer_limits(
+        OdbcTypeSystem::source_name(),
+        "ODBC_BATCH_SIZE",
+        options.batch_size,
+        OdbcTypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )
+}
+
 impl Default for OdbcOptions {
     fn default() -> Self {
         Self {
@@ -108,6 +118,7 @@ impl OdbcSource {
 
     #[throws(OdbcSourceError)]
     pub fn with_options(conn: &str, nconn: usize, options: OdbcOptions) -> Self {
+        validate_odbc_options(&options)?;
         let params = connection_query_pairs(conn)?;
         let params = params.as_deref();
         let replace_invalid_utf16 = params
@@ -347,6 +358,7 @@ pub(crate) fn odbc_get_arrow(
     queries: &[CXQuery<String>],
 ) -> OutResult<ArrowDestination> {
     let options = OdbcOptions::from_env();
+    validate_odbc_options(&options)?;
     let params = url_query_pairs(conn)?;
     let conn_str = odbc_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -388,6 +400,13 @@ pub(crate) fn odbc_record_batch_iter(
     batch_size: usize,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = OdbcOptions::from_env();
+    odbc_core::validate_batch_and_buffer_limits(
+        OdbcTypeSystem::source_name(),
+        "batch_size",
+        batch_size,
+        OdbcTypeSystem::max_str_len_env(),
+        options.max_str_len,
+    )?;
     let params = url_query_pairs(conn)?;
     let conn_str = odbc_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -759,6 +778,44 @@ mod tests {
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
             }
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_batch_and_buffer_options() {
+        let conn = "Driver={SQLite3};Database=:memory:;";
+        let too_many_rows = match OdbcSource::with_options(
+            conn,
+            1,
+            OdbcOptions {
+                batch_size: odbc_core::MAX_BATCH_SIZE + 1,
+                ..OdbcOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized ODBC batch size to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_many_rows.contains("ODBC_BATCH_SIZE"),
+            "{}",
+            too_many_rows
+        );
+
+        let too_much_buffer = match OdbcSource::with_options(
+            conn,
+            1,
+            OdbcOptions {
+                max_str_len: odbc_core::MAX_STR_LEN + 1,
+                ..OdbcOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("expected oversized ODBC max string length to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            too_much_buffer.contains("ODBC_MAX_STR_LEN"),
+            "{}",
+            too_much_buffer
         );
     }
 

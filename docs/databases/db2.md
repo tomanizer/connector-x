@@ -122,14 +122,14 @@ The ODBC reader fetches rows in batches and binds primitive columns with typed O
 
 The defaults are tuned for throughput over small memory use:
 
-* `DB2_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`.
-* `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`.
+* `DB2_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`. Recommended range is `1024` to `16384`; hard maximum is `65536`.
+* `DB2_MAX_STR_LEN`: maximum bytes bound per cell for ODBC text and binary buffers. Defaults to `1024`. Hard maximum is `67108864` bytes.
 * `DB2_MAX_CONNECTIONS`: maximum active Db2 ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `DB2_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `DB2_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `DB2_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Db2 URL, or `DB2_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Db2 URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound.
+`DB2_BATCH_SIZE * DB2_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Db2 URL, or `DB2_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Db2 URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound; lower `DB2_BATCH_SIZE` when raising `DB2_MAX_STR_LEN` for large LOB cells.
 If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.
 
 ## Testing And Benchmarking
