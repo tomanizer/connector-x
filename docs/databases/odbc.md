@@ -143,6 +143,38 @@ Useful benchmark controls:
 * `ODBC_BENCH_BATCH_SIZES`: comma-separated `ODBC_BATCH_SIZE` values to compare. Defaults to `1024,4096,8192,16384`.
 * `ODBC_BENCH_QUERY`: custom benchmark query. When set, the benchmark runs only that query.
 
+To compare ConnectorX ODBC-family routes against Polars `arrow-odbc`, use the Python correctness benchmark:
+
+```bash
+ODBC_URL="odbc://localhost/db?driver=PostgreSQL&server_key=Server&..." \
+ODBC_CONN="Driver={PostgreSQL};Server=127.0.0.1;Database=postgres;UID=postgres;PWD=postgres;" \
+scripts/odbc_arrow_compare.py --backend odbc
+```
+
+For Db2 and Sybase, configure both the dedicated ConnectorX URL and the raw ODBC connection used by `arrow-odbc`:
+
+```bash
+DB2_URL="db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER" \
+DB2_ODBC_CONN="Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;Database=testdb;UID=db2inst1;PWD=password;" \
+scripts/odbc_arrow_compare.py --backend db2
+
+SYBASE_URL="sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&tds_version=5.0" \
+SYBASE_ODBC_CONN="Driver={FreeTDS};Server=127.0.0.1;Port=5000;TDS_Version=5.0;UID=sa;PWD=sybase;Database=tempdb;" \
+scripts/odbc_arrow_compare.py --backend sybase
+```
+
+The script compares ConnectorX dedicated routes, ConnectorX generic `odbc://`, ConnectorX partitioned routes for partitionable cases, and `pl.read_database(..., connection=...)` through `arrow-odbc` where the required connection strings are configured. It reports wall-clock time, rows/sec, peak RSS delta when available, route partition count, schema, null counts, min/max summaries, and row hashes. By default it exits non-zero on correctness mismatches; pass `--warn-only` to keep timings while only warning about mismatches.
+
+Useful controls:
+
+* `CX_ODBC_COMPARE_BACKENDS`: comma-separated `odbc`, `db2`, and/or `sybase` when `--backend` is omitted.
+* `CX_ODBC_COMPARE_ITERATIONS` and `CX_ODBC_COMPARE_WARMUPS`: measured and warmup iterations per route.
+* `CX_ODBC_COMPARE_PARTITION_NUM`: ConnectorX partition count for partitionable cases. Defaults to `4`.
+* `CX_ODBC_COMPARE_QUERY`, `CX_ODBC_COMPARE_PARTITION_ON`, and `CX_ODBC_COMPARE_PARTITION_RANGE`: run one custom query instead of the built-in edge cases.
+* `CX_ODBC_COMPARE_CASES_JSON`: JSON array of `{ "name", "query", "partition_on", "partition_range" }` objects for a custom workload matrix.
+* `CX_ODBC_COMPARE_ARROW_EXECUTE_OPTIONS_JSON`: JSON object passed as Polars `read_database(..., execute_options=...)` for the `arrow-odbc` route.
+* `DB2_GENERIC_ODBC_URL` and `SYBASE_GENERIC_ODBC_URL`: override the generic ConnectorX `odbc://` route. If omitted, the script builds an `odbc_connect` URL from the raw ODBC connection string.
+
 ## Testing
 
 For the preferred live test, run PostgreSQL through the Rust testcontainer helper and connect to it through psqlODBC:
