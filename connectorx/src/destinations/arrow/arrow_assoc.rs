@@ -1,6 +1,7 @@
 use super::{
     errors::{ArrowDestinationError, Result},
     typesystem::{DateTimeWrapperMicro, NaiveDateTimeWrapperMicro, NaiveTimeWrapperMicro},
+    ArrowTypeSystem,
 };
 use crate::{
     constants::{DEFAULT_ARROW_DECIMAL, DEFAULT_ARROW_DECIMAL_SCALE, SECONDS_IN_DAY},
@@ -24,7 +25,28 @@ pub trait ArrowAssoc {
 
     fn builder(nrows: usize) -> Self::Builder;
     fn append(builder: &mut Self::Builder, value: Self) -> Result<()>;
+    fn append_with_typesystem(
+        builder: &mut Self::Builder,
+        value: Self,
+        _dt: ArrowTypeSystem,
+    ) -> Result<()>
+    where
+        Self: Sized,
+    {
+        Self::append(builder, value)
+    }
     fn field(header: &str) -> Field;
+}
+
+fn decimal_scale(dt: ArrowTypeSystem) -> Result<u32> {
+    match dt {
+        ArrowTypeSystem::Decimal128(_, _, scale) if scale >= 0 => Ok(scale as u32),
+        ArrowTypeSystem::Decimal128(_, _, scale) => {
+            Err(anyhow::anyhow!("negative Arrow decimal scale {scale}").into())
+        }
+        ArrowTypeSystem::Decimal(_) => Ok(DEFAULT_ARROW_DECIMAL_SCALE as u32),
+        _ => Err(anyhow::anyhow!("decimal scale requested for non-decimal type {dt:?}").into()),
+    }
 }
 
 macro_rules! impl_arrow_assoc {
@@ -87,6 +109,15 @@ impl ArrowAssoc for Decimal {
         Ok(())
     }
 
+    fn append_with_typesystem(
+        builder: &mut Self::Builder,
+        value: Self,
+        dt: ArrowTypeSystem,
+    ) -> Result<()> {
+        builder.append_value(decimal_to_i128(value, decimal_scale(dt)?)?);
+        Ok(())
+    }
+
     fn field(header: &str) -> Field {
         Field::new(header, DEFAULT_ARROW_DECIMAL, false)
     }
@@ -105,6 +136,18 @@ impl ArrowAssoc for Option<Decimal> {
                 v,
                 DEFAULT_ARROW_DECIMAL_SCALE as u32,
             )?)),
+            None => builder.append_null(),
+        }
+        Ok(())
+    }
+
+    fn append_with_typesystem(
+        builder: &mut Self::Builder,
+        value: Self,
+        dt: ArrowTypeSystem,
+    ) -> Result<()> {
+        match value {
+            Some(v) => builder.append_option(Some(decimal_to_i128(v, decimal_scale(dt)?)?)),
             None => builder.append_null(),
         }
         Ok(())

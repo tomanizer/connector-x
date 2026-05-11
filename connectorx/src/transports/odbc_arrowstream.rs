@@ -36,8 +36,8 @@ impl_transport!(
         { BigInt[i64]                  => Int64[i64]            | conversion auto }
         { Real[f32]                    => Float32[f32]          | conversion auto }
         { Double[f64]                  => Float64[f64]          | conversion auto }
-        { Numeric[Decimal]             => Decimal[Decimal]      | conversion auto }
-        { Decimal[Decimal]             => Decimal[Decimal]      | conversion none }
+        { Numeric[Decimal]             => Decimal128[Decimal]   | conversion auto | preserve decimal }
+        { Decimal[Decimal]             => Decimal128[Decimal]   | conversion none | preserve decimal }
         { Bit[bool]                    => Boolean[bool]         | conversion auto }
         { Char[String]                 => LargeUtf8[String]     | conversion auto }
         { Varchar[String]              => LargeUtf8[String]     | conversion none }

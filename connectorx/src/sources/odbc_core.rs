@@ -3129,7 +3129,9 @@ macro_rules! impl_odbc_arrow_policy {
                     }
                     Self::Real(..) => ArrowTypeSystem::Float32(nullable),
                     Self::Double(..) => ArrowTypeSystem::Float64(nullable),
-                    Self::Numeric(..) | Self::Decimal(..) => ArrowTypeSystem::Decimal(nullable),
+                    Self::Numeric(_, precision, scale) | Self::Decimal(_, precision, scale) => {
+                        ArrowTypeSystem::Decimal128(nullable, precision, scale)
+                    }
                     Self::Bit(..) => ArrowTypeSystem::Boolean(nullable),
                     Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
                         ArrowTypeSystem::LargeUtf8(nullable)
