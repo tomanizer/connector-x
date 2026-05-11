@@ -643,6 +643,77 @@ fn test_sybase_testcontainer_binary_image_and_rowversion_fast_path() {
 }
 
 #[test]
+fn test_sybase_testcontainer_unicode_text_transport() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase Unicode text transport test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let queries = [sybase_unicode_edge_query()];
+
+    let source = SybaseSource::new(&conn, 1).unwrap();
+    let mut destination = ArrowDestination::new();
+    let dispatcher =
+        Dispatcher::<_, _, SybaseArrowTransport>::new(source, &mut destination, &queries, None);
+    dispatcher.run().unwrap();
+
+    let mut result = destination.arrow().unwrap();
+    assert_eq!(result.len(), 1);
+    let rb = result.pop().unwrap();
+    assert_sybase_unicode_edge_batch(&rb);
+}
+
+#[test]
+fn test_sybase_testcontainer_unicode_text_fast_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase Unicode text fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [sybase_unicode_edge_query()];
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_sybase_unicode_edge_batch(&rb);
+}
+
+#[cfg(feature = "src_odbc")]
+#[test]
+fn test_sybase_testcontainer_unicode_text_generic_odbc_fast_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase generic ODBC Unicode text test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_conn();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [sybase_unicode_edge_query()];
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_sybase_unicode_edge_batch(&rb);
+}
+
+#[test]
 fn test_sybase_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
@@ -688,6 +759,14 @@ fn test_sybase_partition_query() {
         .map(RecordBatch::num_rows)
         .sum::<usize>();
     assert_eq!(rows, 1);
+}
+
+fn sybase_unicode_edge_query() -> CXQuery<String> {
+    CXQuery::naked(
+        "select varchar_text, text_v, unichar_v, univarchar_v, long_univarchar_v, \
+         convert(univarchar(128), unitext_v) as unitext_as_univarchar \
+         from dbo.cx_odbc_unicode_edge order by id",
+    )
 }
 
 fn assert_sybase_binary_edge_batch(rb: &RecordBatch) {
@@ -743,6 +822,67 @@ fn assert_sybase_binary_edge_batch(rb: &RecordBatch) {
         .unwrap();
     assert_eq!(row_version.value(0).len(), 8);
     assert_eq!(row_version.value(1).len(), 8);
+}
+
+fn assert_sybase_unicode_edge_batch(rb: &RecordBatch) {
+    assert_eq!(rb.num_rows(), 2);
+    assert_eq!(rb.num_columns(), 6);
+    for index in 0..rb.num_columns() {
+        assert_eq!(
+            rb.schema().field(index).data_type(),
+            &arrow::datatypes::DataType::LargeUtf8
+        );
+    }
+
+    let varchar_text = rb
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(varchar_text.value(0), "plain varchar");
+    assert!(varchar_text.is_null(1));
+
+    let text_v = rb
+        .column(1)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(text_v.value(0).len(), 1200);
+    assert!(text_v.value(0).chars().all(|ch| ch == 't'));
+    assert!(text_v.is_null(1));
+
+    let unichar_v = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(unichar_v.value(0).trim_end(), "Grusse");
+    assert!(unichar_v.is_null(1));
+
+    let univarchar_v = rb
+        .column(3)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(univarchar_v.value(0), "Grüße Tokyo");
+    assert!(univarchar_v.is_null(1));
+
+    let long_univarchar_v = rb
+        .column(4)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(long_univarchar_v.value(0).len(), 1200);
+    assert!(long_univarchar_v.value(0).chars().all(|ch| ch == 'u'));
+    assert!(long_univarchar_v.is_null(1));
+
+    let unitext_as_univarchar = rb
+        .column(5)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(unitext_as_univarchar.value(0), "Unitext Grüße Tokyo");
+    assert!(unitext_as_univarchar.is_null(1));
 }
 
 fn verify_arrow_results(mut result: Vec<RecordBatch>) {

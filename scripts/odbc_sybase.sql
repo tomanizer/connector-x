@@ -148,3 +148,42 @@ values (
     null
 )
 go
+
+if object_id('dbo.cx_odbc_unicode_edge') is not null
+    drop table dbo.cx_odbc_unicode_edge
+go
+
+create table dbo.cx_odbc_unicode_edge (
+    id int not null,
+    varchar_text varchar(64) null,
+    text_v text null,
+    unichar_v unichar(16) null,
+    univarchar_v univarchar(64) null,
+    long_univarchar_v univarchar(1500) null,
+    unitext_v unitext null
+)
+go
+
+insert into dbo.cx_odbc_unicode_edge (
+    id,
+    varchar_text,
+    text_v,
+    unichar_v,
+    univarchar_v,
+    long_univarchar_v,
+    unitext_v
+)
+values (
+    1,
+    'plain varchar',
+    replicate('t', 1200),
+    convert(unichar(16), N'Grusse'),
+    convert(univarchar(64), N'Grüße Tokyo'),
+    replicate(convert(univarchar(1), N'u'), 1200),
+    convert(unitext, N'Unitext Grüße Tokyo')
+)
+go
+
+insert into dbo.cx_odbc_unicode_edge (id)
+values (2)
+go
