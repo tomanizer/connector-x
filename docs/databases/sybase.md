@@ -141,3 +141,13 @@ SYBASE_BENCH_QUERY="select * from dbo.cx_sybase_test" \
 SYBASE_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_sybase dst_arrow" --bench sybase_odbc
 ```
+
+Compare ConnectorX `sybase://`, ConnectorX generic `odbc://`, partitioned ConnectorX, and Polars `arrow-odbc` with:
+
+```bash
+SYBASE_URL="sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&tds_version=5.0" \
+SYBASE_ODBC_CONN="Driver={FreeTDS};Server=127.0.0.1;Port=5000;TDS_Version=5.0;UID=sa;PWD=sybase;Database=tempdb;" \
+scripts/odbc_arrow_compare.py --backend sybase
+```
+
+The comparison script includes Sybase edge cases for money/decimal, temporal values, binary/image, Unicode text, rowversion-like binary values, and partitioned reads where the seeded tables are available. It fails by default on schema, null-count, row-count, row-hash, or value mismatches and reports timings for each route.

@@ -177,3 +177,13 @@ DB2_BENCH_QUERY="select * from cx_db2_test" \
 DB2_BENCH_ROWS=10000 \
 cargo bench -p connectorx --features "src_db2 dst_arrow" --bench db2_odbc
 ```
+
+Compare ConnectorX `db2://`, ConnectorX generic `odbc://`, partitioned ConnectorX, and Polars `arrow-odbc` with:
+
+```bash
+DB2_URL="db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER" \
+DB2_ODBC_CONN="Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;Database=testdb;UID=db2inst1;PWD=password;" \
+scripts/odbc_arrow_compare.py --backend db2
+```
+
+The comparison script fails by default on schema, null-count, row-count, row-hash, or value mismatches and reports timings for each route.
