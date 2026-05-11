@@ -187,3 +187,39 @@ go
 insert into dbo.cx_odbc_unicode_edge (id)
 values (2)
 go
+
+if object_id('dbo.cx_odbc_partition_edge') is not null
+    drop table dbo.cx_odbc_partition_edge
+go
+
+create table dbo.cx_odbc_partition_edge (
+    [TradeId] int null,
+    [select] int not null,
+    trade_label varchar(16) not null,
+    cob_date datetime not null
+)
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (null, 0, 'null-key', '2024-02-01 00:00:00')
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (1, 10, 'one', '2024-02-01 00:00:00')
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (2, 20, 'two', '2024-02-02 00:00:00')
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (3, 30, 'three', '2024-02-03 00:00:00')
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (4, 40, 'four', '2024-02-04 00:00:00')
+go
+
+insert into dbo.cx_odbc_partition_edge ([TradeId], [select], trade_label, cob_date)
+values (5, 50, 'five', '2024-02-05 00:00:00')
+go

@@ -15,9 +15,10 @@ use connectorx::{
     partition::{partition, PartitionQuery},
     prelude::*,
     sources::sybase::{sybase_conn_string, SybaseSource},
-    sql::CXQuery,
+    sql::{count_query, get_partition_range_query, single_col_partition_query, CXQuery},
     transports::SybaseArrowTransport,
 };
+use sqlparser::dialect::MsSqlDialect;
 
 mod test_db;
 
@@ -761,6 +762,131 @@ fn test_sybase_partition_query() {
     assert_eq!(rows, 1);
 }
 
+#[test]
+fn test_sybase_query_wrapping_sql_shapes() {
+    let query = sybase_partition_edge_query();
+
+    let count_sql = count_query(&query, &MsSqlDialect {}).unwrap().to_string();
+    assert!(count_sql.contains("SELECT count(*) FROM ("));
+    assert!(count_sql.contains("TOP (4)"));
+    assert!(count_sql.contains("[TradeId]"));
+    assert!(count_sql.contains("[select]"));
+    assert!(count_sql.contains("convert(datetime"));
+    assert!(count_sql.contains("dbo.cx_odbc_partition_edge"));
+    assert!(!count_sql.contains("ORDER BY"));
+
+    let range_sql = get_partition_range_query(query.as_str(), "TradeId", &MsSqlDialect {}).unwrap();
+    assert!(range_sql.contains("SELECT min(CXTMPTAB_RANGE.TradeId), max(CXTMPTAB_RANGE.TradeId)"));
+    assert!(range_sql.contains("FROM ("));
+    assert!(range_sql.contains("TOP (4)"));
+    assert!(!range_sql.contains("ORDER BY"));
+
+    let part_sql =
+        single_col_partition_query(query.as_str(), "TradeId", 1, 3, &MsSqlDialect {}).unwrap();
+    assert!(part_sql.contains("SELECT * FROM ("));
+    assert!(part_sql.contains("TOP (4)"));
+    assert!(part_sql.contains("ORDER BY [TradeId]"));
+    assert!(part_sql.contains("1 <= CXTMPTAB_PART.TradeId"));
+    assert!(part_sql.contains("CXTMPTAB_PART.TradeId < 3"));
+}
+
+#[test]
+fn test_sybase_testcontainer_query_wrapping_count_range_and_partition() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase query wrapping test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let query = sybase_partition_edge_query();
+
+    let count = count_query(&query, &MsSqlDialect {}).unwrap();
+    let destination = get_arrow(&source_conn, None, &[count], None).unwrap();
+    assert_single_i64(destination.arrow().unwrap(), 4);
+
+    let range = CXQuery::naked(
+        get_partition_range_query(query.as_str(), "TradeId", &MsSqlDialect {}).unwrap(),
+    );
+    let destination = get_arrow(&source_conn, None, &[range], None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 2);
+    assert_eq!(
+        rb.column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        1
+    );
+    assert_eq!(
+        rb.column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        4
+    );
+
+    let part = PartitionQuery::new(query.as_str(), "TradeId", None, None, 2);
+    let queries = partition(&part, &source_conn).unwrap();
+    assert_eq!(queries.len(), 2);
+
+    let destination = get_arrow(&source_conn, Some(query.to_string()), &queries, None).unwrap();
+    let batches = destination.arrow().unwrap();
+    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(rows, 4);
+    assert_partition_trade_ids(&batches);
+}
+
+#[test]
+fn test_sybase_testcontainer_query_wrapping_nested_subquery_partition() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase nested partition test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let query = CXQuery::naked(
+        "select TradeId, trade_label from ( \
+             select [TradeId] as TradeId, trade_label \
+             from dbo.cx_odbc_partition_edge \
+             where [TradeId] is not null \
+         ) nested_q where TradeId <= 4 order by TradeId",
+    );
+    let part = PartitionQuery::new(query.as_str(), "TradeId", None, None, 2);
+    let queries = partition(&part, &source_conn).unwrap();
+    assert_eq!(queries.len(), 2);
+
+    let destination = get_arrow(&source_conn, Some(query.to_string()), &queries, None).unwrap();
+    let batches = destination.arrow().unwrap();
+    let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
+    assert_eq!(rows, 4);
+    assert_partition_trade_ids(&batches);
+}
+
+fn sybase_partition_edge_query() -> CXQuery<String> {
+    CXQuery::naked(
+        "select top 4 [TradeId] as TradeId, [select], trade_label, \
+         convert(datetime, cob_date) as cob_date \
+         from dbo.cx_odbc_partition_edge \
+         where [TradeId] is not null \
+         order by [TradeId]",
+    )
+}
+
 fn sybase_unicode_edge_query() -> CXQuery<String> {
     CXQuery::naked(
         "select varchar_text, text_v, unichar_v, univarchar_v, long_univarchar_v, \
@@ -883,6 +1009,33 @@ fn assert_sybase_unicode_edge_batch(rb: &RecordBatch) {
         .unwrap();
     assert_eq!(unitext_as_univarchar.value(0), "Unitext Grüße Tokyo");
     assert!(unitext_as_univarchar.is_null(1));
+}
+
+fn assert_single_i64(mut batches: Vec<RecordBatch>, expected: i64) {
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+    assert_eq!(rb.num_columns(), 1);
+    assert_eq!(
+        rb.column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        expected
+    );
+}
+
+fn assert_partition_trade_ids(batches: &[RecordBatch]) {
+    let mut ids = Vec::new();
+    for rb in batches {
+        let col = rb.column(0).as_any().downcast_ref::<Int64Array>().unwrap();
+        for row in 0..col.len() {
+            ids.push(col.value(row));
+        }
+    }
+    ids.sort_unstable();
+    assert_eq!(ids, vec![1, 2, 3, 4]);
 }
 
 fn verify_arrow_results(mut result: Vec<RecordBatch>) {
