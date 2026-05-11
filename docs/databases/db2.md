@@ -77,13 +77,27 @@ The ODBC path currently maps these Db2 types:
 * Floating point: `real`, `double`, `float`
 * Decimal: `numeric`, `decimal`
 * Boolean: ODBC `SQL_BIT` when reported by the driver
-* Text: `char`, `varchar`, `clob`, wide-character variants reported by ODBC
+* Text: `char`, `varchar`, `clob`, `dbclob`, `graphic`, `vargraphic`, and wide-character variants when reported as standard ODBC text or wide-text metadata
 * Binary: `binary`, `varbinary`, `blob`
 * Date/time: `date`, `time`, `timestamp`
 
-Db2 `DECFLOAT`, `XML`, graphic string, and platform-specific types may be reported by the ODBC driver as generic or vendor-specific types. ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
+Db2 `DECFLOAT`, `XML`, `ROWID`, and platform-specific types may be reported by the ODBC driver as vendor-specific `SQL_DECFLOAT`, `SQL_XML`, `SQL_ROWID`, or other non-standard ODBC type codes. ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
+
+The initial DB2-specific policy is:
+
+| Db2 type | ConnectorX policy |
+| --- | --- |
+| `DECIMAL(p,s)` / `NUMERIC(p,s)` | Arrow `Decimal128(p,s)` using the precision and scale reported by ODBC. |
+| `DECFLOAT(16)` / `DECFLOAT(34)` | Strict unsupported when reported as `SQL_DECFLOAT`; cast to `varchar` or opt into `DB2_TYPE_FALLBACK_TO_VARCHAR=true` for string output. Scientific notation is passed through as text in fallback mode rather than parsed as fixed-scale decimal. |
+| `XML` | Strict unsupported when reported as `SQL_XML`; use `xmlserialize(... as varchar(n))` for text output. |
+| `CLOB` / `DBCLOB` | Arrow `LargeUtf8` when reported as standard long text or wide long text. Values are fetched through the configured text buffer. |
+| `BLOB` | Arrow `LargeBinary` when reported as standard long binary. Values are fetched through the configured binary buffer. |
+| `GRAPHIC` / `VARGRAPHIC` | Arrow `LargeUtf8` when reported as ODBC wide text. |
+| `ROWID` | Supported as `LargeBinary` or `LargeUtf8` only if the driver reports standard binary or text metadata. Vendor-specific `SQL_ROWID` follows the strict/fallback unknown-type policy. |
 
 Db2 graphic and wide-character buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Db2 URL only for explicit replacement-character compatibility.
+
+`DB2_MAX_STR_LEN` bounds the per-cell buffer used for text, binary, decimal-as-text, CLOB, DBCLOB, and BLOB values. ConnectorX detects ODBC truncation indicators and returns an error asking you to raise `DB2_MAX_STR_LEN` or cast/substr the column. Piecewise LOB streaming is not implemented yet, so very large LOB extraction should use an explicit cast/substr window or a larger buffer sized for the workload.
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 

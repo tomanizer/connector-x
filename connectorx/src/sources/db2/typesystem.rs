@@ -138,6 +138,8 @@ pub(crate) fn decimal_scale(scale: i16) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroUsize;
+
     use odbc_api::sys::SqlDataType;
 
     #[test]
@@ -218,6 +220,70 @@ mod tests {
         assert!(error.contains("column_name=vendor_col"));
         assert!(error.contains("odbc_type_code=-370"));
         assert!(error.contains(DB2_UNKNOWN_TYPE_FALLBACK_ENV));
+    }
+
+    #[test]
+    fn maps_db2_lob_binary_and_wide_text_metadata() {
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::LongVarchar {
+                    length: NonZeroUsize::new(2048)
+                },
+                Nullability::Nullable,
+                "clob_v",
+                false
+            )
+            .unwrap(),
+            Db2TypeSystem::Text(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::WLongVarchar {
+                    length: NonZeroUsize::new(2048)
+                },
+                Nullability::Nullable,
+                "dbclob_v",
+                false
+            )
+            .unwrap(),
+            Db2TypeSystem::Text(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::LongVarbinary {
+                    length: NonZeroUsize::new(2048)
+                },
+                Nullability::Nullable,
+                "blob_v",
+                false
+            )
+            .unwrap(),
+            Db2TypeSystem::Binary(true)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::WChar {
+                    length: NonZeroUsize::new(16)
+                },
+                Nullability::NoNulls,
+                "graphic_v",
+                false
+            )
+            .unwrap(),
+            Db2TypeSystem::Char(false)
+        ));
+        assert!(matches!(
+            Db2TypeSystem::from_odbc(
+                DataType::WVarchar {
+                    length: NonZeroUsize::new(64)
+                },
+                Nullability::Nullable,
+                "vargraphic_v",
+                false
+            )
+            .unwrap(),
+            Db2TypeSystem::Varchar(true)
+        ));
     }
 
     #[test]
