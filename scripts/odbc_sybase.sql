@@ -67,3 +67,43 @@ values (
     'short'
 )
 go
+
+if object_id('dbo.cx_odbc_temporal_edge') is not null
+    drop table dbo.cx_odbc_temporal_edge
+go
+
+create table dbo.cx_odbc_temporal_edge (
+    id int not null,
+    date_v date null,
+    time_v time null,
+    datetime_v datetime null,
+    smalldatetime_v smalldatetime null,
+    bigtime_v bigtime null,
+    bigdatetime_v bigdatetime null,
+    row_version timestamp
+)
+go
+
+insert into dbo.cx_odbc_temporal_edge (
+    id,
+    date_v,
+    time_v,
+    datetime_v,
+    smalldatetime_v,
+    bigtime_v,
+    bigdatetime_v
+)
+values (
+    1,
+    '2024-02-03',
+    '03:04:05',
+    '2024-02-03 04:05:06.123',
+    '2024-02-03 04:05',
+    '13:14:15.123456',
+    '2024-02-03 04:05:06.123456'
+)
+go
+
+insert into dbo.cx_odbc_temporal_edge (id)
+values (2)
+go
