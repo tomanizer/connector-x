@@ -104,6 +104,10 @@ ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in t
 
 See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runtime mapping, strict unknown-type handling, fallback opt-in, and truncation behavior.
 
+## Query Wrapping And Partitioning
+
+Sybase count, partition-range, and partition predicates are generated with ConnectorX's T-SQL-compatible wrapping path. The live Sybase tests cover schema-qualified tables, bracketed identifiers, reserved-word columns, `top`, `order by`, nested subqueries, `convert(datetime, ...)`, and nullable partition columns. Query shapes outside that set should be validated against the target ASE server and ODBC driver before relying on partitioned extraction in production.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, and `bit` columns avoid text conversion in the hot path. Decimal, date/time, text, and binary columns still use text buffers for driver compatibility.
