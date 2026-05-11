@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use arrow::{
     array::{
-        Array, Decimal128Array, LargeBinaryArray, StringArray, Time64MicrosecondArray,
+        Array, Decimal128Array, LargeBinaryArray, LargeStringArray, Time64MicrosecondArray,
         TimestampMicrosecondArray,
     },
     util::display::array_value_to_string,
@@ -349,25 +349,37 @@ fn test_odbc_testcontainer_edge_types() {
         Some(&b"hello"[..]),
     ])));
 
+    assert_eq!(
+        batch.schema().field(4).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
     let wide_text = batch
         .column(4)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(wide_text.value(0), "Grüße 東京");
 
+    assert_eq!(
+        batch.schema().field(5).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
     let nullable_text = batch
         .column(5)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert!(nullable_text.is_null(0));
     assert_eq!(nullable_text.value(1), "present");
 
+    assert_eq!(
+        batch.schema().field(6).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
     let long_text = batch
         .column(6)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
 }
@@ -400,7 +412,7 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
     let nullable_text = batch
         .column(0)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert!(nullable_text.is_null(0));
 
@@ -419,7 +431,7 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
     let long_text = batch
         .column(0)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
 }
@@ -453,7 +465,7 @@ fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
     let long_text = batch
         .column(0)
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .unwrap();
     assert_eq!(long_text.value(0).len(), 64);
 }

@@ -1,7 +1,8 @@
 use arrow::{
     array::{
         BooleanArray, BooleanBuilder, Float64Array, Int16Builder, Int32Array, Int32Builder,
-        Int64Array, Int64Builder, LargeListArray, LargeListBuilder, StringArray, StringBuilder,
+        Int64Array, Int64Builder, LargeListArray, LargeListBuilder, LargeStringArray,
+        StringBuilder,
     },
     record_batch::RecordBatch,
 };
@@ -91,9 +92,9 @@ fn test_arrow() {
                 assert!(r
                     .column(3)
                     .as_any()
-                    .downcast_ref::<StringArray>()
+                    .downcast_ref::<LargeStringArray>()
                     .unwrap()
-                    .eq(&StringArray::from(vec!["0", "1", "2", "3"])));
+                    .eq(&LargeStringArray::from(vec!["0", "1", "2", "3"])));
                 assert!(r
                     .column(4)
                     .as_any()
@@ -126,9 +127,11 @@ fn test_arrow() {
                 assert!(r
                     .column(3)
                     .as_any()
-                    .downcast_ref::<StringArray>()
+                    .downcast_ref::<LargeStringArray>()
                     .unwrap()
-                    .eq(&StringArray::from(vec!["0", "1", "2", "3", "4", "5", "6"])));
+                    .eq(&LargeStringArray::from(vec![
+                        "0", "1", "2", "3", "4", "5", "6"
+                    ])));
                 assert!(r
                     .column(4)
                     .as_any()
@@ -231,9 +234,9 @@ fn test_postgres_arrow() {
                 assert!(r
                     .column(2)
                     .as_any()
-                    .downcast_ref::<StringArray>()
+                    .downcast_ref::<LargeStringArray>()
                     .unwrap()
-                    .eq(&StringArray::from(vec!["str1", "a"])));
+                    .eq(&LargeStringArray::from(vec!["str1", "a"])));
                 assert!(r
                     .column(3)
                     .as_any()
@@ -263,9 +266,9 @@ fn test_postgres_arrow() {
                 assert!(r
                     .column(2)
                     .as_any()
-                    .downcast_ref::<StringArray>()
+                    .downcast_ref::<LargeStringArray>()
                     .unwrap()
-                    .eq(&StringArray::from(vec![
+                    .eq(&LargeStringArray::from(vec![
                         Some("str2"),
                         Some("b"),
                         Some("c"),

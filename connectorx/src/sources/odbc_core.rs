@@ -2457,7 +2457,7 @@ use crate::{
 use arrow::{
     array::{
         ArrayRef, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
-        Int64Builder, LargeBinaryBuilder, StringBuilder, Time64MicrosecondBuilder,
+        Int64Builder, LargeBinaryBuilder, LargeStringBuilder, Time64MicrosecondBuilder,
         TimestampMicrosecondBuilder,
     },
     datatypes::{DataType as ArrowDataType, Field, Schema},
@@ -2878,7 +2878,7 @@ pub(crate) fn build_string_array<E: OdbcCoreError>(
     column_name: Option<&str>,
     replace_invalid_utf16: bool,
 ) -> Result<ArrayRef, E> {
-    let mut builder = StringBuilder::with_capacity(nrows, nrows * 8);
+    let mut builder = LargeStringBuilder::with_capacity(nrows, nrows * 8);
     match column {
         AnySlice::Text(view) => {
             for row_index in 0..nrows {
@@ -3155,7 +3155,7 @@ macro_rules! impl_odbc_arrow_policy {
                         ArrowDataType::Decimal128(precision, scale)
                     }
                     Self::Bit(..) => ArrowDataType::Boolean,
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => ArrowDataType::Utf8,
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => ArrowDataType::LargeUtf8,
                     Self::Binary(..) => ArrowDataType::LargeBinary,
                     Self::Date(..) => ArrowDataType::Date32,
                     Self::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),
