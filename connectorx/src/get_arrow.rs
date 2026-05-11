@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::arrow_batch_iter::{ArrowBatchIter, RecordBatchIterator};
 #[cfg(feature = "src_mysql")]
 use crate::sources::mysql::{BinaryProtocol as MySQLBinaryProtocol, TextProtocol};
 #[cfg(feature = "src_postgres")]
@@ -5,11 +7,7 @@ use crate::sources::postgres::{
     rewrite_tls_args, BinaryProtocol as PgBinaryProtocol, CSVProtocol, CursorProtocol,
     SimpleProtocol,
 };
-use crate::{
-    arrow_batch_iter::{ArrowBatchIter, RecordBatchIterator},
-    prelude::*,
-    sql::CXQuery,
-};
+use crate::{prelude::*, sql::CXQuery};
 use fehler::{throw, throws};
 use log::debug;
 #[cfg(feature = "src_postgres")]
@@ -481,39 +479,33 @@ pub fn new_record_batch_iter(
         }
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => {
-            let source = SybaseSource::new(&source_conn.conn[..], queries.len()).unwrap();
-            let batch_iter = ArrowBatchIter::<_, SybaseArrowStreamTransport>::new(
-                source,
-                destination,
+            return crate::sources::sybase::sybase_record_batch_iter(
+                &source_conn.conn,
                 origin_query,
                 queries,
+                batch_size,
             )
             .unwrap();
-            return Box::new(batch_iter);
         }
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => {
-            let source = Db2Source::new(&source_conn.conn[..], queries.len()).unwrap();
-            let batch_iter = ArrowBatchIter::<_, Db2ArrowStreamTransport>::new(
-                source,
-                destination,
+            return crate::sources::db2::db2_record_batch_iter(
+                &source_conn.conn,
                 origin_query,
                 queries,
+                batch_size,
             )
             .unwrap();
-            return Box::new(batch_iter);
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
-            let source = OdbcSource::new(&source_conn.conn[..], queries.len()).unwrap();
-            let batch_iter = ArrowBatchIter::<_, OdbcArrowStreamTransport>::new(
-                source,
-                destination,
+            return crate::sources::odbc::odbc_record_batch_iter(
+                &source_conn.conn,
                 origin_query,
                 queries,
+                batch_size,
             )
             .unwrap();
-            return Box::new(batch_iter);
         }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
