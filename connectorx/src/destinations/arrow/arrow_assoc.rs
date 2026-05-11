@@ -10,7 +10,7 @@ use crate::{
 use arrow::array::{
     ArrayBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder, Float64Builder,
     Int16Builder, Int32Builder, Int64Builder, LargeBinaryBuilder, LargeListBuilder,
-    LargeStringBuilder, StringBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
+    LargeStringBuilder, Time64MicrosecondBuilder, Time64NanosecondBuilder,
     TimestampMicrosecondBuilder, TimestampNanosecondBuilder, UInt16Builder, UInt32Builder,
     UInt64Builder,
 };
@@ -708,7 +708,11 @@ macro_rules! impl_arrow_array_assoc {
 }
 
 impl_arrow_array_assoc!(Vec<Option<bool>>, ArrowDataType::Boolean, BooleanBuilder);
-impl_arrow_array_assoc!(Vec<Option<String>>, ArrowDataType::Utf8, StringBuilder);
+impl_arrow_array_assoc!(
+    Vec<Option<String>>,
+    ArrowDataType::LargeUtf8,
+    LargeStringBuilder
+);
 impl_arrow_array_assoc!(Vec<Option<i16>>, ArrowDataType::Int16, Int16Builder);
 impl_arrow_array_assoc!(Vec<Option<i32>>, ArrowDataType::Int32, Int32Builder);
 impl_arrow_array_assoc!(Vec<Option<i64>>, ArrowDataType::Int64, Int64Builder);

@@ -2,7 +2,7 @@ use arrow::{
     array::{
         BooleanArray, BooleanBuilder, Float64Array, Int16Builder, Int32Array, Int32Builder,
         Int64Array, Int64Builder, LargeListArray, LargeListBuilder, LargeStringArray,
-        StringBuilder,
+        LargeStringBuilder,
     },
     record_batch::RecordBatch,
 };
@@ -363,8 +363,8 @@ fn test_postgres_varchararray_arrow() {
     assert_eq!(1, records.len());
 
     for r in records {
-        let mut builder: LargeListBuilder<StringBuilder> =
-            LargeListBuilder::with_capacity(StringBuilder::new(), 5);
+        let mut builder: LargeListBuilder<LargeStringBuilder> =
+            LargeListBuilder::with_capacity(LargeStringBuilder::new(), 5);
         builder.append_value([Some("str1"), Some("str2")]);
         builder.append_value([
             Some("0123456789"),
@@ -410,8 +410,8 @@ fn test_postgres_textarray_arrow() {
     assert_eq!(1, records.len());
 
     for r in records {
-        let mut builder: LargeListBuilder<StringBuilder> =
-            LargeListBuilder::with_capacity(StringBuilder::new(), 5);
+        let mut builder: LargeListBuilder<LargeStringBuilder> =
+            LargeListBuilder::with_capacity(LargeStringBuilder::new(), 5);
         builder.append_value([Some("str1"), Some("str2")]);
         builder.append_value([
             Some("0123456789"),
