@@ -1,3 +1,4 @@
+use crate::errors::Result as ConnectorXResult;
 use crate::prelude::*;
 use arrow::record_batch::RecordBatch;
 use itertools::Itertools;
@@ -157,6 +158,9 @@ pub trait RecordBatchIterator: Send {
     fn get_schema(&self) -> (RecordBatch, &[String]);
     fn prepare(&mut self);
     fn next_batch(&mut self) -> Option<RecordBatch>;
+    fn next_batch_result(&mut self) -> ConnectorXResult<Option<RecordBatch>> {
+        Ok(self.next_batch())
+    }
 }
 
 impl<'a, S, TP> RecordBatchIterator for ArrowBatchIter<S, TP>

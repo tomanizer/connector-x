@@ -66,7 +66,11 @@ impl PyRecordBatchIterator {
         mut slf: PyRefMut<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Option<Py<PyRecordBatch>>> {
-        match slf.0.next_batch() {
+        match slf
+            .0
+            .next_batch_result()
+            .map_err(ConnectorXPythonError::from)?
+        {
             Some(rb) => {
                 let wrapped = PyRecordBatch(Some(rb));
                 let py_obj = Py::new(py, wrapped)?;

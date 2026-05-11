@@ -3401,8 +3401,8 @@ struct OdbcRecordBatchStreamPlan<TS, E> {
 pub(crate) struct OdbcRecordBatchIterator<TS, E> {
     names: Vec<String>,
     arrow_schema: Arc<Schema>,
-    receiver: Receiver<RecordBatch>,
-    sender: Option<Sender<RecordBatch>>,
+    receiver: Receiver<Result<RecordBatch, ConnectorXError>>,
+    sender: Option<Sender<Result<RecordBatch, ConnectorXError>>>,
     plan: Option<OdbcRecordBatchStreamPlan<TS, E>>,
 }
 
@@ -3466,16 +3466,27 @@ where
                 )
             });
             if let Err(error) = result {
-                log::error!("ODBC Arrow stream worker failed: {:?}", error);
+                let _ = sender.send(Err(ConnectorXError::Other(anyhow!(
+                    "ODBC Arrow stream worker failed: {error:?}"
+                ))));
             }
         });
     }
 
     fn next_batch(&mut self) -> Option<RecordBatch> {
+        self.next_batch_result()
+            .unwrap_or_else(|error| panic!("ODBC Arrow stream worker failed: {}", error))
+    }
+
+    fn next_batch_result(&mut self) -> crate::errors::Result<Option<RecordBatch>> {
         if self.plan.is_some() {
             self.prepare();
         }
-        self.receiver.recv().ok()
+        match self.receiver.recv() {
+            Ok(Ok(record_batch)) => Ok(Some(record_batch)),
+            Ok(Err(error)) => Err(error),
+            Err(_) => Ok(None),
+        }
     }
 }
 
@@ -3538,7 +3549,7 @@ fn arrow_stream_fetch_partition<TS, E>(
     execution_options: OdbcExecutionOptions,
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
-    sender: Sender<RecordBatch>,
+    sender: Sender<Result<RecordBatch, ConnectorXError>>,
 ) -> Result<(), E>
 where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
@@ -3564,7 +3575,7 @@ where
             Arc::clone(&arrow_schema),
         )?;
         sender
-            .send(record_batch)
+            .send(Ok(record_batch))
             .map_err(|err| anyhow!("failed to send ODBC Arrow stream record batch: {err}"))?;
     }
     Ok(())
