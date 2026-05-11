@@ -15,7 +15,7 @@ pub(crate) fn is_raw_odbc_conn_string(conn: &str) -> bool {
         .any(|prefix| lower.starts_with(prefix))
 }
 
-#[cfg(any(feature = "src_odbc", feature = "src_db2"))]
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 pub(crate) fn is_connector_option_key(key: &str) -> bool {
     key.eq_ignore_ascii_case("cxprotocol")
         || key.eq_ignore_ascii_case(REPLACE_INVALID_UTF16_PARAM)
@@ -122,7 +122,7 @@ pub(crate) fn odbc_conn_value(value: &str) -> String {
     format!("{{{}}}", value.replace('}', "}}"))
 }
 
-#[cfg(any(feature = "src_odbc", feature = "src_db2"))]
+#[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 pub(crate) fn is_valid_odbc_key(key: &str) -> bool {
     !key.is_empty()
         && key.trim() == key
