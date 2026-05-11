@@ -16,16 +16,17 @@ use crate::{
     errors::ConnectorXError,
     sources::{
         odbc_common::{
-            connection_query_pairs, is_raw_odbc_conn_string, odbc_conn_value, param_bool_param,
-            param_u32_param, param_usize_param, param_value, url_query_pairs,
-            LOGIN_TIMEOUT_SECS_PARAM, MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM,
-            REPLACE_INVALID_UTF16_PARAM,
+            connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
+            is_valid_odbc_key, odbc_conn_value, param_bool_param, param_u32_param,
+            param_usize_param, param_value, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM,
+            MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
         Produce, Source, SourcePartition,
     },
     sql::{count_query, CXQuery},
 };
+use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
 use odbc_api::{
@@ -883,6 +884,17 @@ pub fn sybase_conn_string(conn: &str) -> String {
     if !database.is_empty() {
         ret.push_str(&format!("Database={};", odbc_conn_value(&database)));
     }
+    for (key, value) in &params {
+        if !is_connector_option_key(key)
+            && !key.eq_ignore_ascii_case("driver")
+            && !key.eq_ignore_ascii_case("tds_version")
+        {
+            if !is_valid_odbc_key(key) {
+                throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
+            }
+            ret.push_str(&format!("{}={};", key, odbc_conn_value(value)));
+        }
+    }
     ret
 }
 
@@ -945,6 +957,30 @@ mod tests {
         assert_eq!(source.connection_limiter.max_connections(), 3);
         assert_eq!(source.execution_options.login_timeout_secs, Some(5));
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn sybase_url_passes_through_driver_odbc_options() {
+        let conn = "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&tds_version=5.0&charset=UTF-8&Encrypt=yes&APP=ConnectorX%3Bworker";
+        assert_eq!(
+            sybase_conn_string(conn).unwrap(),
+            "Driver={FreeTDS};Server={127.0.0.1};Port=5000;TDS_Version={5.0};UID={sa};PWD={sybase};Database={tempdb};charset={UTF-8};Encrypt={yes};APP={ConnectorX;worker};"
+        );
+    }
+
+    #[test]
+    fn sybase_url_rejects_invalid_odbc_option_keys() {
+        for invalid_key in ["bad%3Bkey", "bad%3Dkey"] {
+            let err = sybase_conn_string(&format!(
+                "sybase://sa:sybase@127.0.0.1:5000/tempdb?driver=FreeTDS&{invalid_key}=value"
+            ))
+            .unwrap_err()
+            .to_string();
+
+            assert!(err.contains("invalid ODBC connection-string key"));
+            assert!(err.contains("bad"));
+            assert!(err.contains("key"));
+        }
     }
 
     #[test]
