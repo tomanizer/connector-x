@@ -572,12 +572,22 @@ fn replication_key_partition_hint(candidate_columns: &[Db2CatalogColumn]) -> Db2
 }
 
 fn is_numeric_db2_type(type_name: &str) -> bool {
-    let upper = type_name.to_ascii_uppercase();
     [
         "SMALLINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "DECFLOAT",
     ]
     .iter()
-    .any(|ty| upper == *ty || upper.starts_with(&format!("{ty}(")))
+    .any(|ty| db2_type_name_matches(type_name, ty))
+}
+
+fn db2_type_name_matches(type_name: &str, base_type: &str) -> bool {
+    if type_name.eq_ignore_ascii_case(base_type) {
+        return true;
+    }
+
+    type_name
+        .get(..base_type.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(base_type))
+        && type_name.as_bytes().get(base_type.len()) == Some(&b'(')
 }
 
 fn looks_like_site_column(name: &str) -> bool {
@@ -833,6 +843,16 @@ mod tests {
         let config = Db2ProfileConfig::from_values_and_params(Some(&params), None, None).unwrap();
         assert_eq!(config.profile, Db2Profile::QReplication);
         assert_eq!(config.replication_key_columns, default_qrep_columns());
+    }
+
+    #[test]
+    fn numeric_db2_type_detection_handles_case_and_precision() {
+        assert!(is_numeric_db2_type("BIGINT"));
+        assert!(is_numeric_db2_type("decimal(18,4)"));
+        assert!(is_numeric_db2_type("DeCfLoAt"));
+        assert!(!is_numeric_db2_type("INTEGERISH"));
+        assert!(!is_numeric_db2_type("VARCHAR(32)"));
+        assert!(!is_numeric_db2_type("ÅINTEGER("));
     }
 
     #[test]
