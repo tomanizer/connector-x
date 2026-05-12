@@ -85,7 +85,7 @@ cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow 
 
 When `CONNECTORX_SYBASE_TESTCONTAINER=1` is set, the matrix also includes the seeded `image`, rowversion-like `timestamp`, long `univarchar`, and `unitext`-cast cases from `scripts/odbc_sybase.sql`. Without the seeded tables it still records expression-based primitive, money, decimal, temporal, binary, and Unicode cases.
 
-The output includes the parsed `Driver` and `TDS_Version` connection keywords where present, the ODBC DBMS name, `@@version` when the server allows it, ODBC type code, column size, decimal digits, nullability, ConnectorX type policy, and the buffer policy. This keeps new driver-specific expectations additive: add a new diagnostic case or expected row for the driver instead of rewriting the core Sybase type-system tests.
+The output includes the parsed `Driver` and `TDS_Version` connection keywords where present, the ODBC DBMS name, `@@version` when the server allows it, the active `SYBASE_TYPE_FALLBACK_TO_VARCHAR` policy, ODBC type code, column size, decimal digits, nullability, ConnectorX type policy, and the buffer policy. This keeps new driver-specific expectations additive: add a new diagnostic case or expected row for the driver instead of rewriting the core Sybase type-system tests.
 
 ## Driver Setup
 

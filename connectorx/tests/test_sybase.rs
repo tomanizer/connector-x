@@ -16,7 +16,7 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::sybase::{sybase_conn_string, SybaseSource, SybaseTypeSystem},
+    sources::sybase::{sybase_conn_string, SybaseOptions, SybaseSource, SybaseTypeSystem},
     sql::{count_query, get_partition_range_query, single_col_partition_query, CXQuery},
     transports::SybaseArrowTransport,
 };
@@ -55,6 +55,7 @@ struct SybaseDriverMatrixReport {
     tds_version: Option<String>,
     dbms_name: Option<String>,
     server_version: Option<String>,
+    unknown_type_fallback_to_varchar: bool,
     columns: Vec<SybaseDriverMatrixColumn>,
     case_errors: Vec<(String, String)>,
 }
@@ -94,8 +95,12 @@ impl SybaseDriverMatrixReport {
             markdown_value(self.dbms_name.as_deref())
         ));
         out.push_str(&format!(
-            "- Server version query: {}\n\n",
+            "- Server version query: {}\n",
             markdown_value(self.server_version.as_deref())
+        ));
+        out.push_str(&format!(
+            "- Unknown-type fallback to varchar: {}\n\n",
+            self.unknown_type_fallback_to_varchar
         ));
 
         out.push_str("| case | column | ODBC code | ODBC type | size | scale | nullability | ConnectorX type | buffer policy |\n");
@@ -138,6 +143,7 @@ fn collect_sybase_driver_matrix(
     conn: &str,
 ) -> Result<SybaseDriverMatrixReport, Box<dyn std::error::Error>> {
     let env = environment()?;
+    let options = SybaseOptions::from_env();
     let conn_handle = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
     let mut cases = sybase_driver_matrix_cases();
     if use_sybase_testcontainer() {
@@ -151,12 +157,17 @@ fn collect_sybase_driver_matrix(
         server_version: fetch_optional_text_scalar(&conn_handle, "select @@version as version")
             .ok()
             .flatten(),
+        unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
         columns: Vec::new(),
         case_errors: Vec::new(),
     };
 
     for case in cases {
-        match collect_sybase_driver_matrix_case(&conn_handle, case) {
+        match collect_sybase_driver_matrix_case(
+            &conn_handle,
+            case,
+            options.unknown_type_fallback_to_varchar,
+        ) {
             Ok(columns) => report.columns.extend(columns),
             Err(error) => report
                 .case_errors
@@ -230,25 +241,30 @@ fn sybase_driver_matrix_seeded_cases() -> Vec<&'static SybaseDriverMatrixCase> {
 fn collect_sybase_driver_matrix_case(
     conn: &Connection<'_>,
     case: &SybaseDriverMatrixCase,
+    unknown_type_fallback_to_varchar: bool,
 ) -> Result<Vec<SybaseDriverMatrixColumn>, Box<dyn std::error::Error>> {
     let Some(mut cursor) = conn.execute(case.query, (), None)? else {
         return Ok(Vec::new());
     };
-    let num_cols = u16::try_from(cursor.num_result_cols()?)?;
+    let num_cols = sybase_driver_matrix_num_cols(&mut cursor)?;
     let mut columns = Vec::new();
 
     for column_number in 1..=num_cols {
         let column_name = cursor.col_name(column_number)?;
         let odbc_type = cursor.col_data_type(column_number)?;
         let nullability = cursor.col_nullability(column_number)?;
-        let (connectorx_type, buffer_policy) =
-            match SybaseTypeSystem::from_odbc(odbc_type, nullability, &column_name, false) {
-                Ok(policy) => (
-                    format!("{policy:?}"),
-                    sybase_driver_matrix_buffer_policy(policy),
-                ),
-                Err(error) => (format!("unsupported: {error}"), "unsupported"),
-            };
+        let (connectorx_type, buffer_policy) = match SybaseTypeSystem::from_odbc(
+            odbc_type,
+            nullability,
+            &column_name,
+            unknown_type_fallback_to_varchar,
+        ) {
+            Ok(policy) => (
+                format!("{policy:?}"),
+                sybase_driver_matrix_buffer_policy(policy),
+            ),
+            Err(error) => (format!("unsupported: {error}"), "unsupported"),
+        };
 
         columns.push(SybaseDriverMatrixColumn {
             case_name: case.name.to_string(),
@@ -264,6 +280,21 @@ fn collect_sybase_driver_matrix_case(
     }
 
     Ok(columns)
+}
+
+fn sybase_driver_matrix_num_cols(
+    cursor: &mut impl ResultSetMetadata,
+) -> Result<u16, Box<dyn std::error::Error>> {
+    let num_cols = cursor.num_result_cols()?;
+    if num_cols < 0 {
+        return Err(anyhow::anyhow!("ODBC returned negative column count: {num_cols}").into());
+    }
+
+    u16::try_from(num_cols)
+        .map_err(|_| {
+            anyhow::anyhow!("ODBC returned too many columns for u16 metadata index: {num_cols}")
+        })
+        .map_err(Into::into)
 }
 
 fn sybase_driver_matrix_buffer_policy(ty: SybaseTypeSystem) -> &'static str {
@@ -300,7 +331,8 @@ fn fetch_optional_text_scalar(
     let Some(batch) = cursor.fetch()? else {
         return Ok(None);
     };
-    Ok(batch.at_as_str(0, 0)?.map(str::to_string))
+    let value = batch.at_as_str(0, 0)?;
+    Ok(value.map(str::to_string))
 }
 
 fn odbc_conn_keyword(conn: &str, keyword: &str) -> Option<String> {
