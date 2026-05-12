@@ -1,11 +1,20 @@
 //! Source implementation for IBM Db2 through ODBC.
 
 mod errors;
+mod profile;
 mod typesystem;
 
 pub use self::errors::Db2SourceError;
+pub use self::profile::{
+    diagnose_replication_key, key_constraint_catalog_query, replication_key_catalog_query,
+    table_metadata_catalog_query, unique_index_catalog_query, Db2CatalogColumn, Db2KeyConstraint,
+    Db2KeyConstraintKind, Db2PartitionHint, Db2Profile, Db2ProfileConfig,
+    Db2ReplicationKeyDiagnostic, Db2ReplicationKeyEvidence, Db2ReplicationKeyUniqueness,
+    Db2UniqueIndex,
+};
 pub use self::typesystem::Db2TypeSystem;
 
+use self::profile::is_db2_profile_option_key;
 use self::typesystem::DB2_UNKNOWN_TYPE_FALLBACK_ENV;
 #[cfg(feature = "dst_arrow")]
 use crate::{
@@ -17,7 +26,7 @@ use crate::{
     sources::{
         odbc_common::{
             connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
-            is_valid_odbc_key, odbc_conn_value, param_bool_param, param_u32_param,
+            is_valid_odbc_key, odbc_conn_value_if_needed, param_bool_param, param_u32_param,
             param_usize_param, param_value, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM,
             MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
         },
@@ -108,6 +117,7 @@ pub struct Db2Source {
     execution_options: OdbcExecutionOptions,
     unknown_type_fallback_to_varchar: bool,
     replace_invalid_utf16: bool,
+    profile_config: Db2ProfileConfig,
 }
 
 impl Db2Source {
@@ -131,6 +141,8 @@ impl Db2Source {
             .transpose()?
             .flatten()
             .or(options.max_connections);
+        let profile_config = Db2ProfileConfig::from_env_and_params(params)?;
+        log_db2_profile_scope(&profile_config);
         let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
         let execution_options = db2_execution_options_from_params(params, options)?;
         Self {
@@ -146,6 +158,7 @@ impl Db2Source {
             execution_options,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
             replace_invalid_utf16,
+            profile_config,
         }
     }
 
@@ -161,6 +174,10 @@ impl Db2Source {
             query,
             execution_options,
         )?
+    }
+
+    pub fn profile_config(&self) -> &Db2ProfileConfig {
+        &self.profile_config
     }
 }
 
@@ -567,6 +584,8 @@ pub(crate) fn db2_get_arrow(
         .unwrap_or(options.replace_invalid_utf16);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
+    log_db2_profile_scope(&profile_config);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
     let execution_options = db2_execution_options_from_params(Some(&params), options)?;
     Ok(odbc_core::odbc_get_arrow_impl::<
@@ -615,6 +634,8 @@ pub(crate) fn db2_record_batch_iter(
         .unwrap_or(options.replace_invalid_utf16);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
+    let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
+    log_db2_profile_scope(&profile_config);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
     let execution_options = db2_execution_options_from_params(Some(&params), options)?;
     let iterator = odbc_core::odbc_record_batch_iter_impl::<Db2TypeSystem, Db2SourceError>(
@@ -641,6 +662,12 @@ pub(crate) fn db2_record_batch_iter(
 
 odbc_core::impl_odbc_arrow_policy!(Db2TypeSystem);
 
+fn log_db2_profile_scope(profile_config: &Db2ProfileConfig) {
+    if let Some(message) = profile_config.runtime_scope_message() {
+        log::debug!("{message}");
+    }
+}
+
 #[throws(Db2SourceError)]
 pub fn db2_conn_string(conn: &str) -> String {
     if is_raw_odbc_conn_string(conn) {
@@ -660,25 +687,29 @@ pub fn db2_conn_string(conn: &str) -> String {
 
     let mut ret = format!(
         "Driver={};Hostname={};Port={};Protocol={};UID={};PWD={};",
-        odbc_conn_value(&driver),
-        odbc_conn_value(&host),
+        odbc_conn_value_if_needed(driver),
+        odbc_conn_value_if_needed(&host),
         port,
-        odbc_conn_value(&protocol),
-        odbc_conn_value(&username),
-        odbc_conn_value(&password)
+        odbc_conn_value_if_needed(protocol),
+        odbc_conn_value_if_needed(&username),
+        odbc_conn_value_if_needed(&password)
     );
     if !database.is_empty() {
-        ret.push_str(&format!("Database={};", odbc_conn_value(&database)));
+        ret.push_str(&format!(
+            "Database={};",
+            odbc_conn_value_if_needed(&database)
+        ));
     }
     for (key, value) in &params {
         if !is_connector_option_key(key)
+            && !is_db2_profile_option_key(key)
             && !key.eq_ignore_ascii_case("driver")
             && !key.eq_ignore_ascii_case("protocol")
         {
             if !is_valid_odbc_key(key) {
                 throw!(anyhow!("invalid ODBC connection-string key: {key:?}"));
             }
-            ret.push_str(&format!("{}={};", key, odbc_conn_value(value)));
+            ret.push_str(&format!("{}={};", key, odbc_conn_value_if_needed(value)));
         }
     }
     ret
@@ -691,7 +722,7 @@ mod tests {
     #[test]
     fn with_options_sets_instance_limits() {
         let source = Db2Source::with_options(
-            "Driver={IBM DB2 ODBC DRIVER};Database=test;",
+            "db2://db2inst1:password@127.0.0.1:50000/testdb?db2_profile=generic",
             1,
             Db2Options {
                 batch_size: 7,
@@ -712,6 +743,7 @@ mod tests {
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));
         assert!(source.unknown_type_fallback_to_varchar);
         assert!(source.replace_invalid_utf16);
+        assert_eq!(source.profile_config(), &Db2ProfileConfig::default());
     }
 
     #[test]
@@ -770,10 +802,10 @@ mod tests {
 
     #[test]
     fn replace_invalid_utf16_url_option_is_connector_only() {
-        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30";
+        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30&db2_profile=sailfish&replication_key_columns=IBMREPKEY1,IBMREPKEY2";
         assert_eq!(
             db2_conn_string(conn).unwrap(),
-            "Driver={IBM DB2 ODBC DRIVER};Hostname={127.0.0.1};Port=50000;Protocol={TCPIP};UID={db2inst1};PWD={password};Database={testdb};"
+            "Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;UID=db2inst1;PWD=password;Database=testdb;"
         );
 
         let source = Db2Source::with_options(conn, 1, Db2Options::default()).unwrap();
@@ -781,5 +813,10 @@ mod tests {
         assert_eq!(source.connection_limiter.max_connections(), 3);
         assert_eq!(source.execution_options.login_timeout_secs, Some(5));
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));
+        assert_eq!(source.profile_config().profile, Db2Profile::Sailfish);
+        assert_eq!(
+            source.profile_config().replication_key_columns,
+            vec!["IBMREPKEY1".to_string(), "IBMREPKEY2".to_string()]
+        );
     }
 }

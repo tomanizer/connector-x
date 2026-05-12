@@ -122,6 +122,19 @@ pub(crate) fn odbc_conn_value(value: &str) -> String {
     format!("{{{}}}", value.replace('}', "}}"))
 }
 
+pub(crate) fn odbc_conn_value_if_needed(value: &str) -> String {
+    if value.is_empty()
+        || value.trim() != value
+        || value
+            .bytes()
+            .any(|byte| matches!(byte, b';' | b'{' | b'}' | b'=') || byte.is_ascii_whitespace())
+    {
+        odbc_conn_value(value)
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 pub(crate) fn is_valid_odbc_key(key: &str) -> bool {
     !key.is_empty()
@@ -141,14 +154,5 @@ pub(crate) fn push_odbc_pair(conn: &mut String, key: &str, value: &str) {
 
 #[cfg(feature = "src_odbc")]
 fn generic_odbc_conn_value(value: &str) -> String {
-    if value.is_empty()
-        || value.trim() != value
-        || value
-            .bytes()
-            .any(|byte| matches!(byte, b';' | b'{' | b'}' | b'=') || byte.is_ascii_whitespace())
-    {
-        odbc_conn_value(value)
-    } else {
-        value.to_string()
-    }
+    odbc_conn_value_if_needed(value)
 }

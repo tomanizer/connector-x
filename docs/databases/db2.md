@@ -43,7 +43,7 @@ Additional URL query parameters are appended to the ODBC connection string, so s
 
 `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
-Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string.
+Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, `db2_profile`, and `replication_key_columns`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string. `db2_profile` and `replication_key_columns` are ConnectorX-only planning/diagnostic options and are not passed to the Db2 ODBC driver.
 
 ## Dedicated Versus Generic ODBC Route
 
@@ -51,7 +51,7 @@ Use `db2://` for Db2 production reads. It uses the same direct Arrow ODBC batch 
 
 * URL construction uses Db2 keywords such as `Hostname`, `Protocol`, and `Database`.
 * `DB2_*` environment variables and URL options control Db2 buffer size, batch size, connection limits, timeouts, UTF-16 replacement, and unknown-type fallback without affecting other ODBC sources in the same process.
-* Unknown or vendor-specific Db2 types produce Db2-specific diagnostics and mention `DB2_TYPE_FALLBACK_TO_VARCHAR`.
+* Known IBM Db2 ODBC/CLI extension types are mapped explicitly by the Db2 route, while unknown vendor types still produce Db2-specific diagnostics and mention `DB2_TYPE_FALLBACK_TO_VARCHAR`.
 * Partition count, range, and predicate queries are generated through the Db2 route policy.
 
 Use generic `odbc://` for Db2 mainly as a comparison or troubleshooting route: for example, when you need to pass an exact raw ODBC connection string through `odbc_connect`, compare ConnectorX with another ODBC client, or isolate whether a problem is in the driver metadata versus the Db2 route policy. For supported columns reported with standard ODBC metadata, `db2://` and `odbc://` are expected to produce the same Arrow schema, row count, null counts, and values.
@@ -102,18 +102,18 @@ The ODBC path currently maps these Db2 types:
 * Binary: `binary`, `varbinary`, `blob`
 * Date/time: `date`, `time`, `timestamp`
 
-Db2 `DECFLOAT`, `XML`, `ROWID`, and platform-specific types may be reported by the ODBC driver as vendor-specific `SQL_DECFLOAT`, `SQL_XML`, `SQL_ROWID`, or other non-standard ODBC type codes. ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
+Db2 ODBC/CLI may report Db2-native families with IBM extension type codes instead of standard ODBC metadata. The dedicated `db2://` route recognizes the stable IBM CLI codes for `DECFLOAT`, `XML`, `GRAPHIC`, `VARGRAPHIC`, `LONG VARGRAPHIC`, `BLOB`, `CLOB`, and `DBCLOB`. Unknown vendor-specific codes are still rejected by default. Cast them in the query to a supported type when you need a specific output type, or set `DB2_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior.
 
 The initial DB2-specific policy is:
 
 | Db2 type | ConnectorX policy |
 | --- | --- |
 | `DECIMAL(p,s)` / `NUMERIC(p,s)` | Arrow `Decimal128(p,s)` using the precision and scale reported by ODBC. |
-| `DECFLOAT(16)` / `DECFLOAT(34)` | Strict unsupported when reported as `SQL_DECFLOAT`; cast to `varchar` or opt into `DB2_TYPE_FALLBACK_TO_VARCHAR=true` for string output. Scientific notation is passed through as text in fallback mode rather than parsed as fixed-scale decimal. |
-| `XML` | Strict unsupported when reported as `SQL_XML`; use `xmlserialize(... as varchar(n))` for text output. |
-| `CLOB` / `DBCLOB` | Arrow `LargeUtf8` when reported as standard long text or wide long text. Values are fetched through the configured text buffer. |
-| `BLOB` | Arrow `LargeBinary` when reported as standard long binary. Values are fetched through the configured binary buffer. |
-| `GRAPHIC` / `VARGRAPHIC` | Arrow `LargeUtf8` when reported as ODBC wide text. |
+| `DECFLOAT(16)` / `DECFLOAT(34)` | Arrow `LargeUtf8` when reported as IBM `SQL_DECFLOAT`. Scientific notation is preserved as Db2 text rather than coerced into fixed-scale decimal. |
+| `XML` | Arrow `LargeBinary` when reported as IBM `SQL_XML`, matching the IBM CLI binary binding. Use `xmlserialize(... as varchar(n))` when text output is required. |
+| `CLOB` / `DBCLOB` | Arrow `LargeUtf8` when reported as standard long text/wide long text or IBM `SQL_CLOB`/`SQL_DBCLOB`. Values are fetched through the configured text buffer. |
+| `BLOB` | Arrow `LargeBinary` when reported as standard long binary or IBM `SQL_BLOB`. Values are fetched through the configured binary buffer. |
+| `GRAPHIC` / `VARGRAPHIC` | Arrow `LargeUtf8` when reported as ODBC wide text or IBM `SQL_GRAPHIC`/`SQL_VARGRAPHIC`. |
 | `ROWID` | Supported as `LargeBinary` or `LargeUtf8` only if the driver reports standard binary or text metadata. Vendor-specific `SQL_ROWID` follows the strict/fallback unknown-type policy. |
 
 Db2 graphic and wide-character buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Db2 URL only for explicit replacement-character compatibility.
@@ -137,6 +137,30 @@ ConnectorX generates DB2 SQL for row counts, partition min/max ranges, and parti
 
 Queries that use DB2 syntax outside these tested shapes may still rely on ConnectorX's string-composition fallback when `sqlparser` cannot parse the source SQL. Keep partition columns projected by the source query, and prefer simple integer partition keys for partitioned extraction.
 
+## Db2 Profiles And Replication Keys
+
+Generic `db2://` extraction stays schema-agnostic. For Db2 deployments with known replication-key conventions, ConnectorX also has an opt-in profile parser and exported diagnostic helper layer:
+
+* `db2_profile=qrep` or `db2_profile=qreplication` for IBM Q Replication hidden-key conventions
+* `db2_profile=sailfish` or `db2_profile=idaa` for broader Sailfish/accelerator catalog discovery
+* `db2_profile=row_tracking` for Db2 row modification tracking columns
+* `db2_profile=netezza` for Netezza/PureData special-column diagnostics
+* `replication_key_columns=COL1,COL2` to override profile discovery with explicit key column names
+* `DB2_PROFILE` and `DB2_REPLICATION_KEY_COLUMNS` as environment defaults
+
+The Q Replication profile defaults to IBM's documented hidden replication-key names, `IBMQREP_REPLKEY` and `IBMQREP_SITE`. The Sailfish profile does not assume those names by default; it searches for the Q Replication pair if present, user-observed two-column `IBMREPKEY*` conventions, Db2 row modification tracking columns (`SYSROWID`, `CREATEXID`, `DELETEXID`), and Netezza/PureData specials (`ROWID`, `DATASLICEID`, `CREATEXID`, `DELETEXID`). These options are ConnectorX-only: they are filtered out of the ODBC connection string and used by the Db2 catalog helper APIs.
+
+The profile layer distinguishes exact enforced primary keys, enforced unique constraints, not-enforced trusted constraints, not-enforced untrusted constraints, unique indexes, and profile conventions. `SYSCAT.COLUMNS.KEYSEQ` is not treated as proof by itself; ConnectorX uses `SYSCAT.TABCONST`/`SYSCAT.KEYCOLUSE` and unique-index metadata when available. Db2 Datalake and some column-organized deployments can expose informational constraints, so non-enforced constraints are reported as planning metadata rather than guaranteed row identity.
+
+The profile helper APIs do not run catalog queries automatically during `read_sql`, and they do not alter extraction SQL. Hidden columns are not projected by `SELECT *`. ConnectorX does not silently add them to the user's query; select them explicitly when a workload needs them for validation, incremental extraction, or partition planning. For example:
+
+```sql
+SELECT t.IBMQREP_REPLKEY, t.IBMQREP_SITE, t.*
+FROM schema.table AS t
+```
+
+The diagnostic layer can recommend a numeric leading key column as a `partition_on` candidate, but composite identity still belongs to the full key. Site/discriminator columns such as `IBMQREP_SITE` are not recommended as range partition columns.
+
 ## Performance Tuning
 
 The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, binary, temporal, and `SQL_BIT` columns avoid text conversion in the hot path. Decimal and text columns use text buffers for driver compatibility.
@@ -149,6 +173,8 @@ The defaults are tuned for throughput over small memory use:
 * `DB2_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `DB2_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
 * `DB2_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
+* `DB2_PROFILE`: optional Db2 planning profile, currently `qrep`/`qreplication`, `sailfish`/`idaa`, `row_tracking`, or `netezza`.
+* `DB2_REPLICATION_KEY_COLUMNS`: comma-separated replication-key column override used by the Db2 profile diagnostic layer.
 
 `DB2_BATCH_SIZE * DB2_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Db2 URL, or `DB2_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Db2 URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound; lower `DB2_BATCH_SIZE` when raising `DB2_MAX_STR_LEN` for large LOB cells.
 If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.
