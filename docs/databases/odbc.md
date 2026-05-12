@@ -61,6 +61,22 @@ conn_with_credentials = ConnectionUrl(
 
 The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route. Use `return_type="arrow"`, `return_type="arrow_stream"`, or a downstream Arrow consumer. To get pandas today, read Arrow and call `table.to_pandas()` after installing `pyarrow`.
 
+## Route Selection
+
+ConnectorX has three ODBC-backed routes:
+
+| Database | Preferred route | Use generic `odbc://` when |
+| --- | --- | --- |
+| IBM Db2 | `db2://...` | you are validating a driver-specific issue, need an exact raw ODBC connection string, or are comparing behavior with another ODBC client. |
+| Sybase / SAP ASE | `sybase://...` | you are validating a driver-specific issue, need an exact raw ODBC connection string, or are using an ASE-compatible driver before promoting it to the Sybase route. |
+| Other ODBC databases | `odbc://...` or a raw ODBC connection string | this is the normal route for databases without a dedicated ConnectorX source. |
+
+For Db2 and Sybase, prefer the dedicated route in production. The dedicated routes share the same direct Arrow ODBC fetch path as generic `odbc://`, so primitive, decimal, text, binary, and temporal columns are still fetched in ODBC batches and emitted as Arrow arrays without the older row-wise parser path. The dedicated routes add the database-specific policy on top: URL keyword normalization, source-specific timeout/buffer/fallback settings, source-specific unknown-type diagnostics, and the Db2 or Sybase SQL dialect used for count/range/partition query generation.
+
+Arrow schemas are expected to match between a dedicated route and generic `odbc://` when the same ODBC driver reports the same standard metadata and the selected columns are supported by both policies. If a driver reports a vendor-specific type, the dedicated route may produce a source-specific error message or fallback policy while generic `odbc://` reports the generic ODBC policy. Cast vendor-specific columns in the query when exact cross-route schema equality matters.
+
+Partitioning is expected to work on all three routes for queries that ConnectorX can wrap in the route dialect and whose partition column has non-NULL integer min/max bounds. Dedicated `db2://` and `sybase://` should be preferred for partitioned Db2 and ASE reads because they use the matching dialect policy; generic `odbc://` uses the generic ODBC wrapper and is best treated as a portability and comparison route for those databases.
+
 ## Runtime Dependencies
 
 ConnectorX links against the platform ODBC manager. The ODBC driver for your database is a runtime dependency and is not bundled in ConnectorX wheels.
@@ -85,7 +101,7 @@ The ODBC-family connectors use one shared fetch and conversion layer. Standard O
 | `SQL_DOUBLE`, `SQL_FLOAT(>24)` | `f64` | `f64` | `f64` |
 | `SQL_NUMERIC`, `SQL_DECIMAL` | Arrow decimal via text buffer | Arrow decimal via text buffer | Arrow decimal via text buffer |
 | `SQL_BIT` | `bool` | `bool` if reported | `bool` |
-| char/varchar/long varchar and wide variants | UTF-8 `String` | UTF-8 `String` | UTF-8 `String` |
+| char/varchar/long varchar and wide variants | Arrow `LargeUtf8` | Arrow `LargeUtf8` | Arrow `LargeUtf8` |
 | binary/varbinary/long varbinary | Arrow large binary | Arrow large binary | Arrow large binary through text-compatible FreeTDS path |
 | date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp | Arrow date/time/timestamp through text-compatible FreeTDS path |
 | unknown/vendor-specific | error by default; optional `String` fallback | error by default; optional `String` fallback | error by default; optional `String` fallback, except FreeTDS `TIME2` maps to time |

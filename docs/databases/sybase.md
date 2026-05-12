@@ -42,7 +42,28 @@ Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC conn
 
 `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
-Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. Accepted Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`.
+Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Sybase ODBC driver connection string.
+
+## Dedicated Versus Generic ODBC Route
+
+Use `sybase://` for Sybase/SAP ASE production reads. It uses the same direct Arrow ODBC batch fetch path as generic `odbc://`, but keeps ASE-specific behavior in the places where it matters:
+
+* URL construction uses ASE/FreeTDS-oriented keywords such as `Server`, `Port`, `TDS_Version`, and `Database`.
+* `SYBASE_*` environment variables and URL options control Sybase buffer size, batch size, connection limits, timeouts, UTF-16 replacement, and unknown-type fallback without affecting other ODBC sources in the same process.
+* Sybase-specific type policy covers common ASE and FreeTDS behavior such as `money`, `smallmoney`, `bigtime`, `bigdatetime`, rowversion-like `timestamp`, and binary values returned through text-compatible FreeTDS buffers.
+* Partition count, range, and predicate queries are generated through the Sybase/T-SQL route policy.
+
+Use generic `odbc://` for Sybase mainly as a comparison or troubleshooting route: for example, when validating a new SAP ASE or FreeTDS driver configuration, passing an exact raw ODBC connection string through `odbc_connect`, or isolating whether a problem is in driver metadata versus Sybase route policy. For supported columns reported with standard ODBC metadata, `sybase://` and `odbc://` are expected to produce the same Arrow schema, row count, null counts, and values.
+
+The route-comparison live tests can be run with both source features enabled:
+
+```bash
+SYBASE_URL="sybase://sa:YOUR_PASSWORD@127.0.0.1:5000/tempdb?driver=FreeTDS&tds_version=5.0" \
+SYBASE_ODBC_CONN="Driver={FreeTDS};Server=127.0.0.1;Port=5000;TDS_Version=5.0;UID=sa;PWD=YOUR_PASSWORD;Database=tempdb;" \
+cargo test -p connectorx --no-default-features --features "src_sybase src_odbc dst_arrow fptr" --test test_odbc_route_compare -- sybase
+```
+
+Set `SYBASE_GENERIC_ODBC_URL` instead of `SYBASE_ODBC_CONN` when you want the comparison to use a hand-written generic `odbc://` URL.
 
 ## Driver Setup
 
