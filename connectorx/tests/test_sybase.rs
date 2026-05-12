@@ -1,5 +1,7 @@
 #![cfg(all(feature = "src_sybase", feature = "dst_arrow"))]
 
+use std::convert::TryFrom;
+
 use arrow::{
     array::Array,
     array::{
@@ -14,9 +16,12 @@ use connectorx::{
     get_arrow::get_arrow,
     partition::{partition, PartitionQuery},
     prelude::*,
-    sources::sybase::{sybase_conn_string, SybaseSource},
+    sources::sybase::{sybase_conn_string, SybaseSource, SybaseTypeSystem},
     sql::{count_query, get_partition_range_query, single_col_partition_query, CXQuery},
     transports::SybaseArrowTransport,
+};
+use odbc_api::{
+    buffers::TextRowSet, environment, Connection, ConnectionOptions, Cursor, ResultSetMetadata,
 };
 use sqlparser::dialect::MsSqlDialect;
 
@@ -38,6 +43,327 @@ fn sybase_url() -> Option<String> {
         return Some(test_db::sybase_odbc_url());
     }
     std::env::var("SYBASE_URL").ok()
+}
+
+fn sybase_driver_matrix_conn() -> Option<String> {
+    sybase_odbc_conn().or_else(|| sybase_url().and_then(|conn| sybase_conn_string(&conn).ok()))
+}
+
+#[derive(Debug)]
+struct SybaseDriverMatrixReport {
+    driver_keyword: Option<String>,
+    tds_version: Option<String>,
+    dbms_name: Option<String>,
+    server_version: Option<String>,
+    columns: Vec<SybaseDriverMatrixColumn>,
+    case_errors: Vec<(String, String)>,
+}
+
+#[derive(Debug)]
+struct SybaseDriverMatrixColumn {
+    case_name: String,
+    column_name: String,
+    odbc_type_code: i16,
+    odbc_type: String,
+    column_size: Option<usize>,
+    decimal_digits: i16,
+    nullability: String,
+    connectorx_type: String,
+    buffer_policy: &'static str,
+}
+
+struct SybaseDriverMatrixCase {
+    name: &'static str,
+    query: &'static str,
+}
+
+impl SybaseDriverMatrixReport {
+    fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# Sybase ODBC driver matrix\n\n");
+        out.push_str(&format!(
+            "- Driver keyword: {}\n",
+            markdown_value(self.driver_keyword.as_deref())
+        ));
+        out.push_str(&format!(
+            "- TDS version keyword: {}\n",
+            markdown_value(self.tds_version.as_deref())
+        ));
+        out.push_str(&format!(
+            "- ODBC DBMS name: {}\n",
+            markdown_value(self.dbms_name.as_deref())
+        ));
+        out.push_str(&format!(
+            "- Server version query: {}\n\n",
+            markdown_value(self.server_version.as_deref())
+        ));
+
+        out.push_str("| case | column | ODBC code | ODBC type | size | scale | nullability | ConnectorX type | buffer policy |\n");
+        out.push_str("| --- | --- | ---: | --- | ---: | ---: | --- | --- | --- |\n");
+        for column in &self.columns {
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                escape_markdown_cell(&column.case_name),
+                escape_markdown_cell(&column.column_name),
+                column.odbc_type_code,
+                escape_markdown_cell(&column.odbc_type),
+                column
+                    .column_size
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                column.decimal_digits,
+                escape_markdown_cell(&column.nullability),
+                escape_markdown_cell(&column.connectorx_type),
+                escape_markdown_cell(column.buffer_policy),
+            ));
+        }
+
+        if !self.case_errors.is_empty() {
+            out.push_str("\n| skipped case | error |\n");
+            out.push_str("| --- | --- |\n");
+            for (case, error) in &self.case_errors {
+                out.push_str(&format!(
+                    "| {} | {} |\n",
+                    escape_markdown_cell(case),
+                    escape_markdown_cell(error)
+                ));
+            }
+        }
+
+        out
+    }
+}
+
+fn collect_sybase_driver_matrix(
+    conn: &str,
+) -> Result<SybaseDriverMatrixReport, Box<dyn std::error::Error>> {
+    let env = environment()?;
+    let conn_handle = env.connect_with_connection_string(conn, ConnectionOptions::default())?;
+    let mut cases = sybase_driver_matrix_cases();
+    if use_sybase_testcontainer() {
+        cases.extend(sybase_driver_matrix_seeded_cases());
+    }
+
+    let mut report = SybaseDriverMatrixReport {
+        driver_keyword: odbc_conn_keyword(conn, "Driver"),
+        tds_version: odbc_conn_keyword(conn, "TDS_Version"),
+        dbms_name: conn_handle.database_management_system_name().ok(),
+        server_version: fetch_optional_text_scalar(&conn_handle, "select @@version as version")
+            .ok()
+            .flatten(),
+        columns: Vec::new(),
+        case_errors: Vec::new(),
+    };
+
+    for case in cases {
+        match collect_sybase_driver_matrix_case(&conn_handle, case) {
+            Ok(columns) => report.columns.extend(columns),
+            Err(error) => report
+                .case_errors
+                .push((case.name.to_string(), error.to_string())),
+        }
+    }
+
+    Ok(report)
+}
+
+fn sybase_driver_matrix_cases() -> Vec<&'static SybaseDriverMatrixCase> {
+    static CASES: &[SybaseDriverMatrixCase] = &[
+        SybaseDriverMatrixCase {
+            name: "primitive_typed_buffers",
+            query: "select convert(tinyint, 7) as tinyint_v, \
+                    convert(smallint, -8) as smallint_v, \
+                    convert(int, 9) as int_v, \
+                    convert(bigint, 10) as bigint_v, \
+                    convert(real, 1.25) as real_v, \
+                    convert(float, 2.25) as float_v, \
+                    convert(bit, 1) as bit_v",
+        },
+        SybaseDriverMatrixCase {
+            name: "money_decimal_text_buffer",
+            query: "select convert(money, 123.45) as money_v, \
+                    convert(smallmoney, -12.34) as smallmoney_v, \
+                    convert(numeric(18, 4), 123.4567) as numeric_v",
+        },
+        SybaseDriverMatrixCase {
+            name: "temporal_text_buffer",
+            query: "select convert(date, '2024-02-03') as date_v, \
+                    convert(time, '03:04:05') as time_v, \
+                    convert(bigtime, '03:04:05.123456') as bigtime_v, \
+                    convert(datetime, '2024-02-03 04:05:06.123') as datetime_v, \
+                    convert(bigdatetime, '2024-02-03 04:05:06.123456') as bigdatetime_v",
+        },
+        SybaseDriverMatrixCase {
+            name: "binary_hex_text",
+            query: "select convert(binary(4), 0x0304beef) as binary_v, \
+                    convert(varbinary(4), 0x0304beef) as varbinary_v",
+        },
+        SybaseDriverMatrixCase {
+            name: "unicode_text",
+            query: "select convert(char(5), 'xy') as char_v, \
+                    convert(varchar(32), 'plain varchar') as varchar_v, \
+                    convert(text, 'long text value') as text_v, \
+                    convert(unichar(16), N'Grusse') as unichar_v, \
+                    convert(univarchar(64), N'Grüße Tokyo') as univarchar_v",
+        },
+    ];
+    CASES.iter().collect()
+}
+
+fn sybase_driver_matrix_seeded_cases() -> Vec<&'static SybaseDriverMatrixCase> {
+    static CASES: &[SybaseDriverMatrixCase] = &[
+        SybaseDriverMatrixCase {
+            name: "seeded_image_rowversion",
+            query: "select fixed_bytes, variable_bytes, image_bytes, row_version \
+                    from dbo.cx_odbc_binary_edge where id = 1",
+        },
+        SybaseDriverMatrixCase {
+            name: "seeded_unitext_cast",
+            query: "select long_univarchar_v, \
+                    convert(univarchar(128), unitext_v) as unitext_as_univarchar \
+                    from dbo.cx_odbc_unicode_edge where id = 1",
+        },
+    ];
+    CASES.iter().collect()
+}
+
+fn collect_sybase_driver_matrix_case(
+    conn: &Connection<'_>,
+    case: &SybaseDriverMatrixCase,
+) -> Result<Vec<SybaseDriverMatrixColumn>, Box<dyn std::error::Error>> {
+    let Some(mut cursor) = conn.execute(case.query, (), None)? else {
+        return Ok(Vec::new());
+    };
+    let num_cols = u16::try_from(cursor.num_result_cols()?)?;
+    let mut columns = Vec::new();
+
+    for column_number in 1..=num_cols {
+        let column_name = cursor.col_name(column_number)?;
+        let odbc_type = cursor.col_data_type(column_number)?;
+        let nullability = cursor.col_nullability(column_number)?;
+        let (connectorx_type, buffer_policy) =
+            match SybaseTypeSystem::from_odbc(odbc_type, nullability, &column_name, false) {
+                Ok(policy) => (
+                    format!("{policy:?}"),
+                    sybase_driver_matrix_buffer_policy(policy),
+                ),
+                Err(error) => (format!("unsupported: {error}"), "unsupported"),
+            };
+
+        columns.push(SybaseDriverMatrixColumn {
+            case_name: case.name.to_string(),
+            column_name,
+            odbc_type_code: odbc_type.data_type().0,
+            odbc_type: format!("{odbc_type:?}"),
+            column_size: odbc_type.column_size().map(|value| value.get()),
+            decimal_digits: odbc_type.decimal_digits(),
+            nullability: format!("{nullability:?}"),
+            connectorx_type,
+            buffer_policy,
+        });
+    }
+
+    Ok(columns)
+}
+
+fn sybase_driver_matrix_buffer_policy(ty: SybaseTypeSystem) -> &'static str {
+    match ty {
+        SybaseTypeSystem::TinyInt(_) => "typed U8 ODBC buffer -> Arrow Int64",
+        SybaseTypeSystem::SmallInt(_) => "typed I16 ODBC buffer -> Arrow Int64",
+        SybaseTypeSystem::Int(_) => "typed I32 ODBC buffer -> Arrow Int64",
+        SybaseTypeSystem::BigInt(_) => "typed I64 ODBC buffer -> Arrow Int64",
+        SybaseTypeSystem::Real(_) => "typed F32 ODBC buffer -> Arrow Float32",
+        SybaseTypeSystem::Double(_) => "typed F64 ODBC buffer -> Arrow Float64",
+        SybaseTypeSystem::Bit(_) => "typed bit ODBC buffer -> Arrow Boolean",
+        SybaseTypeSystem::Numeric(..) | SybaseTypeSystem::Decimal(..) => {
+            "text ODBC buffer -> Arrow Decimal128"
+        }
+        SybaseTypeSystem::Char(_) | SybaseTypeSystem::Varchar(_) | SybaseTypeSystem::Text(_) => {
+            "text or wide-text ODBC buffer -> Arrow LargeUtf8"
+        }
+        SybaseTypeSystem::Binary(_) => "text/binary-compatible ODBC buffer -> Arrow LargeBinary",
+        SybaseTypeSystem::Date(_) => "text ODBC buffer -> Arrow Date32",
+        SybaseTypeSystem::Time(_) => "text ODBC buffer -> Arrow Time64(Microsecond)",
+        SybaseTypeSystem::Timestamp(_) => "text ODBC buffer -> Arrow Timestamp(Microsecond)",
+    }
+}
+
+fn fetch_optional_text_scalar(
+    conn: &Connection<'_>,
+    query: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let Some(mut cursor) = conn.execute(query, (), None)? else {
+        return Ok(None);
+    };
+    let buffer = TextRowSet::for_cursor(1, &mut cursor, Some(4096))?;
+    let mut cursor = cursor.bind_buffer(buffer)?;
+    let Some(batch) = cursor.fetch()? else {
+        return Ok(None);
+    };
+    Ok(batch.at_as_str(0, 0)?.map(str::to_string))
+}
+
+fn odbc_conn_keyword(conn: &str, keyword: &str) -> Option<String> {
+    odbc_conn_pairs(conn)
+        .into_iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(keyword))
+        .map(|(_, value)| value)
+}
+
+fn odbc_conn_pairs(conn: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut start = 0;
+    let mut in_braces = false;
+    let mut chars = conn.char_indices().peekable();
+
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '{' if !in_braces => in_braces = true,
+            '}' if in_braces => {
+                if matches!(chars.peek(), Some((_, '}'))) {
+                    chars.next();
+                } else {
+                    in_braces = false;
+                }
+            }
+            ';' if !in_braces => {
+                push_odbc_conn_pair(&mut pairs, &conn[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if start < conn.len() {
+        push_odbc_conn_pair(&mut pairs, &conn[start..]);
+    }
+
+    pairs
+}
+
+fn push_odbc_conn_pair(pairs: &mut Vec<(String, String)>, item: &str) {
+    let Some((key, value)) = item.split_once('=') else {
+        return;
+    };
+    pairs.push((key.trim().to_string(), unescape_odbc_value(value.trim())));
+}
+
+fn unescape_odbc_value(value: &str) -> String {
+    if value.starts_with('{') && value.ends_with('}') {
+        value[1..value.len() - 1].replace("}}", "}")
+    } else {
+        value.to_string()
+    }
+}
+
+fn markdown_value(value: Option<&str>) -> String {
+    value
+        .map(escape_markdown_cell)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn escape_markdown_cell(value: &str) -> String {
+    value.replace('\n', " ").replace('|', "\\|")
 }
 
 #[test]
@@ -438,6 +764,26 @@ fn test_sybase_testcontainer_time2_and_null_bit() {
         .downcast_ref::<BooleanArray>()
         .unwrap();
     assert!(nullable_bit.is_null(0));
+}
+
+#[test]
+fn test_sybase_driver_matrix_metadata_report() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = sybase_driver_matrix_conn() else {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase driver matrix metadata test: SYBASE_ODBC_CONN or SYBASE_URL is not set"
+        );
+        return;
+    };
+
+    let report = collect_sybase_driver_matrix(&conn).unwrap();
+    eprintln!("{}", report.to_markdown());
+
+    assert!(
+        !report.columns.is_empty(),
+        "Sybase driver matrix should record at least one ODBC-reported column"
+    );
 }
 
 #[test]
