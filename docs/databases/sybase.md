@@ -65,6 +65,28 @@ cargo test -p connectorx --no-default-features --features "src_sybase src_odbc d
 
 Set `SYBASE_GENERIC_ODBC_URL` instead of `SYBASE_ODBC_CONN` when you want the comparison to use a hand-written generic `odbc://` URL.
 
+## Driver Matrix And Diagnostics
+
+Sybase ODBC behavior depends on the driver stack. ConnectorX keeps the Sybase route on the same batched ODBC/Arrow path as generic `odbc://`, but the Sybase type policy is intentionally driver-aware for the ASE cases that FreeTDS exposes differently from standard ODBC metadata.
+
+| Driver stack | Status | Coverage | Known behavior |
+| --- | --- | --- | --- |
+| FreeTDS through unixODBC, `TDS_Version=5.0`, ASE 16 testcontainer | Verified in live tests | Primitive typed buffers, money/decimal, temporal values, binary/image/rowversion, Unicode text, query wrapping, partitioning, and route comparison against generic ODBC | `bigtime` is commonly reported as SQL Server `TIME2`; binary-family values may arrive through text-compatible hex buffers; `money` and `smallmoney` report decimal/numeric metadata and use the decimal text-buffer path; `unichar`/`univarchar` report wide-text metadata; `unitext` should be projected with an explicit text cast when text output is required. |
+| FreeTDS against other ASE versions | Expected but not fully enumerated | Run the diagnostic matrix and route-comparison tests against the target server | The same policies should apply, but temporal precision, LOB display sizes, and Unicode metadata can vary by server and FreeTDS version. |
+| SAP ASE ODBC driver | Unverified | No committed live fixture yet | Expected to work when it reports standard ODBC metadata for supported Sybase types. ConnectorX does not currently claim verified behavior for SAP-specific reporting of `bigtime`, `bigdatetime`, rowversion-like `timestamp`, `unitext`, or large LOB bounds. |
+| iODBC or Windows ODBC manager with SAP/third-party drivers | Unverified | No committed live fixture yet | Validate metadata, timeout behavior, and truncation diagnostics before relying on production extraction. |
+
+The diagnostic test prints a Markdown matrix of the ODBC metadata reported by the connected driver and the ConnectorX policy selected for each column:
+
+```bash
+SYBASE_ODBC_CONN="Driver={FreeTDS};Server=127.0.0.1;Port=5000;TDS_Version=5.0;UID=sa;PWD=YOUR_PASSWORD;Database=tempdb;" \
+cargo test -p connectorx --no-default-features --features "src_sybase dst_arrow fptr" --test test_sybase -- test_sybase_driver_matrix_metadata_report --nocapture
+```
+
+When `CONNECTORX_SYBASE_TESTCONTAINER=1` is set, the matrix also includes the seeded `image`, rowversion-like `timestamp`, long `univarchar`, and `unitext`-cast cases from `scripts/odbc_sybase.sql`. Without the seeded tables it still records expression-based primitive, money, decimal, temporal, binary, and Unicode cases.
+
+The output includes the parsed `Driver` and `TDS_Version` connection keywords where present, the ODBC DBMS name, `@@version` when the server allows it, the active `SYBASE_TYPE_FALLBACK_TO_VARCHAR` policy, ODBC type code, column size, decimal digits, nullability, ConnectorX type policy, and the buffer policy. This keeps new driver-specific expectations additive: add a new diagnostic case or expected row for the driver instead of rewriting the core Sybase type-system tests.
+
 ## Driver Setup
 
 ConnectorX links against the platform ODBC manager. The Sybase driver is a runtime dependency and is not bundled in ConnectorX wheels.
