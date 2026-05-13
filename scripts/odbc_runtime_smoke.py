@@ -22,7 +22,13 @@ SQL_SUCCESS_WITH_INFO = 1
 
 def run_command(command: list[str]) -> dict[str, Any]:
     try:
-        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            errors="replace",
+        )
     except OSError as exc:
         return {
             "command": command,
