@@ -38,11 +38,11 @@ conn = ConnectionUrl(
 `tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.
 Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
-`replace_invalid_utf16=true` is a ConnectorX-only URL option. It is not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers; use this option only when you explicitly want invalid sequences replaced with U+FFFD.
+`replace_invalid_utf16=true` and `replace_invalid_utf8=true` are ConnectorX-only URL options. They are not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers and invalid UTF-8 returned through narrow text buffers; use these options only when you explicitly want invalid sequences replaced with U+FFFD.
 
 `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
-Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Sybase ODBC driver connection string.
+Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Sybase ODBC driver connection string.
 
 ## Dedicated Versus Generic ODBC Route
 
@@ -139,7 +139,7 @@ Sybase `binary`, `varbinary`, `image`, and rowversion-like `timestamp` values ma
 
 FreeTDS reports ASE `time` and `bigtime` through the SQL Server `TIME2` extension on common ASE 16 configurations; ConnectorX maps that metadata to Arrow `Time64(Microsecond)`. `datetime`, `smalldatetime`, and `bigdatetime` map to Arrow `Timestamp(Microsecond)`, with the precision bounded by the source type and driver formatting.
 
-Sybase Unicode text buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility.
+Sybase narrow text buffers are decoded as UTF-8 and Unicode/wide text buffers are decoded as UTF-16. Invalid sequences are errors by default and report source, column name, row index, and byte offset. Add `replace_invalid_utf8=true` or `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility. With FreeTDS, set `charset=UTF-8` or another driver/session setting that makes narrow text UTF-8 when selecting text into Arrow strings.
 
 ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.
 

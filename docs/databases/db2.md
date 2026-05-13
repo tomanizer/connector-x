@@ -39,11 +39,11 @@ ConnectorX expands this URL into an ODBC connection string using `Driver`, `Host
 
 Additional URL query parameters are appended to the ODBC connection string, so settings such as `Security=SSL` can be passed through.
 
-`replace_invalid_utf16=true` is a ConnectorX-only URL option. It is not passed to the Db2 ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers; use this option only when you explicitly want invalid sequences replaced with U+FFFD.
+`replace_invalid_utf16=true` and `replace_invalid_utf8=true` are ConnectorX-only URL options. They are not passed to the Db2 ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers and invalid UTF-8 returned through narrow text buffers; use these options only when you explicitly want invalid sequences replaced with U+FFFD.
 
 `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
-Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, `db2_profile`, and `replication_key_columns`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string. `db2_profile` and `replication_key_columns` are ConnectorX-only planning/diagnostic options and are not passed to the Db2 ODBC driver.
+Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, `db2_profile`, and `replication_key_columns`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string. `db2_profile` and `replication_key_columns` are ConnectorX-only planning/diagnostic options and are not passed to the Db2 ODBC driver.
 
 ## Dedicated Versus Generic ODBC Route
 
@@ -116,7 +116,7 @@ The initial DB2-specific policy is:
 | `GRAPHIC` / `VARGRAPHIC` | Arrow `LargeUtf8` when reported as ODBC wide text or IBM `SQL_GRAPHIC`/`SQL_VARGRAPHIC`. |
 | `ROWID` | Supported as `LargeBinary` or `LargeUtf8` only if the driver reports standard binary or text metadata. Vendor-specific `SQL_ROWID` follows the strict/fallback unknown-type policy. |
 
-Db2 graphic and wide-character buffers are decoded as UTF-16 when returned through ODBC wide text buffers. Invalid UTF-16 is an error by default and reports source, column name, row index, and byte offset. Add `replace_invalid_utf16=true` to the Db2 URL only for explicit replacement-character compatibility.
+Db2 narrow text buffers are decoded as UTF-8 and wide-character buffers are decoded as UTF-16. Invalid sequences are errors by default and report source, column name, row index, and byte offset. Add `replace_invalid_utf8=true` or `replace_invalid_utf16=true` to the Db2 URL only for explicit replacement-character compatibility. Configure the Db2 CLI/ODBC driver to return narrow text as UTF-8 when selecting through non-wide character buffers.
 
 `DB2_MAX_STR_LEN` bounds the per-cell buffer used for text, binary, decimal-as-text, CLOB, DBCLOB, and BLOB values. ConnectorX detects ODBC truncation indicators and returns an error asking you to raise `DB2_MAX_STR_LEN` or cast/substr the column. Piecewise LOB streaming is not implemented yet, so very large LOB extraction should use an explicit cast/substr window or a larger buffer sized for the workload.
 

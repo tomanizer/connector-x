@@ -19,7 +19,7 @@ use crate::{
             connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
             is_valid_odbc_key, param_bool_param, param_u32_param, param_usize_param, param_value,
             push_odbc_pair, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM, MAX_CONNECTIONS_PARAM,
-            QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
+            QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM, REPLACE_INVALID_UTF8_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
         Source, SourcePartition,
@@ -53,6 +53,7 @@ pub struct OdbcOptions {
     pub query_timeout_secs: Option<usize>,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
+    pub replace_invalid_utf8: bool,
 }
 
 impl OdbcOptions {
@@ -67,6 +68,7 @@ impl OdbcOptions {
             unknown_type_fallback_to_varchar: odbc_core::env_bool(ODBC_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
+            replace_invalid_utf8: false,
         }
     }
 }
@@ -91,6 +93,7 @@ impl Default for OdbcOptions {
             query_timeout_secs: None,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
+            replace_invalid_utf8: false,
         }
     }
 }
@@ -108,6 +111,7 @@ pub struct OdbcSource {
     execution_options: OdbcExecutionOptions,
     unknown_type_fallback_to_varchar: bool,
     replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
 }
 
 impl OdbcSource {
@@ -126,6 +130,11 @@ impl OdbcSource {
             .transpose()?
             .flatten()
             .unwrap_or(options.replace_invalid_utf16);
+        let replace_invalid_utf8 = params
+            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF8_PARAM))
+            .transpose()?
+            .flatten()
+            .unwrap_or(options.replace_invalid_utf8);
         let max_connections = params
             .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
             .transpose()?
@@ -146,6 +155,7 @@ impl OdbcSource {
             execution_options,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
             replace_invalid_utf16,
+            replace_invalid_utf8,
         }
     }
 
@@ -256,6 +266,7 @@ where
                     Arc::clone(&self.connection_limiter),
                     self.execution_options,
                     self.replace_invalid_utf16,
+                    self.replace_invalid_utf8,
                 )
             })
             .collect()
@@ -274,6 +285,7 @@ pub struct OdbcSourcePartition {
     connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
     replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
 }
 
 impl OdbcSourcePartition {
@@ -287,6 +299,7 @@ impl OdbcSourcePartition {
         connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
         execution_options: OdbcExecutionOptions,
         replace_invalid_utf16: bool,
+        replace_invalid_utf8: bool,
     ) -> Self {
         Self {
             conn,
@@ -300,6 +313,7 @@ impl OdbcSourcePartition {
             connection_limiter,
             execution_options,
             replace_invalid_utf16,
+            replace_invalid_utf8,
         }
     }
 }
@@ -339,6 +353,7 @@ impl SourcePartition for OdbcSourcePartition {
             Arc::clone(&self.names),
             Arc::clone(&self.schema),
             self.replace_invalid_utf16,
+            self.replace_invalid_utf8,
             connection_permit,
         )
     }
@@ -366,6 +381,8 @@ pub(crate) fn odbc_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
         .unwrap_or(options.replace_invalid_utf16);
+    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
+        .unwrap_or(options.replace_invalid_utf8);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
@@ -383,6 +400,7 @@ pub(crate) fn odbc_get_arrow(
         execution_options,
         pre_execution_queries,
         replace_invalid_utf16,
+        replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             OdbcTypeSystem::from_odbc(
                 data_type,
@@ -416,6 +434,8 @@ pub(crate) fn odbc_record_batch_iter(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
         .unwrap_or(options.replace_invalid_utf16);
+    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
+        .unwrap_or(options.replace_invalid_utf8);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
@@ -430,6 +450,7 @@ pub(crate) fn odbc_record_batch_iter(
         execution_options,
         pre_execution_queries,
         replace_invalid_utf16,
+        replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             OdbcTypeSystem::from_odbc(
                 data_type,
@@ -509,6 +530,20 @@ impl OdbcCoreError for OdbcSourceError {
             row_index,
             byte_offset,
             surrogate,
+        }
+    }
+
+    fn invalid_utf8(
+        source_name: &'static str,
+        column_name: Option<&str>,
+        row_index: usize,
+        byte_offset: usize,
+    ) -> Self {
+        Self::InvalidUtf8 {
+            source_name,
+            column_name: column_name.unwrap_or("<unknown>").to_string(),
+            row_index,
+            byte_offset,
         }
     }
 }
@@ -737,6 +772,7 @@ mod tests {
                 query_timeout_secs: Some(30),
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
+                replace_invalid_utf8: true,
             },
         )
         .unwrap();
@@ -751,6 +787,7 @@ mod tests {
                 query_timeout_secs: None,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
+                replace_invalid_utf8: false,
             },
         )
         .unwrap();
@@ -762,12 +799,14 @@ mod tests {
         assert_eq!(small.execution_options.query_timeout_secs, Some(30));
         assert!(small.unknown_type_fallback_to_varchar);
         assert!(small.replace_invalid_utf16);
+        assert!(small.replace_invalid_utf8);
         assert_eq!(large.batch_size, 32);
         assert_eq!(large.max_str_len, 4096);
         assert_eq!(large.connection_limiter.max_connections(), 4);
         assert_eq!(large.execution_options, OdbcExecutionOptions::default());
         assert!(!large.unknown_type_fallback_to_varchar);
         assert!(!large.replace_invalid_utf16);
+        assert!(!large.replace_invalid_utf8);
     }
 
     #[test]
@@ -782,6 +821,7 @@ mod tests {
                 query_timeout_secs: None,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
+                replace_invalid_utf8: false,
             }
         );
     }
@@ -825,8 +865,8 @@ mod tests {
     }
 
     #[test]
-    fn replace_invalid_utf16_url_option_is_connector_only() {
-        let conn = "odbc://example.com/db?driver=PostgreSQL&replace_invalid_utf16=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30";
+    fn replace_invalid_encoding_url_options_are_connector_only() {
+        let conn = "odbc://example.com/db?driver=PostgreSQL&replace_invalid_utf16=true&replace_invalid_utf8=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30";
         assert_eq!(
             odbc_conn_string(conn).unwrap(),
             "Driver=PostgreSQL;Server=example.com;Database=db;"
@@ -834,6 +874,7 @@ mod tests {
 
         let source = OdbcSource::with_options(conn, 1, OdbcOptions::default()).unwrap();
         assert!(source.replace_invalid_utf16);
+        assert!(source.replace_invalid_utf8);
         assert_eq!(source.connection_limiter.max_connections(), 3);
         assert_eq!(source.execution_options.login_timeout_secs, Some(5));
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));

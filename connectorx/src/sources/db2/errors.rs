@@ -54,6 +54,16 @@ pub enum Db2SourceError {
         surrogate: u16,
     },
 
+    #[error(
+        "Invalid UTF-8 sequence for source={source_name} column_name={column_name} row_index={row_index} byte_offset={byte_offset}. Set replace_invalid_utf8=true to replace invalid UTF-8 with U+FFFD."
+    )]
+    InvalidUtf8 {
+        source_name: &'static str,
+        column_name: String,
+        row_index: usize,
+        byte_offset: usize,
+    },
+
     #[error(transparent)]
     ConnectorXError(#[from] crate::errors::ConnectorXError),
 
