@@ -340,7 +340,7 @@ def write_summary(path: Path, benchmarks: list[dict[str, Any]], metadata: dict[s
         "| Mode | Case | Partitioning | Batch size | Median ms | Median rows/s |",
         "| --- | --- | --- | ---: | ---: | ---: |",
     ]
-    for benchmark in rows[:24]:
+    for benchmark in rows:
         lines.append(
             "| `{mode}` | `{case}` | `{partitioning}` | {batch_size} | {median_ms} | {rows_per_second} |".format(
                 mode=benchmark.get("mode") or "unknown",

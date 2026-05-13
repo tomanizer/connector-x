@@ -48,6 +48,7 @@ fn bench_rows() -> u64 {
     std::env::var("ODBC_BENCH_ROWS")
         .ok()
         .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_BENCH_ROWS)
 }
 
@@ -70,6 +71,7 @@ fn partition_count() -> usize {
     std::env::var("ODBC_BENCH_PARTITIONS")
         .ok()
         .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_PARTITIONS)
 }
 
