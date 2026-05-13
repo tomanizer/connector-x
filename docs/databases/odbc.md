@@ -138,6 +138,8 @@ ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and sha
 
 For `return_type="arrow"` and `return_type="arrow_stream"`, `pre_execution_query` statements are executed on each ODBC connection before ConnectorX runs metadata discovery or a partition query fetch. This supports session settings and temp objects used by the selected query. Partition-range discovery runs before the Arrow read path, so provide an explicit `partition_range` when range discovery also depends on session-local pre-execution setup.
 
+For `return_type="arrow_stream"`, ConnectorX uses a bounded producer queue instead of buffering every fetched batch. The queue capacity is two `RecordBatch` values per permitted active ODBC connection, capped at 64 batches, so resident stream memory is driven by `batch_size`, selected column widths, and `max_connections`. Dropping the Python/Rust iterator cancels the stream producers; an in-flight ODBC fetch may still run until the driver returns or `query_timeout_secs` fires.
+
 Tuning environment variables:
 
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`. Recommended range is `1024` to `16384`; hard maximum is `65536`.

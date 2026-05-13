@@ -166,6 +166,7 @@ The defaults are tuned for throughput over small memory use:
 
 `SYBASE_BATCH_SIZE * SYBASE_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Sybase URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound; lower `SYBASE_BATCH_SIZE` when raising `SYBASE_MAX_STR_LEN` for large LOB cells.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
+Arrow stream reads use the shared ODBC bounded producer queue documented in `docs/databases/odbc.md`; tune `SYBASE_BATCH_SIZE` and `SYBASE_MAX_CONNECTIONS` together to control throughput and stream memory.
 
 For Arrow and Arrow stream reads, `pre_execution_query` statements run on every Sybase ODBC connection before metadata discovery and before each partition fetch. Use this for session settings or temp objects needed by the main query. If automatic partition-range discovery also depends on those settings, pass an explicit `partition_range`.
 

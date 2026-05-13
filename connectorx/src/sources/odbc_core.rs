@@ -1930,6 +1930,29 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "dst_arrow")]
+    impl OdbcArrowPolicy for TestType {
+        fn arrow_type(self) -> ArrowTypeSystem {
+            ArrowTypeSystem::LargeUtf8(false)
+        }
+
+        fn arrow_data_type(self) -> ArrowDataType {
+            ArrowDataType::LargeUtf8
+        }
+
+        fn build_arrow_array<E: OdbcCoreError>(
+            self,
+            _column: AnySlice<'_>,
+            _nrows: usize,
+            _col_index: usize,
+            _column_name: Option<&str>,
+            _replace_invalid_utf16: bool,
+            _replace_invalid_utf8: bool,
+        ) -> Result<ArrayRef, E> {
+            unreachable!("stream lifecycle tests do not build arrays")
+        }
+    }
+
     #[allow(dead_code)]
     #[derive(Debug)]
     enum TestError {
@@ -2141,6 +2164,94 @@ mod tests {
         assert_eq!(connection_limiter(None, 0).unwrap().max_connections(), 1);
         assert_eq!(connection_limiter(None, 3).unwrap().max_connections(), 3);
         assert_eq!(connection_limiter(Some(2), 8).unwrap().max_connections(), 2);
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    fn test_stream_plan(
+        stream_queue_capacity: usize,
+        cancelled: Arc<AtomicBool>,
+    ) -> OdbcRecordBatchStreamPlan<TestType, TestError> {
+        OdbcRecordBatchStreamPlan {
+            conn: String::new(),
+            queries: Vec::new(),
+            cancelled,
+            names: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            schema: Arc::from(Vec::<TestType>::new().into_boxed_slice()),
+            column_buffer_max_lens: Arc::from(Vec::<usize>::new().into_boxed_slice()),
+            batch_size: 1,
+            connection_limiter: OdbcConnectionLimiter::new(1),
+            execution_options: OdbcExecutionOptions::default(),
+            pre_execution_queries: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            stream_queue_capacity,
+            replace_invalid_utf16: false,
+            replace_invalid_utf8: false,
+            arrow_schema: Arc::new(Schema::empty()),
+            _marker: PhantomData,
+        }
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn stream_queue_capacity_is_bounded_by_active_connections() {
+        assert_eq!(stream_queue_capacity(1, 1), 2);
+        assert_eq!(stream_queue_capacity(4, 2), 4);
+        assert_eq!(stream_queue_capacity(100, 100), 64);
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn record_batch_iterator_uses_bounded_channel() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let iterator = OdbcRecordBatchIterator::<TestType, TestError>::new(
+            Vec::new(),
+            Arc::new(Schema::empty()),
+            test_stream_plan(1, cancelled),
+        );
+        let sender = iterator.sender.as_ref().unwrap();
+        let schema = Arc::new(Schema::empty());
+
+        sender
+            .try_send(Ok(RecordBatch::new_empty(Arc::clone(&schema))))
+            .unwrap();
+        assert!(matches!(
+            sender.try_send(Ok(RecordBatch::new_empty(schema))),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn dropping_record_batch_iterator_cancels_and_disconnects_sender() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let iterator = OdbcRecordBatchIterator::<TestType, TestError>::new(
+            Vec::new(),
+            Arc::new(Schema::empty()),
+            test_stream_plan(1, Arc::clone(&cancelled)),
+        );
+        let sender = iterator.sender.as_ref().unwrap().clone();
+
+        drop(iterator);
+
+        assert!(cancelled.load(Ordering::Acquire));
+        assert!(sender
+            .send(Ok(RecordBatch::new_empty(Arc::new(Schema::empty()))))
+            .is_err());
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn empty_stream_worker_is_joined_after_channel_closes() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut iterator = OdbcRecordBatchIterator::<TestType, TestError>::new(
+            Vec::new(),
+            Arc::new(Schema::empty()),
+            test_stream_plan(1, cancelled),
+        );
+
+        iterator.prepare();
+        assert!(iterator.worker.is_some());
+        assert!(iterator.next_batch_result().unwrap().is_none());
+        assert!(iterator.worker.is_none());
     }
 
     #[test]
@@ -2804,7 +2915,10 @@ use odbc_api::sys::NULL_DATA;
 use rayon::prelude::*;
 #[cfg(feature = "dst_arrow")]
 use std::{
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{sync_channel, Receiver, SyncSender},
+    },
     thread,
 };
 
@@ -3750,6 +3864,7 @@ where
 struct OdbcRecordBatchStreamPlan<TS, E> {
     conn: String,
     queries: Vec<String>,
+    cancelled: Arc<AtomicBool>,
     names: Arc<[String]>,
     schema: Arc<[TS]>,
     column_buffer_max_lens: Arc<[usize]>,
@@ -3757,6 +3872,7 @@ struct OdbcRecordBatchStreamPlan<TS, E> {
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
     pre_execution_queries: Arc<[String]>,
+    stream_queue_capacity: usize,
     replace_invalid_utf16: bool,
     replace_invalid_utf8: bool,
     arrow_schema: Arc<Schema>,
@@ -3768,7 +3884,9 @@ pub(crate) struct OdbcRecordBatchIterator<TS, E> {
     names: Vec<String>,
     arrow_schema: Arc<Schema>,
     receiver: Receiver<Result<RecordBatch, ConnectorXError>>,
-    sender: Option<Sender<Result<RecordBatch, ConnectorXError>>>,
+    sender: Option<SyncSender<Result<RecordBatch, ConnectorXError>>>,
+    worker: Option<thread::JoinHandle<()>>,
+    cancelled: Arc<AtomicBool>,
     plan: Option<OdbcRecordBatchStreamPlan<TS, E>>,
 }
 
@@ -3783,14 +3901,32 @@ where
         arrow_schema: Arc<Schema>,
         plan: OdbcRecordBatchStreamPlan<TS, E>,
     ) -> Self {
-        let (sender, receiver) = channel();
+        let (sender, receiver) = sync_channel(plan.stream_queue_capacity);
         Self {
             names,
             arrow_schema,
             receiver,
             sender: Some(sender),
+            worker: None,
+            cancelled: Arc::clone(&plan.cancelled),
             plan: Some(plan),
         }
+    }
+
+    fn join_finished_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            if let Err(error) = worker.join() {
+                log::error!("ODBC Arrow stream worker panicked: {:?}", error);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+impl<TS, E> Drop for OdbcRecordBatchIterator<TS, E> {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.sender.take();
     }
 }
 
@@ -3815,8 +3951,11 @@ where
             return;
         };
 
-        thread::spawn(move || {
+        self.worker = Some(thread::spawn(move || {
             let result = plan.queries.par_iter().try_for_each(|query| {
+                if plan.cancelled.load(Ordering::Acquire) {
+                    return Ok(());
+                }
                 arrow_stream_fetch_partition::<TS, E>(
                     &plan.conn,
                     query,
@@ -3831,14 +3970,16 @@ where
                     plan.replace_invalid_utf8,
                     Arc::clone(&plan.arrow_schema),
                     sender.clone(),
+                    Arc::clone(&plan.cancelled),
                 )
             });
             if let Err(error) = result {
+                plan.cancelled.store(true, Ordering::Release);
                 let _ = sender.send(Err(ConnectorXError::Other(anyhow!(
                     "ODBC Arrow stream worker failed: {error:?}"
                 ))));
             }
-        });
+        }));
     }
 
     fn next_batch(&mut self) -> Option<RecordBatch> {
@@ -3857,10 +3998,22 @@ where
         }
         match self.receiver.recv() {
             Ok(Ok(record_batch)) => Ok(Some(record_batch)),
-            Ok(Err(error)) => Err(error),
-            Err(_) => Ok(None),
+            Ok(Err(error)) => {
+                self.cancelled.store(true, Ordering::Release);
+                Err(error)
+            }
+            Err(_) => {
+                self.join_finished_worker();
+                Ok(None)
+            }
         }
     }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn stream_queue_capacity(max_connections: usize, partition_count: usize) -> usize {
+    let active_connections = max_connections.min(partition_count.max(1)).max(1);
+    active_connections.saturating_mul(2).clamp(1, 64)
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -3892,6 +4045,7 @@ where
         map_type,
     )?;
     let (_, record_schema) = odbc_arrow_schema(&names, &schema);
+    let cancelled = Arc::new(AtomicBool::new(false));
 
     let plan = OdbcRecordBatchStreamPlan {
         conn: conn.to_string(),
@@ -3899,10 +4053,15 @@ where
             .iter()
             .map(|query| query.as_str().to_string())
             .collect(),
+        cancelled,
         names: Arc::from(names.clone().into_boxed_slice()),
         schema: Arc::from(schema.into_boxed_slice()),
         column_buffer_max_lens: Arc::from(column_buffer_max_lens.into_boxed_slice()),
         batch_size,
+        stream_queue_capacity: stream_queue_capacity(
+            connection_limiter.max_connections,
+            queries.len(),
+        ),
         connection_limiter,
         execution_options,
         pre_execution_queries: pre_execution_queries
@@ -3931,12 +4090,16 @@ fn arrow_stream_fetch_partition<TS, E>(
     replace_invalid_utf16: bool,
     replace_invalid_utf8: bool,
     arrow_schema: Arc<Schema>,
-    sender: Sender<Result<RecordBatch, ConnectorXError>>,
+    sender: SyncSender<Result<RecordBatch, ConnectorXError>>,
+    cancelled: Arc<AtomicBool>,
 ) -> Result<(), E>
 where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
     E: OdbcCoreError + Send,
 {
+    if cancelled.load(Ordering::Acquire) {
+        return Ok(());
+    }
     let _connection_permit = connection_limiter.acquire();
     let cursor = execute_query_with_pre_execution::<E>(
         TS::source_name(),
@@ -3954,7 +4117,13 @@ where
     )?;
     let mut cursor = cursor.bind_buffer(buffer)?;
 
-    while let Some(batch) = cursor.fetch()? {
+    while !cancelled.load(Ordering::Acquire) {
+        let Some(batch) = cursor.fetch()? else {
+            break;
+        };
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
         let record_batch = build_record_batch::<TS, E>(
             batch,
             names,
@@ -3963,9 +4132,27 @@ where
             replace_invalid_utf8,
             Arc::clone(&arrow_schema),
         )?;
-        if sender.send(Ok(record_batch)).is_err() {
-            return Ok(());
+        if !send_stream_message(&sender, &cancelled, Ok(record_batch)) {
+            break;
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "dst_arrow")]
+fn send_stream_message(
+    sender: &SyncSender<Result<RecordBatch, ConnectorXError>>,
+    cancelled: &AtomicBool,
+    message: Result<RecordBatch, ConnectorXError>,
+) -> bool {
+    if cancelled.load(Ordering::Acquire) {
+        return false;
+    }
+    match sender.send(message) {
+        Ok(()) => true,
+        Err(_) => {
+            cancelled.store(true, Ordering::Release);
+            false
+        }
+    }
 }
