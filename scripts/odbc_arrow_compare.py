@@ -283,7 +283,7 @@ def default_cases(backend: str) -> list[Case]:
         Case(
             "perf",
             "select id, flag, int_v, bigint_v, real_v, double_v, amount, "
-            "name, payload, created_at from cx_odbc_perf where id <= "
+            "name, payload, payload_bytes, created_at from cx_odbc_perf where id <= "
             + str(odbc_compare_rows),
             partition_on="id",
         ),

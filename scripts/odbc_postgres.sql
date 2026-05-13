@@ -68,6 +68,7 @@ create table cx_odbc_perf (
     amount numeric(18, 4) not null,
     name varchar(64) not null,
     payload varchar(128) not null,
+    payload_bytes bytea not null,
     created_at timestamp not null
 );
 
@@ -81,6 +82,7 @@ insert into cx_odbc_perf (
     amount,
     name,
     payload,
+    payload_bytes,
     created_at
 )
 select
@@ -93,5 +95,6 @@ select
     (g::numeric / 11)::numeric(18, 4),
     format('name-%s', g),
     repeat('x', 64),
+    decode(repeat('78', 64), 'hex'),
     timestamp '2024-01-01 00:00:00' + (g || ' seconds')::interval
 from generate_series(1, 100000) as g;
