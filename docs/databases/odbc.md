@@ -251,11 +251,21 @@ ODBC-family coverage is split into three explicit categories:
 
 | Coverage kind | Where it runs | Expected result without credentials |
 | --- | --- | --- |
-| Compile/unit coverage | `connector-rust-ci` for `src_odbc`, `src_db2`, and `src_sybase` | Tests print `CONNECTORX_SKIP:` for env-gated live cases and still pass. |
+| Compile/unit coverage | `connector-rust-ci` for `src_odbc`, `src_db2`, and `src_sybase` | Tests print `CONNECTORX_SKIP:` for env-gated live cases and still pass. The job summary records the platform ODBC manager library and registered driver names reported by the runner where Python is available. |
 | PostgreSQL ODBC testcontainer coverage | Ubuntu `connector-rust-ci` and manual `odbc-live` with `backend=postgres` or `backend=both` | Runs without repository secrets, using Docker testcontainers and psqlODBC. |
+| Release wheel ODBC runtime smoke | `release` verification on Linux x86_64/aarch64, macOS Intel/ARM, and Windows for each Python wheel | Installs the built wheel, imports `connectorx`, loads the platform ODBC manager, allocates an ODBC environment handle, and uploads JSON metadata with driver discovery output. |
+| Package index import smoke | Manual `import-test` across Linux, macOS, and Windows | Installs ConnectorX from the selected package index, imports `read_sql`, runs the same ODBC manager smoke test, and records summary/artifact metadata. |
 | Secret-backed live coverage | Manual `odbc-live` with `backend=sybase`, `db2`, `odbc`, or `both` | Fails before tests with a clear error if the selected backend secrets are missing. |
 
-The GitHub Actions job summary records which ODBC-family backends were skipped, exercised through PostgreSQL testcontainers, or exercised against secret-backed live drivers. In raw logs, grep for `CONNECTORX_SKIP:` to find env-gated tests that intentionally skipped, and `ODBC_COVERAGE:` for local `just` live-test output.
+The GitHub Actions job summary records which ODBC-family backends were skipped, exercised through PostgreSQL testcontainers, exercised against secret-backed live drivers, or smoke-tested at the ODBC manager layer. Runtime smoke artifacts are named `odbc-runtime-*` and include the OS, Python version, ODBC manager library candidate that loaded, `SQLAllocHandle(SQL_HANDLE_ENV)` result, and driver discovery output such as `odbcinst -j`/`odbcinst -q -d` on Unix-like runners or `Get-OdbcDriver` on Windows. In raw logs, grep for `CONNECTORX_SKIP:` to find env-gated tests that intentionally skipped, and `ODBC_COVERAGE:` for local `just` live-test output.
+
+Support tiers for driver/platform claims:
+
+| Tier | Meaning |
+| --- | --- |
+| Tested in no-secret CI | Generic ODBC with PostgreSQL through psqlODBC on Ubuntu, plus ODBC manager linkage smoke on release/import matrices. |
+| Tested with repository secrets or manual dispatch | Sybase, Db2, and arbitrary generic ODBC targets configured through the `odbc-live` workflow. |
+| Expected but user-validated | macOS and Windows database-specific drivers where CI proves the ODBC manager loads but the target commercial/vendor driver is supplied by the deployment. |
 
 Repository secrets for the manual `odbc-live` workflow:
 

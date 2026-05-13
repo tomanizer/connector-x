@@ -24,14 +24,12 @@ jobs:
 
       - name: Set python version
         run: |
-          echo "/opt/python/cp${{ matrix.python-version[0] }}-cp${{ matrix.python-version[0] }}/bin" >> $GITHUB_PATH
+          echo "/opt/python/cp${{ matrix.python-version[0] }}-cp${{ matrix.python-version[0] }}/bin" >> "$GITHUB_PATH"
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt
-          target: aarch64-unknown-linux-gnu
-          default: true
+          targets: aarch64-unknown-linux-gnu
 
       - uses: extractions/setup-just@v4
         env:
@@ -96,11 +94,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           architecture: x64
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt
-          default: true
 
       - uses: extractions/setup-just@v4
         env:
@@ -111,7 +107,7 @@ jobs:
       - name: Install ODBC dependencies
         shell: bash
         run: |
-          if [[ "${{ matrix.os }}" == macos-* ]]; then
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
             brew install unixodbc freetds
           fi
 
@@ -149,12 +145,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt
-          target: aarch64-apple-darwin
-          default: true
+          targets: aarch64-apple-darwin
 
       - uses: extractions/setup-just@v4
         env:
@@ -185,7 +179,7 @@ jobs:
 
   verify:
     runs-on: ${{ matrix.os }}
-    needs: [win-and-mac, linux]
+    needs: [win-and-mac, linux, apple-arm]
     strategy:
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
@@ -212,13 +206,38 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install ODBC runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y unixodbc
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install unixodbc
+          else
+            echo "Windows provides the ODBC Driver Manager through odbc32.dll."
+          fi
+
       - uses: actions/download-artifact@v8
         with:
           name: "${{ matrix.artifact-prefix || matrix.os }}-${{ matrix.python-version }}"
 
-      - run: |
-          pip install *.whl
+      - name: Import wheel and smoke-test ODBC runtime
+        shell: bash
+        run: |
+          pip install ./*.whl
           python -c "import connectorx"
+          python scripts/odbc_runtime_smoke.py \
+            --json "odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: "odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}"
+          path: "odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}.json"
+          if-no-files-found: warn
 
   upload:
     runs-on: ubuntu-latest
@@ -230,7 +249,7 @@ jobs:
       - name: Setup environment
         run: |
           tree .
-          echo "/home/runner/.local/bin" >> $GITHUB_PATH
+          echo "/home/runner/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install Twine
         run: |
@@ -242,9 +261,8 @@ jobs:
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
-          for file in $(ls **/*)
-          do
-            twine upload --non-interactive -u __token__ -p $PYPI_TOKEN $file || continue
+          find . -type f \( -name '*.whl' -o -name '*.tar.gz' \) -print0 | while IFS= read -r -d '' file; do
+            twine upload --non-interactive -u __token__ -p "$PYPI_TOKEN" "$file" || continue
           done
 
       - name: Upload to PyPI test site
@@ -252,7 +270,6 @@ jobs:
         env:
           PYPI_TEST_TOKEN: ${{ secrets.PYPI_TEST_TOKEN }}
         run: |
-          for file in $(ls **/*)
-          do
-            twine upload --non-interactive --repository-url https://test.pypi.org/legacy/ -u __token__ -p $PYPI_TEST_TOKEN $file --verbose || continue
+          find . -type f \( -name '*.whl' -o -name '*.tar.gz' \) -print0 | while IFS= read -r -d '' file; do
+            twine upload --non-interactive --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$PYPI_TEST_TOKEN" "$file" --verbose || continue
           done
