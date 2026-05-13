@@ -23,11 +23,18 @@ use odbc_api::{
     Environment, Nullability, ResultSetMetadata,
 };
 use rust_decimal::{Decimal, Error as DecimalParseError};
-use sqlparser::dialect::Dialect;
+use sqlparser::dialect::{Dialect, GenericDialect, MsSqlDialect};
 
 use crate::{
     errors::ConnectorXError,
-    sources::PartitionParser,
+    sources::{
+        odbc_common::{
+            param_bool_param, param_u32_param, param_usize_param, LOGIN_TIMEOUT_SECS_PARAM,
+            MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
+            REPLACE_INVALID_UTF8_PARAM,
+        },
+        PartitionParser, SourcePartition,
+    },
     sql::{count_query, CXQuery},
     typesystem::TypeSystem,
 };
@@ -183,6 +190,73 @@ impl OdbcExecutionOptions {
     }
 }
 
+pub(crate) trait OdbcRuntimeOptions {
+    fn max_connections(&self) -> Option<usize>;
+    fn login_timeout_secs(&self) -> Option<u32>;
+    fn query_timeout_secs(&self) -> Option<usize>;
+    fn replace_invalid_utf16(&self) -> bool;
+    fn replace_invalid_utf8(&self) -> bool;
+}
+
+pub(crate) struct ResolvedOdbcRuntimeOptions {
+    pub(crate) connection_limiter: Arc<OdbcConnectionLimiter>,
+    pub(crate) execution_options: OdbcExecutionOptions,
+    pub(crate) replace_invalid_utf16: bool,
+    pub(crate) replace_invalid_utf8: bool,
+}
+
+pub(crate) fn resolve_runtime_options<O>(
+    params: Option<&[(String, String)]>,
+    options: &O,
+    default_max_connections: usize,
+) -> Result<ResolvedOdbcRuntimeOptions, anyhow::Error>
+where
+    O: OdbcRuntimeOptions,
+{
+    let replace_invalid_utf16 = params
+        .map(|params| param_bool_param(params, REPLACE_INVALID_UTF16_PARAM))
+        .transpose()?
+        .flatten()
+        .unwrap_or(options.replace_invalid_utf16());
+    let replace_invalid_utf8 = params
+        .map(|params| param_bool_param(params, REPLACE_INVALID_UTF8_PARAM))
+        .transpose()?
+        .flatten()
+        .unwrap_or(options.replace_invalid_utf8());
+    let max_connections = params
+        .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
+        .transpose()?
+        .flatten()
+        .or(options.max_connections());
+    Ok(ResolvedOdbcRuntimeOptions {
+        connection_limiter: connection_limiter(max_connections, default_max_connections)?,
+        execution_options: execution_options_from_params(params, options)?,
+        replace_invalid_utf16,
+        replace_invalid_utf8,
+    })
+}
+
+pub(crate) fn execution_options_from_params<O>(
+    params: Option<&[(String, String)]>,
+    options: &O,
+) -> Result<OdbcExecutionOptions, anyhow::Error>
+where
+    O: OdbcRuntimeOptions,
+{
+    OdbcExecutionOptions::new(
+        params
+            .map(|params| param_u32_param(params, LOGIN_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.login_timeout_secs()),
+        params
+            .map(|params| param_usize_param(params, QUERY_TIMEOUT_SECS_PARAM))
+            .transpose()?
+            .flatten()
+            .or(options.query_timeout_secs()),
+    )
+}
+
 pub trait OdbcCoreError:
     From<ConnectorXError>
     + From<odbc_api::Error>
@@ -251,6 +325,292 @@ pub trait OdbcTypePolicy: TypeSystem + Copy + Debug {
                 .unwrap_or(default_max_len),
             _ => default_max_len,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OdbcSqlDialect {
+    #[cfg_attr(not(any(feature = "src_odbc", feature = "src_db2")), allow(dead_code))]
+    Generic,
+    #[cfg_attr(not(feature = "src_sybase"), allow(dead_code))]
+    MsSql,
+}
+
+impl OdbcSqlDialect {
+    fn fetch_count<E>(
+        self,
+        source_name: &'static str,
+        conn: &str,
+        query: &str,
+        connection_limiter: &Arc<OdbcConnectionLimiter>,
+        execution_options: OdbcExecutionOptions,
+    ) -> Result<usize, E>
+    where
+        E: OdbcCoreError,
+    {
+        match self {
+            Self::Generic => fetch_count(
+                source_name,
+                conn,
+                query,
+                &GenericDialect {},
+                connection_limiter,
+                execution_options,
+            ),
+            Self::MsSql => fetch_count(
+                source_name,
+                conn,
+                query,
+                &MsSqlDialect {},
+                connection_limiter,
+                execution_options,
+            ),
+        }
+    }
+
+    fn count_query(self, query: &CXQuery<String>) -> Result<CXQuery<String>, ConnectorXError> {
+        match self {
+            Self::Generic => count_query(query, &GenericDialect {}),
+            Self::MsSql => count_query(query, &MsSqlDialect {}),
+        }
+    }
+}
+
+pub(crate) struct OdbcSourceState<TS, E> {
+    pub(crate) conn: String,
+    pub(crate) origin_query: Option<String>,
+    pub(crate) queries: Vec<CXQuery<String>>,
+    pub(crate) names: Vec<String>,
+    pub(crate) schema: Vec<TS>,
+    pub(crate) column_buffer_max_lens: Vec<usize>,
+    pub(crate) batch_size: usize,
+    pub(crate) max_str_len: usize,
+    pub(crate) connection_limiter: Arc<OdbcConnectionLimiter>,
+    pub(crate) execution_options: OdbcExecutionOptions,
+    pub(crate) unknown_type_fallback_to_varchar: bool,
+    pub(crate) replace_invalid_utf16: bool,
+    pub(crate) replace_invalid_utf8: bool,
+    _marker: PhantomData<E>,
+}
+
+impl<TS, E> OdbcSourceState<TS, E>
+where
+    TS: OdbcTypePolicy,
+    E: OdbcCoreError,
+{
+    pub(crate) fn new(
+        conn: String,
+        batch_size: usize,
+        max_str_len: usize,
+        unknown_type_fallback_to_varchar: bool,
+        runtime_options: ResolvedOdbcRuntimeOptions,
+    ) -> Self {
+        Self {
+            conn,
+            origin_query: None,
+            queries: vec![],
+            names: vec![],
+            schema: vec![],
+            column_buffer_max_lens: vec![],
+            batch_size,
+            max_str_len,
+            connection_limiter: runtime_options.connection_limiter,
+            execution_options: runtime_options.execution_options,
+            unknown_type_fallback_to_varchar,
+            replace_invalid_utf16: runtime_options.replace_invalid_utf16,
+            replace_invalid_utf8: runtime_options.replace_invalid_utf8,
+            _marker: PhantomData,
+        }
+    }
+
+    pub(crate) fn set_queries<Q: ToString>(&mut self, queries: &[CXQuery<Q>]) {
+        self.queries = queries.iter().map(|q| q.map(Q::to_string)).collect();
+    }
+
+    pub(crate) fn set_origin_query(&mut self, query: Option<String>) {
+        self.origin_query = query;
+    }
+
+    pub(crate) fn fetch_metadata<F>(&mut self, map_type: F) -> Result<(), E>
+    where
+        F: Fn(DataType, Nullability, &str) -> Result<TS, E>,
+    {
+        if self.queries.is_empty() {
+            return Err(
+                anyhow!("{} metadata requires at least one query", TS::source_name()).into(),
+            );
+        }
+
+        let first_query = self.queries[0].to_string();
+        let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+            TS::source_name(),
+            &self.conn,
+            &first_query,
+            self.max_str_len,
+            &self.connection_limiter,
+            self.execution_options,
+            None,
+            map_type,
+        )?;
+        self.names = names;
+        self.schema = schema;
+        self.column_buffer_max_lens = column_buffer_max_lens;
+        Ok(())
+    }
+
+    pub(crate) fn result_rows(&mut self, sql_dialect: OdbcSqlDialect) -> Result<Option<usize>, E> {
+        match &self.origin_query {
+            Some(query) => Ok(Some(sql_dialect.fetch_count::<E>(
+                TS::source_name(),
+                &self.conn,
+                query,
+                &self.connection_limiter,
+                self.execution_options,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.names.clone()
+    }
+
+    pub(crate) fn schema(&self) -> Vec<TS> {
+        self.schema.clone()
+    }
+
+    pub(crate) fn partition(self, sql_dialect: OdbcSqlDialect) -> Vec<OdbcSourcePartition<TS, E>> {
+        self.queries
+            .iter()
+            .map(|query| {
+                OdbcSourcePartition::new(
+                    self.conn.clone(),
+                    query,
+                    &self.names,
+                    &self.schema,
+                    &self.column_buffer_max_lens,
+                    self.batch_size,
+                    Arc::clone(&self.connection_limiter),
+                    self.execution_options,
+                    self.replace_invalid_utf16,
+                    self.replace_invalid_utf8,
+                    sql_dialect,
+                )
+            })
+            .collect()
+    }
+}
+
+pub(crate) struct OdbcSourcePartition<TS, E> {
+    conn: String,
+    query: CXQuery<String>,
+    names: Arc<[String]>,
+    schema: Arc<[TS]>,
+    column_buffer_max_lens: Vec<usize>,
+    nrows: usize,
+    ncols: usize,
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
+    sql_dialect: OdbcSqlDialect,
+    _marker: PhantomData<E>,
+}
+
+impl<TS, E> OdbcSourcePartition<TS, E>
+where
+    TS: OdbcTypePolicy,
+    E: OdbcCoreError,
+{
+    fn new(
+        conn: String,
+        query: &CXQuery<String>,
+        names: &[String],
+        schema: &[TS],
+        column_buffer_max_lens: &[usize],
+        batch_size: usize,
+        connection_limiter: Arc<OdbcConnectionLimiter>,
+        execution_options: OdbcExecutionOptions,
+        replace_invalid_utf16: bool,
+        replace_invalid_utf8: bool,
+        sql_dialect: OdbcSqlDialect,
+    ) -> Self {
+        Self {
+            conn,
+            query: query.clone(),
+            names: names.to_vec().into(),
+            schema: schema.to_vec().into(),
+            column_buffer_max_lens: column_buffer_max_lens.to_vec(),
+            nrows: 0,
+            ncols: schema.len(),
+            batch_size,
+            connection_limiter,
+            execution_options,
+            replace_invalid_utf16,
+            replace_invalid_utf8,
+            sql_dialect,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<TS, E> SourcePartition for OdbcSourcePartition<TS, E>
+where
+    TS: OdbcTypePolicy,
+    E: OdbcCoreError,
+{
+    type TypeSystem = TS;
+    type Parser<'a>
+        = OdbcParser<TS, E>
+    where
+        Self: 'a;
+    type Error = E;
+
+    fn result_rows(&mut self) -> Result<(), Self::Error> {
+        let cquery = self.sql_dialect.count_query(&self.query)?;
+        self.nrows = fetch_count_query::<E>(
+            TS::source_name(),
+            &self.conn,
+            cquery.as_str(),
+            &self.connection_limiter,
+            self.execution_options,
+        )?;
+        Ok(())
+    }
+
+    fn parser(&mut self) -> Result<Self::Parser<'_>, Self::Error> {
+        let connection_permit = self.connection_limiter.acquire();
+        let cursor = execute_query::<E>(
+            TS::source_name(),
+            &self.conn,
+            self.query.as_str(),
+            self.execution_options,
+        )?;
+        let buffer = ColumnarAnyBuffer::try_from_descs(
+            self.batch_size,
+            self.schema
+                .iter()
+                .zip(&self.column_buffer_max_lens)
+                .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
+        )?;
+        let cursor = cursor.bind_buffer(buffer)?;
+        Ok(OdbcParser::new(
+            cursor,
+            Arc::clone(&self.names),
+            Arc::clone(&self.schema),
+            self.replace_invalid_utf16,
+            self.replace_invalid_utf8,
+            connection_permit,
+        ))
+    }
+
+    fn nrows(&self) -> usize {
+        self.nrows
+    }
+
+    fn ncols(&self) -> usize {
+        self.ncols
     }
 }
 
@@ -2881,9 +3241,87 @@ macro_rules! impl_bytes_clone_produce {
     };
 }
 
+macro_rules! impl_odbc_source_partition_wrapper {
+    ($partition:ident, $type_system:ty, $error:ty) => {
+        pub struct $partition {
+            inner: $crate::sources::odbc_core::OdbcSourcePartition<$type_system, $error>,
+        }
+
+        impl $partition {
+            pub(crate) fn new(
+                inner: $crate::sources::odbc_core::OdbcSourcePartition<$type_system, $error>,
+            ) -> Self {
+                Self { inner }
+            }
+        }
+
+        impl $crate::sources::SourcePartition for $partition {
+            type TypeSystem = $type_system;
+            type Parser<'a> = $crate::sources::odbc_core::OdbcParser<$type_system, $error>;
+            type Error = $error;
+
+            fn result_rows(&mut self) -> Result<(), Self::Error> {
+                <$crate::sources::odbc_core::OdbcSourcePartition<
+                                    $type_system,
+                                    $error,
+                                > as $crate::sources::SourcePartition>::result_rows(&mut self.inner)
+            }
+
+            fn parser(&mut self) -> Result<Self::Parser<'_>, Self::Error> {
+                <$crate::sources::odbc_core::OdbcSourcePartition<
+                                    $type_system,
+                                    $error,
+                                > as $crate::sources::SourcePartition>::parser(&mut self.inner)
+            }
+
+            fn nrows(&self) -> usize {
+                <$crate::sources::odbc_core::OdbcSourcePartition<
+                                    $type_system,
+                                    $error,
+                                > as $crate::sources::SourcePartition>::nrows(&self.inner)
+            }
+
+            fn ncols(&self) -> usize {
+                <$crate::sources::odbc_core::OdbcSourcePartition<
+                                    $type_system,
+                                    $error,
+                                > as $crate::sources::SourcePartition>::ncols(&self.inner)
+            }
+        }
+    };
+}
+
+macro_rules! impl_odbc_runtime_options {
+    ($options:ty) => {
+        impl $crate::sources::odbc_core::OdbcRuntimeOptions for $options {
+            fn max_connections(&self) -> Option<usize> {
+                self.max_connections
+            }
+
+            fn login_timeout_secs(&self) -> Option<u32> {
+                self.login_timeout_secs
+            }
+
+            fn query_timeout_secs(&self) -> Option<usize> {
+                self.query_timeout_secs
+            }
+
+            fn replace_invalid_utf16(&self) -> bool {
+                self.replace_invalid_utf16
+            }
+
+            fn replace_invalid_utf8(&self) -> bool {
+                self.replace_invalid_utf8
+            }
+        }
+    };
+}
+
 pub(crate) use impl_bool_produce;
 #[allow(unused_imports)]
 pub(crate) use impl_bytes_clone_produce;
+pub(crate) use impl_odbc_runtime_options;
+pub(crate) use impl_odbc_source_partition_wrapper;
 pub(crate) use impl_parse_from_bytes;
 pub(crate) use impl_parse_from_cell;
 pub(crate) use impl_string_produce;

@@ -1,0 +1,89 @@
+macro_rules! impl_odbc_family_arrow_transport {
+    (
+        module = $module:ident,
+        destination = $destination:ident,
+        transport = $transport:ident,
+        error = $error:ident,
+        source_module = $source_module:ident,
+        source = $source:ident,
+        source_error = $source_error:ident,
+        type_system = $type_system:ident
+    ) => {
+        mod $module {
+            use crate::destinations::$destination::{
+                typesystem::{NaiveDateTimeWrapperMicro, NaiveTimeWrapperMicro},
+                ArrowDestination, ArrowDestinationError, ArrowTypeSystem,
+            };
+            use crate::sources::$source_module::{$source, $source_error, $type_system};
+            use crate::typesystem::TypeConversion;
+            use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+            use rust_decimal::Decimal;
+            use thiserror::Error;
+
+            pub struct $transport;
+
+            #[derive(Error, Debug)]
+            pub enum $error {
+                #[error(transparent)]
+                Source(#[from] $source_error),
+
+                #[error(transparent)]
+                Destination(#[from] ArrowDestinationError),
+
+                #[error(transparent)]
+                ConnectorX(#[from] crate::errors::ConnectorXError),
+            }
+
+            impl_transport!(
+                name = $transport,
+                error = $error,
+                systems = $type_system => ArrowTypeSystem,
+                route = $source => ArrowDestination,
+                mappings = {
+                    { TinyInt[u8]                  => Int64[i64]            | conversion auto }
+                    { SmallInt[i16]                => Int64[i64]            | conversion auto }
+                    { Int[i32]                     => Int64[i64]            | conversion auto }
+                    { BigInt[i64]                  => Int64[i64]            | conversion auto }
+                    { Real[f32]                    => Float32[f32]          | conversion auto }
+                    { Double[f64]                  => Float64[f64]          | conversion auto }
+                    { Numeric[Decimal]             => Decimal128[Decimal]   | conversion auto | preserve decimal }
+                    { Decimal[Decimal]             => Decimal128[Decimal]   | conversion none | preserve decimal }
+                    { Bit[bool]                    => Boolean[bool]         | conversion auto }
+                    { Char[String]                 => LargeUtf8[String]     | conversion auto }
+                    { Varchar[String]              => LargeUtf8[String]     | conversion none }
+                    { Text[String]                 => LargeUtf8[String]     | conversion none }
+                    { Binary[Vec<u8>]              => LargeBinary[Vec<u8>]  | conversion none }
+                    { Date[NaiveDate]              => Date32[NaiveDate]     | conversion auto }
+                    { Time[NaiveTime]              => Time64Micro[NaiveTimeWrapperMicro]       | conversion option }
+                    { Timestamp[NaiveDateTime]     => Date64Micro[NaiveDateTimeWrapperMicro]   | conversion option }
+                }
+            );
+
+            impl TypeConversion<NaiveTime, NaiveTimeWrapperMicro> for $transport {
+                fn convert(val: NaiveTime) -> NaiveTimeWrapperMicro {
+                    NaiveTimeWrapperMicro(val)
+                }
+            }
+
+            impl TypeConversion<NaiveDateTime, NaiveDateTimeWrapperMicro> for $transport {
+                fn convert(val: NaiveDateTime) -> NaiveDateTimeWrapperMicro {
+                    NaiveDateTimeWrapperMicro(val)
+                }
+            }
+
+            impl TypeConversion<Vec<u8>, Vec<u8>> for $transport {
+                fn convert(val: Vec<u8>) -> Vec<u8> {
+                    val
+                }
+            }
+
+            impl TypeConversion<Option<Vec<u8>>, Option<Vec<u8>>> for $transport {
+                fn convert(val: Option<Vec<u8>>) -> Option<Vec<u8>> {
+                    val
+                }
+            }
+        }
+
+        pub use $module::{$error, $transport};
+    };
+}
