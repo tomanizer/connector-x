@@ -12,7 +12,8 @@ Use a raw ODBC connection string when you need exact driver-specific keywords:
 import connectorx as cx
 
 conn = "Driver={SQLite3};Database=/tmp/example.db;"
-cx.read_sql(conn, "select * from example", return_type="arrow")
+df = cx.read_sql(conn, "select * from example")
+table = cx.read_sql(conn, "select * from example", return_type="arrow")
 ```
 
 For URL-style configuration, use `odbc://` with either `driver=` or `dsn=`:
@@ -21,7 +22,8 @@ For URL-style configuration, use `odbc://` with either `driver=` or `dsn=`:
 import connectorx as cx
 
 conn = "odbc://username:password@server:1433/database?driver=ODBC%20Driver%2018%20for%20SQL%20Server"
-cx.read_sql(conn, "select * from dbo.lineitem", return_type="arrow")
+df = cx.read_sql(conn, "select * from dbo.lineitem")
+table = cx.read_sql(conn, "select * from dbo.lineitem", return_type="arrow")
 ```
 
 ConnectorX expands the URL into an ODBC connection string using `Driver` or `DSN`, `Server`, `Port`, `Database`, `UID`, and `PWD`. Additional URL query parameters are appended to the generated ODBC connection string. Use `server_key=Hostname` when a driver expects `Hostname` instead of `Server`.
@@ -59,7 +61,15 @@ conn_with_credentials = ConnectionUrl(
 )
 ```
 
-The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route. Use `return_type="arrow"`, `return_type="arrow_stream"`, or a downstream Arrow consumer. To get pandas today, read Arrow and call `table.to_pandas()` after installing `pyarrow`.
+The generic ODBC, Sybase, and Db2 Python paths use the Rust Arrow route:
+
+* `return_type="pandas"` or the default `cx.read_sql(conn, query)` reads a complete Arrow table and converts it to pandas with `table.to_pandas(date_as_object=False, split_blocks=False)`. This path requires both pandas and pyarrow.
+* `return_type="arrow"` returns the `pyarrow.Table` directly.
+* `return_type="polars"` reads Arrow and converts to a Polars DataFrame.
+* `return_type="modin"` and `return_type="dask"` use the same Arrow-to-pandas handoff before wrapping the pandas result.
+* `return_type="arrow_stream"` returns a `pyarrow.RecordBatchReader` and is always explicit; ConnectorX does not implicitly materialize an open stream into pandas.
+
+The lower-level row-wise pandas extension path is not supported for ODBC-family sources. Use the public `connectorx.read_sql` wrapper so generic ODBC, Sybase, and Db2 stay on the direct Arrow path.
 
 ## Route Selection
 

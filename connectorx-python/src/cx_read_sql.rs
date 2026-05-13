@@ -1,6 +1,6 @@
 use connectorx::{
     partition::{partition, PartitionQuery},
-    source_router::parse_source,
+    source_router::{parse_source, SourceType},
     sql::CXQuery,
 };
 use fehler::throw;
@@ -9,6 +9,10 @@ use pyo3::{exceptions::PyValueError, PyResult};
 
 use crate::errors::ConnectorXPythonError;
 use pyo3::types::PyDict;
+
+const ODBC_FAMILY_PANDAS_MESSAGE: &str = "the lower-level row-wise pandas transport is not \
+supported for ODBC, Db2, or Sybase; use connectorx.read_sql(..., return_type='pandas') to read \
+through Arrow and convert to pandas, or request return_type='arrow' or 'arrow_stream' explicitly";
 
 #[derive(FromPyObject)]
 #[pyo3(from_item_all)]
@@ -30,6 +34,13 @@ impl Into<PartitionQuery> for PyPartitionQuery {
             self.num,
         )
     }
+}
+
+fn is_odbc_family_source(source_type: &SourceType) -> bool {
+    matches!(
+        source_type,
+        SourceType::Odbc | SourceType::Db2 | SourceType::Sybase
+    )
 }
 
 pub fn read_sql<'py>(
@@ -60,13 +71,18 @@ pub fn read_sql<'py>(
     };
 
     match return_type {
-        "pandas" => Ok(crate::pandas::write_pandas(
-            py,
-            &source_conn,
-            origin_query,
-            &queries,
-            pre_execution_queries.as_deref(),
-        )?),
+        "pandas" => {
+            if is_odbc_family_source(&source_conn.ty) {
+                return Err(PyValueError::new_err(ODBC_FAMILY_PANDAS_MESSAGE));
+            }
+            Ok(crate::pandas::write_pandas(
+                py,
+                &source_conn,
+                origin_query,
+                &queries,
+                pre_execution_queries.as_deref(),
+            )?)
+        }
         "arrow" => Ok(crate::arrow::write_arrow(
             py,
             &source_conn,
@@ -91,7 +107,7 @@ pub fn read_sql<'py>(
         }
 
         _ => Err(PyValueError::new_err(format!(
-            "return type should be 'pandas' or 'arrow', got '{}'",
+            "return type should be 'pandas', 'arrow', or 'arrow_stream', got '{}'",
             return_type
         ))),
     }
