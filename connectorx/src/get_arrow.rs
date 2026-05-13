@@ -220,18 +220,30 @@ pub fn get_arrow(
         }
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => {
-            destination =
-                crate::sources::sybase::sybase_get_arrow(&source_conn.conn, origin_query, queries)?;
+            destination = crate::sources::sybase::sybase_get_arrow(
+                &source_conn.conn,
+                origin_query,
+                queries,
+                pre_execution_queries,
+            )?;
         }
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => {
-            destination =
-                crate::sources::db2::db2_get_arrow(&source_conn.conn, origin_query, queries)?;
+            destination = crate::sources::db2::db2_get_arrow(
+                &source_conn.conn,
+                origin_query,
+                queries,
+                pre_execution_queries,
+            )?;
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
-            destination =
-                crate::sources::odbc::odbc_get_arrow(&source_conn.conn, origin_query, queries)?;
+            destination = crate::sources::odbc::odbc_get_arrow(
+                &source_conn.conn,
+                origin_query,
+                queries,
+                pre_execution_queries,
+            )?;
         }
         #[cfg(feature = "src_oracle")]
         SourceType::Oracle => {
@@ -484,6 +496,7 @@ pub fn new_record_batch_iter(
                 origin_query,
                 queries,
                 batch_size,
+                pre_execution_queries,
             )
             .unwrap_or_else(|error| {
                 Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
@@ -498,6 +511,7 @@ pub fn new_record_batch_iter(
                 origin_query,
                 queries,
                 batch_size,
+                pre_execution_queries,
             )
             .unwrap_or_else(|error| {
                 Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
@@ -512,6 +526,7 @@ pub fn new_record_batch_iter(
                 origin_query,
                 queries,
                 batch_size,
+                pre_execution_queries,
             )
             .unwrap_or_else(|error| {
                 Box::new(ErrorRecordBatchIterator::new(ConnectorXError::Other(
@@ -582,6 +597,7 @@ pub fn new_record_batch_iter_result(
             origin_query,
             queries,
             batch_size,
+            pre_execution_queries,
         ),
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => crate::sources::db2::db2_record_batch_iter(
@@ -589,6 +605,7 @@ pub fn new_record_batch_iter_result(
             origin_query,
             queries,
             batch_size,
+            pre_execution_queries,
         ),
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => crate::sources::odbc::odbc_record_batch_iter(
@@ -596,6 +613,7 @@ pub fn new_record_batch_iter_result(
             origin_query,
             queries,
             batch_size,
+            pre_execution_queries,
         ),
         _ => Ok(new_record_batch_iter(
             source_conn,

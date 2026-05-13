@@ -179,6 +179,8 @@ The defaults are tuned for throughput over small memory use:
 `DB2_BATCH_SIZE * DB2_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `DB2_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Db2 URL, or `DB2_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Db2 URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `DB2_MAX_STR_LEN` when selected character, decimal, or binary columns can exceed the default bound; lower `DB2_BATCH_SIZE` when raising `DB2_MAX_STR_LEN` for large LOB cells.
 If the ODBC driver reports truncation for a text, decimal, or binary value, ConnectorX returns an error instead of returning partial data.
 
+For Arrow and Arrow stream reads, `pre_execution_query` statements run on every Db2 ODBC connection before metadata discovery and before each partition fetch. Use this for session settings or temp objects needed by the main query. If automatic partition-range discovery also depends on those settings, pass an explicit `partition_range`.
+
 ## Testing And Benchmarking
 
 A local Db2 Community container can be started with Docker:

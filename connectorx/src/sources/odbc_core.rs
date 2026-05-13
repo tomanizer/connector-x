@@ -1030,24 +1030,108 @@ pub(crate) fn execute_query<E>(
 where
     E: OdbcCoreError,
 {
+    execute_query_with_pre_execution::<E>(source_name, conn, query, execution_options, None)
+}
+
+pub(crate) fn execute_query_with_pre_execution<E>(
+    source_name: &'static str,
+    conn: &str,
+    query: &str,
+    execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
+) -> Result<OdbcCursor, E>
+where
+    E: OdbcCoreError,
+{
+    let connection = connect::<E>(source_name, conn, execution_options)?;
+    execute_pre_execution_queries::<E>(
+        source_name,
+        &connection,
+        execution_options,
+        pre_execution_queries,
+    )?;
+
+    execute_cursor::<E>(source_name, connection, query, execution_options)
+}
+
+fn connect<E>(
+    source_name: &'static str,
+    conn: &str,
+    execution_options: OdbcExecutionOptions,
+) -> Result<Connection<'static>, E>
+where
+    E: OdbcCoreError,
+{
     let env = shared_environment::<E>()?;
-    let connection =
-        match env.connect_with_connection_string(conn, execution_options.connection_options()) {
-            Ok(connection) => connection,
+    match env.connect_with_connection_string(conn, execution_options.connection_options()) {
+        Ok(connection) => Ok(connection),
+        Err(error) => {
+            if let Some(timeout_secs) = execution_options.login_timeout_secs {
+                if is_odbc_timeout_error(&error) {
+                    return Err(E::connection_timeout(
+                        source_name,
+                        timeout_secs,
+                        odbc_error_message(&error),
+                    ));
+                }
+            }
+            Err(error.into())
+        }
+    }
+}
+
+fn execute_pre_execution_queries<E>(
+    source_name: &'static str,
+    connection: &Connection<'_>,
+    execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
+) -> Result<(), E>
+where
+    E: OdbcCoreError,
+{
+    let Some(pre_execution_queries) = pre_execution_queries else {
+        return Ok(());
+    };
+
+    for (idx, pre_query) in pre_execution_queries.iter().enumerate() {
+        match connection.execute(pre_query.as_str(), (), execution_options.query_timeout_secs) {
+            Ok(cursor) => drop(cursor),
             Err(error) => {
-                if let Some(timeout_secs) = execution_options.login_timeout_secs {
+                if let Some(timeout_secs) = execution_options.query_timeout_secs {
                     if is_odbc_timeout_error(&error) {
-                        return Err(E::connection_timeout(
+                        return Err(E::query_timeout(
                             source_name,
+                            pre_execution_query_context(idx, pre_query),
                             timeout_secs,
                             odbc_error_message(&error),
                         ));
                     }
                 }
-                return Err(error.into());
+                return Err(anyhow!(
+                    "{source_name} pre_execution_query[{idx}] failed for SQL {pre_query:?}: {}",
+                    odbc_error_message(&error)
+                )
+                .into());
             }
-        };
+        }
+    }
 
+    Ok(())
+}
+
+fn pre_execution_query_context(idx: usize, query: &str) -> String {
+    format!("pre_execution_query[{idx}]: {query}")
+}
+
+fn execute_cursor<E>(
+    source_name: &'static str,
+    connection: Connection<'static>,
+    query: &str,
+    execution_options: OdbcExecutionOptions,
+) -> Result<OdbcCursor, E>
+where
+    E: OdbcCoreError,
+{
     match connection.into_cursor(query, (), execution_options.query_timeout_secs) {
         Ok(Some(cursor)) => Ok(cursor),
         Ok(None) => Err(E::no_result_set(query.to_string())),
@@ -1104,6 +1188,7 @@ pub(crate) fn fetch_metadata<T, E, F>(
     default_max_len: usize,
     connection_limiter: &Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
     map_type: F,
 ) -> Result<(Vec<String>, Vec<T>, Vec<usize>), E>
 where
@@ -1112,7 +1197,13 @@ where
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query::<E>(source_name, conn, query, execution_options)?;
+    let mut cursor = execute_query_with_pre_execution::<E>(
+        source_name,
+        conn,
+        query,
+        execution_options,
+        pre_execution_queries,
+    )?;
     let ncols = cursor.num_result_cols()?;
     if ncols < 0 {
         return Err(anyhow!("ODBC returned negative column count: {}", ncols).into());
@@ -3362,6 +3453,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
     replace_invalid_utf16: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<ArrowDestination, E>
@@ -3379,6 +3471,7 @@ where
         max_str_len,
         &connection_limiter,
         execution_options,
+        pre_execution_queries,
         map_type,
     )?;
 
@@ -3401,6 +3494,7 @@ where
             batch_size,
             Arc::clone(&connection_limiter),
             execution_options,
+            pre_execution_queries,
             replace_invalid_utf16,
             Arc::clone(&record_schema),
             &destination,
@@ -3468,6 +3562,7 @@ fn arrow_fetch_partition<TS, E>(
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     destination: &ArrowDestination,
@@ -3477,7 +3572,13 @@ where
     E: OdbcCoreError + Send,
 {
     let _connection_permit = connection_limiter.acquire();
-    let cursor = execute_query::<E>(TS::source_name(), conn, query, execution_options)?;
+    let cursor = execute_query_with_pre_execution::<E>(
+        TS::source_name(),
+        conn,
+        query,
+        execution_options,
+        pre_execution_queries,
+    )?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
         schema
@@ -3512,6 +3613,7 @@ struct OdbcRecordBatchStreamPlan<TS, E> {
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Arc<[String]>,
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     _marker: PhantomData<fn() -> E>,
@@ -3580,6 +3682,7 @@ where
                     plan.batch_size,
                     Arc::clone(&plan.connection_limiter),
                     plan.execution_options,
+                    &plan.pre_execution_queries,
                     plan.replace_invalid_utf16,
                     Arc::clone(&plan.arrow_schema),
                     sender.clone(),
@@ -3624,6 +3727,7 @@ pub(crate) fn odbc_record_batch_iter_impl<TS, E>(
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
     replace_invalid_utf16: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
 ) -> Result<OdbcRecordBatchIterator<TS, E>, E>
@@ -3638,6 +3742,7 @@ where
         max_str_len,
         &connection_limiter,
         execution_options,
+        pre_execution_queries,
         map_type,
     )?;
     let (_, record_schema) = odbc_arrow_schema(&names, &schema);
@@ -3654,6 +3759,9 @@ where
         batch_size,
         connection_limiter,
         execution_options,
+        pre_execution_queries: pre_execution_queries
+            .map(|queries| Arc::from(queries.to_vec().into_boxed_slice()))
+            .unwrap_or_else(|| Arc::from(Vec::<String>::new().into_boxed_slice())),
         replace_invalid_utf16,
         arrow_schema: Arc::clone(&record_schema),
         _marker: PhantomData,
@@ -3672,6 +3780,7 @@ fn arrow_stream_fetch_partition<TS, E>(
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
+    pre_execution_queries: &[String],
     replace_invalid_utf16: bool,
     arrow_schema: Arc<Schema>,
     sender: Sender<Result<RecordBatch, ConnectorXError>>,
@@ -3681,7 +3790,13 @@ where
     E: OdbcCoreError + Send,
 {
     let _connection_permit = connection_limiter.acquire();
-    let cursor = execute_query::<E>(TS::source_name(), conn, query, execution_options)?;
+    let cursor = execute_query_with_pre_execution::<E>(
+        TS::source_name(),
+        conn,
+        query,
+        execution_options,
+        Some(pre_execution_queries),
+    )?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
         schema

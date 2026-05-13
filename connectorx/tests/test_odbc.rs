@@ -12,7 +12,7 @@ use arrow::{
 use chrono::NaiveDateTime;
 use connectorx::{
     destinations::arrow::ArrowDestination,
-    get_arrow::{get_arrow, new_record_batch_iter},
+    get_arrow::{get_arrow, new_record_batch_iter, new_record_batch_iter_result},
     partition::{partition, PartitionQuery},
     prelude::*,
     sources::odbc::{odbc_conn_string, OdbcSource},
@@ -257,6 +257,49 @@ fn test_odbc_get_arrow_route() {
     if use_postgres_testcontainer() {
         assert_postgres_testcontainer_rows(&batches);
     }
+}
+
+fn postgres_pre_execution_queries() -> Vec<String> {
+    vec![
+        "create temp table cx_pre_execution_marker \
+         (id integer not null, name varchar(16) not null)"
+            .to_string(),
+        "insert into cx_pre_execution_marker values (7, 'session')".to_string(),
+    ]
+}
+
+#[test]
+fn test_odbc_testcontainer_get_arrow_runs_pre_execution_queries() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC pre-execution get_arrow test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::postgres_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let pre_execution_queries = postgres_pre_execution_queries();
+    let queries = [CXQuery::naked(
+        "select id, name from cx_pre_execution_marker order by id",
+    )];
+
+    let destination =
+        get_arrow(&source_conn, None, &queries, Some(&pre_execution_queries)).unwrap();
+    let batches = destination.arrow().unwrap();
+    let mut rows = Vec::new();
+    for batch in &batches {
+        for row in 0..batch.num_rows() {
+            rows.push((
+                array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                array_value_to_string(batch.column(1).as_ref(), row).unwrap(),
+            ));
+        }
+    }
+
+    assert_eq!(rows, vec![("7".to_string(), "session".to_string())]);
 }
 
 #[test]
@@ -510,4 +553,49 @@ fn test_odbc_testcontainer_arrow_stream_route() {
             ("2".to_string(), "beta".to_string())
         ]
     );
+}
+
+#[test]
+fn test_odbc_testcontainer_arrow_stream_runs_pre_execution_queries() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC pre-execution arrow_stream test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let conn = test_db::postgres_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let pre_execution_queries = postgres_pre_execution_queries();
+    let queries = [CXQuery::naked(
+        "select id, name from cx_pre_execution_marker order by id",
+    )];
+    let mut iter = new_record_batch_iter_result(
+        &source_conn,
+        None,
+        &queries,
+        1,
+        Some(&pre_execution_queries),
+    )
+    .unwrap();
+
+    let (schema_batch, names) = iter.get_schema();
+    assert_eq!(schema_batch.num_columns(), 2);
+    assert_eq!(names, &["id".to_string(), "name".to_string()]);
+
+    iter.prepare();
+    let mut rows = Vec::new();
+    while let Some(batch) = iter.next_batch_result().unwrap() {
+        assert!(batch.num_rows() <= 1);
+        for row in 0..batch.num_rows() {
+            rows.push((
+                array_value_to_string(batch.column(0).as_ref(), row).unwrap(),
+                array_value_to_string(batch.column(1).as_ref(), row).unwrap(),
+            ));
+        }
+    }
+
+    assert_eq!(rows, vec![("7".to_string(), "session".to_string())]);
 }

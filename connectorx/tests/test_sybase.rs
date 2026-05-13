@@ -1114,6 +1114,29 @@ fn test_sybase_get_arrow_route() {
 }
 
 #[test]
+fn test_sybase_pre_execution_query_failure_is_reported() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = sybase_url() else {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping Sybase pre-execution failure test: SYBASE_URL is not set"
+        );
+        return;
+    };
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked("select 1 as id")];
+    let pre_execution_queries = ["select * from CX_CONNECTORX_PRE_EXEC_MISSING".to_string()];
+
+    let err = match get_arrow(&source_conn, None, &queries, Some(&pre_execution_queries)) {
+        Ok(_) => panic!("expected Sybase pre-execution query to fail"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("Sybase pre_execution_query[0]"), "{}", err);
+    assert!(err.contains("CX_CONNECTORX_PRE_EXEC_MISSING"), "{}", err);
+}
+
+#[test]
 fn test_sybase_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 

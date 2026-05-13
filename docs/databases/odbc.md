@@ -134,6 +134,8 @@ The ODBC reader fetches rows in batches and binds primitive, binary, and tempora
 
 ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and shares it across generic ODBC, Db2, and Sybase connections. Each active query still uses its own ODBC connection, but concurrent ODBC connections are capped per source instance so partitioned reads do not open unbounded connections.
 
+For `return_type="arrow"` and `return_type="arrow_stream"`, `pre_execution_query` statements are executed on each ODBC connection before ConnectorX runs metadata discovery or a partition query fetch. This supports session settings and temp objects used by the selected query. Partition-range discovery runs before the Arrow read path, so provide an explicit `partition_range` when range discovery also depends on session-local pre-execution setup.
+
 Tuning environment variables:
 
 * `ODBC_BATCH_SIZE`: rows per ODBC block fetch. Defaults to `1024`. Recommended range is `1024` to `16384`; hard maximum is `65536`.

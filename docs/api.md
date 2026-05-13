@@ -30,10 +30,12 @@ connectorx.read_sql(
 - `partition_num: Optional[int]`: The number of partitions to generate.
 - `index_col: Optional[str]`: The index column to set for the result dataframe. Only applicable when `return_type` is `pandas`, `modin` or `dask`. 
 - `strategy: Optional[str]`: Strategy of rewriting the federated query for join pushdown.
-- `pre_execution_query: Optional[Union[str, List[str]]]`: SQL query or list of SQL queries executed before main query. Can be used to set runtime configurations using SET statements. Only applicable for source "PostgreSQL" and "MySQL".
+- `pre_execution_query: Optional[Union[str, List[str]]]`: SQL query or list of SQL queries executed before the main query. Can be used to set runtime configurations using `SET` statements. Supported for PostgreSQL and MySQL dispatcher routes, and for generic ODBC, Sybase, and Db2 when `return_type` is `arrow` or `arrow_stream`.
 - `**kwargs`: Additional backend options. For `return_type="arrow_stream"`, pass `batch_size: int` to set the maximum number of rows in each streamed batch. When omitted, `batch_size` defaults to `10000`.
 
 Generic ODBC, Sybase, and IBM Db2 currently use the Rust Arrow route. Use `return_type="arrow"` or `return_type="arrow_stream"` for these sources, then convert to pandas with `table.to_pandas()` when needed.
+
+For generic ODBC, Sybase, and Db2 Arrow routes, `pre_execution_query` is executed on every ODBC connection ConnectorX opens for the read: once before metadata discovery and once before each partition query fetch. Use explicit `partition_range` values if the partition-range discovery query itself depends on session-local objects created by pre-execution SQL.
 
 ## `ConnectionUrl`
 

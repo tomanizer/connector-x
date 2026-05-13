@@ -667,6 +667,27 @@ fn test_db2_get_arrow_route() {
 }
 
 #[test]
+fn test_db2_pre_execution_query_failure_is_reported() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let Some(conn) = db2_url() else {
+        eprintln!("CONNECTORX_SKIP: skipping Db2 pre-execution failure test: DB2_URL is not set");
+        return;
+    };
+
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked("select 1 as id from sysibm.sysdummy1")];
+    let pre_execution_queries = ["select * from CX_CONNECTORX_PRE_EXEC_MISSING".to_string()];
+
+    let err = match get_arrow(&source_conn, None, &queries, Some(&pre_execution_queries)) {
+        Ok(_) => panic!("expected Db2 pre-execution query to fail"),
+        Err(err) => err.to_string(),
+    };
+    assert!(err.contains("Db2 pre_execution_query[0]"), "{}", err);
+    assert!(err.contains("CX_CONNECTORX_PRE_EXEC_MISSING"), "{}", err);
+}
+
+#[test]
 fn test_db2_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 
