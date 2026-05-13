@@ -30,12 +30,14 @@ connectorx.read_sql(
 - `partition_num: Optional[int]`: The number of partitions to generate.
 - `index_col: Optional[str]`: The index column to set for the result dataframe. Only applicable when `return_type` is `pandas`, `modin` or `dask`. 
 - `strategy: Optional[str]`: Strategy of rewriting the federated query for join pushdown.
-- `pre_execution_query: Optional[Union[str, List[str]]]`: SQL query or list of SQL queries executed before the main query. Can be used to set runtime configurations using `SET` statements. Supported for PostgreSQL and MySQL dispatcher routes, and for generic ODBC, Sybase, and Db2 when `return_type` is `arrow` or `arrow_stream`.
+- `pre_execution_query: Optional[Union[str, List[str]]]`: SQL query or list of SQL queries executed before the main query. Can be used to set runtime configurations using `SET` statements. Supported for PostgreSQL and MySQL dispatcher routes, and for generic ODBC, Sybase, and Db2 when using the Arrow-backed Python paths.
 - `**kwargs`: Additional backend options. For `return_type="arrow_stream"`, pass `batch_size: int` to set the maximum number of rows in each streamed batch. When omitted, `batch_size` defaults to `10000`.
 
-Generic ODBC, Sybase, and IBM Db2 currently use the Rust Arrow route. Use `return_type="arrow"` or `return_type="arrow_stream"` for these sources, then convert to pandas with `table.to_pandas()` when needed.
+Generic ODBC, Sybase, and IBM Db2 use the Rust Arrow route. The default `return_type="pandas"` path reads a complete Arrow table first and then converts it to pandas in Python with `table.to_pandas(date_as_object=False, split_blocks=False)`, so both pandas and pyarrow must be installed for that path. Use `return_type="arrow"` when you want the `pyarrow.Table` directly, `return_type="polars"` for a Polars DataFrame, or `return_type="modin"`/`return_type="dask"` when you want ConnectorX to wrap the pandas result. Use `return_type="arrow_stream"` explicitly when you want a `pyarrow.RecordBatchReader`; ConnectorX does not implicitly convert an open stream to pandas.
 
-For generic ODBC, Sybase, and Db2 Arrow routes, `pre_execution_query` is executed on every ODBC connection ConnectorX opens for the read: once before metadata discovery and once before each partition query fetch. Use explicit `partition_range` values if the partition-range discovery query itself depends on session-local objects created by pre-execution SQL.
+The lower-level row-wise pandas extension path is not supported for generic ODBC, Sybase, or IBM Db2. Use the public `connectorx.read_sql` wrapper so these sources stay on the direct Arrow path.
+
+For generic ODBC, Sybase, and Db2 Arrow-backed routes, `pre_execution_query` is executed on every ODBC connection ConnectorX opens for the read: once before metadata discovery and once before each partition query fetch. Use explicit `partition_range` values if the partition-range discovery query itself depends on session-local objects created by pre-execution SQL.
 
 ## `ConnectionUrl`
 
@@ -76,6 +78,7 @@ Raw ODBC connection strings are also accepted directly when you need exact drive
 import connectorx as cx
 
 conn = "Driver={SQLite3};Database=/tmp/example.db;"
+df = cx.read_sql(conn, "select * from example")
 table = cx.read_sql(conn, "select * from example", return_type="arrow")
 ```
 

@@ -10,6 +10,7 @@
 import connectorx as cx
 
 conn = "sybase://username:password@server:5000/database?driver=FreeTDS&tds_version=5.0"
+df = cx.read_sql(conn, "select * from dbo.lineitem")
 table = cx.read_sql(conn, "select * from dbo.lineitem", return_type="arrow")
 ```
 
@@ -64,6 +65,12 @@ cargo test -p connectorx --no-default-features --features "src_sybase src_odbc d
 ```
 
 Set `SYBASE_GENERIC_ODBC_URL` instead of `SYBASE_ODBC_CONN` when you want the comparison to use a hand-written generic `odbc://` URL.
+
+## Python Return Types
+
+Sybase uses the shared ODBC-family Arrow path. The default `cx.read_sql(conn, query)` returns pandas by reading a complete Arrow table and converting it in Python, so both pandas and pyarrow must be installed. Use `return_type="arrow"` for a `pyarrow.Table`, `return_type="polars"` for Polars, `return_type="modin"` or `return_type="dask"` for wrappers around the pandas result, and `return_type="arrow_stream"` when you explicitly want a `pyarrow.RecordBatchReader`.
+
+The lower-level row-wise pandas extension path is not supported for Sybase. Keep Python calls on the public `connectorx.read_sql` wrapper so reads use the direct Arrow route.
 
 ## Driver Matrix And Diagnostics
 

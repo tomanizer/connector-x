@@ -10,6 +10,7 @@
 import connectorx as cx
 
 conn = "db2://username:password@server:50000/database?driver=IBM%20DB2%20ODBC%20DRIVER"
+df = cx.read_sql(conn, "select * from schema.table")
 table = cx.read_sql(conn, "select * from schema.table", return_type="arrow")
 ```
 
@@ -65,6 +66,12 @@ cargo test -p connectorx --no-default-features --features "src_db2 src_odbc dst_
 ```
 
 Set `DB2_GENERIC_ODBC_URL` instead of `DB2_ODBC_CONN` when you want the comparison to use a hand-written generic `odbc://` URL.
+
+## Python Return Types
+
+Db2 uses the shared ODBC-family Arrow path. The default `cx.read_sql(conn, query)` returns pandas by reading a complete Arrow table and converting it in Python, so both pandas and pyarrow must be installed. Use `return_type="arrow"` for a `pyarrow.Table`, `return_type="polars"` for Polars, `return_type="modin"` or `return_type="dask"` for wrappers around the pandas result, and `return_type="arrow_stream"` when you explicitly want a `pyarrow.RecordBatchReader`.
+
+The lower-level row-wise pandas extension path is not supported for Db2. Keep Python calls on the public `connectorx.read_sql` wrapper so reads use the direct Arrow route.
 
 ## Driver Setup
 

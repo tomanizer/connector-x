@@ -45,6 +45,20 @@ Protocol = Literal["csv", "binary", "cursor", "simple", "text"]
 
 
 _BackendT = TypeVar("_BackendT")
+_ODBC_FAMILY_SCHEMES = frozenset({"odbc", "db2", "sybase"})
+_RAW_ODBC_PREFIXES = ("driver=", "dsn=", "filedsn=", "database=")
+
+
+def _is_odbc_family_conn(conn: str | ConnectionUrl) -> bool:
+    if not isinstance(conn, str):
+        return False
+
+    conn = conn.lstrip()
+    if conn.lower().startswith(_RAW_ODBC_PREFIXES):
+        return True
+
+    scheme = urllib.parse.urlparse(conn).scheme.lower().split("+", 1)[0]
+    return scheme in _ODBC_FAMILY_SCHEMES
 
 
 def rewrite_conn(
@@ -217,6 +231,22 @@ def read_sql(
     conn: str | ConnectionUrl | dict[str, str] | dict[str, ConnectionUrl],
     query: list[str] | str,
     *,
+    return_type: Literal["arrow_stream"],
+    protocol: Protocol | None = None,
+    partition_on: str | None = None,
+    partition_range: tuple[int, int] | None = None,
+    partition_num: int | None = None,
+    index_col: str | None = None,
+    pre_execution_query: list[str] | str | None = None,
+    **kwargs
+) -> pa.RecordBatchReader: ...
+
+
+@overload
+def read_sql(
+    conn: str | ConnectionUrl | dict[str, str] | dict[str, ConnectionUrl],
+    query: list[str] | str,
+    *,
     return_type: Literal["modin"],
     protocol: Protocol | None = None,
     partition_on: str | None = None,
@@ -275,7 +305,6 @@ def read_sql(
     strategy: str | None = None,
     pre_execution_query: list[str] | str | None = None,
     **kwargs
-
 ) -> pd.DataFrame | mpd.DataFrame | dd.DataFrame | pl.DataFrame | pa.Table | pa.RecordBatchReader:
     """
     Run the SQL query, download the data from database into a dataframe.
@@ -303,7 +332,8 @@ def read_sql(
       strategy of rewriting the federated query for join pushdown.
     pre_execution_query
       SQL query or list of SQL queries executed before main query; can be used to set runtime
-      configurations using SET statements; only applicable for source "Postgres" and "MySQL".
+      configurations using SET statements; only applicable for source "Postgres" and "MySQL",
+      plus generic ODBC, Db2, and Sybase on Arrow-backed paths.
     batch_size
       the maximum size of each batch when return type is `arrow_stream`.
 
@@ -388,19 +418,34 @@ def read_sql(
         pre_execution_queries = None
 
     conn, protocol = rewrite_conn(conn, protocol)
+    is_odbc_family = _is_odbc_family_conn(conn)
 
     if return_type in {"modin", "dask", "pandas"}:
         try_import_module("pandas")
 
-        result = _read_sql(
-            conn,
-            "pandas",
-            queries=queries,
-            protocol=protocol,
-            partition_query=partition_query,
-            pre_execution_queries=pre_execution_queries,
-        )
-        df = reconstruct_pandas(result)
+        if is_odbc_family:
+            try_import_module("pyarrow")
+            result = _read_sql(
+                conn,
+                "arrow",
+                queries=queries,
+                protocol=protocol,
+                partition_query=partition_query,
+                pre_execution_queries=pre_execution_queries,
+            )
+            df = reconstruct_arrow(result).to_pandas(
+                date_as_object=False, split_blocks=False
+            )
+        else:
+            result = _read_sql(
+                conn,
+                "pandas",
+                queries=queries,
+                protocol=protocol,
+                partition_query=partition_query,
+                pre_execution_queries=pre_execution_queries,
+            )
+            df = reconstruct_pandas(result)
 
         if index_col is not None:
             df.set_index(index_col, inplace=True)
