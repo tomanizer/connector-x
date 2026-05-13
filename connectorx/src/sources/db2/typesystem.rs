@@ -10,8 +10,21 @@ use crate::{
 };
 
 pub(crate) const DB2_UNKNOWN_TYPE_FALLBACK_ENV: &str = "DB2_TYPE_FALLBACK_TO_VARCHAR";
+pub(crate) const DB2_SQL_GRAPHIC_LUW: i16 = -95;
+pub(crate) const DB2_SQL_VARGRAPHIC_LUW: i16 = -96;
+pub(crate) const DB2_SQL_LONGVARGRAPHIC_LUW: i16 = -97;
+pub(crate) const DB2_SQL_BLOB_LUW: i16 = -98;
+pub(crate) const DB2_SQL_CLOB_LUW: i16 = -99;
+pub(crate) const DB2_SQL_DBCLOB_LUW: i16 = -350;
+pub(crate) const DB2_SQL_DECFLOAT: i16 = -360;
+pub(crate) const DB2_SQL_XML: i16 = -370;
 
-#[derive(Copy, Clone, Debug)]
+// Db2 for i documents positive graphic type codes, while IBM's LUW clidriver
+// exposes the same families as negative extension codes.
+pub(crate) const DB2_SQL_GRAPHIC_I: i16 = 95;
+pub(crate) const DB2_SQL_VARGRAPHIC_I: i16 = 96;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Db2TypeSystem {
     TinyInt(bool),
     SmallInt(bool),
@@ -88,10 +101,21 @@ impl Db2TypeSystem {
             DataType::Date => Date(nullable),
             DataType::Time { .. } => Time(nullable),
             DataType::Timestamp { .. } => Timestamp(nullable),
-            DataType::Unknown | DataType::Other { .. } if unknown_type_fallback_to_varchar => {
-                Varchar(nullable)
-            }
-            DataType::Unknown | DataType::Other { .. } => {
+            DataType::Other { data_type, .. } => match db2_vendor_type(data_type.0, nullable) {
+                Some(known_type) => known_type,
+                None if unknown_type_fallback_to_varchar => Varchar(nullable),
+                None => {
+                    return Err(unknown_odbc_type_error(
+                        "Db2",
+                        DB2_UNKNOWN_TYPE_FALLBACK_ENV,
+                        column_name,
+                        ty,
+                        nullability,
+                    ));
+                }
+            },
+            DataType::Unknown if unknown_type_fallback_to_varchar => Varchar(nullable),
+            DataType::Unknown => {
                 return Err(unknown_odbc_type_error(
                     "Db2",
                     DB2_UNKNOWN_TYPE_FALLBACK_ENV,
@@ -101,6 +125,20 @@ impl Db2TypeSystem {
                 ));
             }
         })
+    }
+}
+
+fn db2_vendor_type(type_code: i16, nullable: bool) -> Option<Db2TypeSystem> {
+    use Db2TypeSystem::*;
+    match type_code {
+        DB2_SQL_DECFLOAT => Some(Varchar(nullable)),
+        DB2_SQL_XML => Some(Binary(nullable)),
+        DB2_SQL_GRAPHIC_LUW | DB2_SQL_GRAPHIC_I => Some(Char(nullable)),
+        DB2_SQL_VARGRAPHIC_LUW | DB2_SQL_VARGRAPHIC_I => Some(Varchar(nullable)),
+        DB2_SQL_LONGVARGRAPHIC_LUW => Some(Text(nullable)),
+        DB2_SQL_CLOB_LUW | DB2_SQL_DBCLOB_LUW => Some(Text(nullable)),
+        DB2_SQL_BLOB_LUW => Some(Binary(nullable)),
+        _ => None,
     }
 }
 
@@ -202,10 +240,39 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_and_vendor_types_by_default() {
+    fn maps_known_db2_vendor_types_by_default() {
+        for (code, expected) in [
+            (DB2_SQL_DECFLOAT, Db2TypeSystem::Varchar(false)),
+            (DB2_SQL_XML, Db2TypeSystem::Binary(false)),
+            (DB2_SQL_GRAPHIC_LUW, Db2TypeSystem::Char(false)),
+            (DB2_SQL_VARGRAPHIC_LUW, Db2TypeSystem::Varchar(false)),
+            (DB2_SQL_LONGVARGRAPHIC_LUW, Db2TypeSystem::Text(false)),
+            (DB2_SQL_BLOB_LUW, Db2TypeSystem::Binary(false)),
+            (DB2_SQL_CLOB_LUW, Db2TypeSystem::Text(false)),
+            (DB2_SQL_DBCLOB_LUW, Db2TypeSystem::Text(false)),
+            (DB2_SQL_GRAPHIC_I, Db2TypeSystem::Char(false)),
+            (DB2_SQL_VARGRAPHIC_I, Db2TypeSystem::Varchar(false)),
+        ] {
+            let mapped = Db2TypeSystem::from_odbc(
+                DataType::Other {
+                    data_type: SqlDataType(code),
+                    column_size: None,
+                    decimal_digits: 0,
+                },
+                Nullability::NoNulls,
+                "vendor_col",
+                false,
+            )
+            .unwrap();
+            assert_eq!(mapped, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_vendor_types_by_default() {
         let error = Db2TypeSystem::from_odbc(
             DataType::Other {
-                data_type: SqlDataType(-370),
+                data_type: SqlDataType(-999),
                 column_size: None,
                 decimal_digits: 0,
             },
@@ -218,7 +285,7 @@ mod tests {
 
         assert!(error.contains("source=Db2"));
         assert!(error.contains("column_name=vendor_col"));
-        assert!(error.contains("odbc_type_code=-370"));
+        assert!(error.contains("odbc_type_code=-999"));
         assert!(error.contains(DB2_UNKNOWN_TYPE_FALLBACK_ENV));
     }
 
@@ -296,7 +363,7 @@ mod tests {
         assert!(matches!(
             Db2TypeSystem::from_odbc(
                 DataType::Other {
-                    data_type: SqlDataType(-370),
+                    data_type: SqlDataType(-999),
                     column_size: None,
                     decimal_digits: 0,
                 },

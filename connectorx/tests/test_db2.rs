@@ -49,7 +49,7 @@ fn test_db2_url_to_odbc_conn_string_escapes_values() {
 
     assert_eq!(
         conn,
-        "Driver={IBM}}DB2};Hostname={example.com};Port=50000;Protocol={TCPIP;foo};UID={user;name};PWD={pa=ss}}word};Database={db;name};"
+        "Driver={IBM}}DB2};Hostname=example.com;Port=50000;Protocol={TCPIP;foo};UID={user;name};PWD={pa=ss}}word};Database={db;name};"
     );
 }
 
@@ -544,48 +544,42 @@ fn test_db2_testcontainer_type_edge_supported_fast_path() {
 }
 
 #[test]
-fn test_db2_testcontainer_vendor_types_strict_by_default() {
+fn test_db2_testcontainer_known_vendor_types_are_supported_by_default() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
         eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 strict vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping Db2 known vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
         );
         return;
     }
 
     let conn = test_db::db2_odbc_url();
     let source_conn = parse_source(&conn, None).unwrap();
-    for (column_name, query) in [
-        (
-            "decfloat16_v",
-            "select decfloat16_v from cx_db2_type_edge where id = 1",
-        ),
-        ("xml_v", "select xml_v from cx_db2_type_edge where id = 1"),
-    ] {
-        let err = match get_arrow(&source_conn, None, &[CXQuery::naked(query)], None) {
-            Ok(_) => panic!("{} should be rejected in strict mode", column_name),
-            Err(err) => err.to_string(),
-        };
-        assert!(
-            err.contains("source=Db2"),
-            "{} error should mention source=Db2: {}",
-            column_name,
-            err
-        );
-        assert!(
-            err.contains(column_name),
-            "{} error should mention the column name: {}",
-            column_name,
-            err
-        );
-        assert!(
-            err.contains("DB2_TYPE_FALLBACK_TO_VARCHAR"),
-            "{} error should mention DB2_TYPE_FALLBACK_TO_VARCHAR: {}",
-            column_name,
-            err
-        );
-    }
+    let queries = [CXQuery::naked(
+        "select decfloat16_v, decfloat34_v, xml_v \
+         from cx_db2_type_edge \
+         where id = 1",
+    )];
+
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_eq!(rb.num_rows(), 1);
+
+    assert_eq!(
+        rb.schema().field(0).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
+    assert_eq!(
+        rb.schema().field(1).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
+    assert_eq!(
+        rb.schema().field(2).data_type(),
+        &arrow::datatypes::DataType::LargeBinary
+    );
 }
 
 #[test]
