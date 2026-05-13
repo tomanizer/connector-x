@@ -219,6 +219,7 @@ where
                 self.max_str_len,
                 &self.connection_limiter,
                 self.execution_options,
+                None,
                 |data_type, nullability, column_name| {
                     Db2TypeSystem::from_odbc(
                         data_type,
@@ -574,6 +575,7 @@ pub(crate) fn db2_get_arrow(
     conn: &Url,
     origin_query: Option<String>,
     queries: &[CXQuery<String>],
+    pre_execution_queries: Option<&[String]>,
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
     validate_db2_options(&options)?;
@@ -599,6 +601,7 @@ pub(crate) fn db2_get_arrow(
         options.batch_size,
         connection_limiter,
         execution_options,
+        pre_execution_queries,
         replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             Db2TypeSystem::from_odbc(
@@ -618,6 +621,7 @@ pub(crate) fn db2_record_batch_iter(
     origin_query: Option<String>,
     queries: &[CXQuery<String>],
     batch_size: usize,
+    pre_execution_queries: Option<&[String]>,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = Db2Options::from_env();
     odbc_core::validate_batch_and_buffer_limits(
@@ -646,6 +650,7 @@ pub(crate) fn db2_record_batch_iter(
         batch_size,
         connection_limiter,
         execution_options,
+        pre_execution_queries,
         replace_invalid_utf16,
         move |data_type, nullability, column_name| {
             Db2TypeSystem::from_odbc(
