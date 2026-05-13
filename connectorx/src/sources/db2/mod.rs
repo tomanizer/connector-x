@@ -29,6 +29,7 @@ use crate::{
             is_valid_odbc_key, odbc_conn_value_if_needed, param_bool_param, param_u32_param,
             param_usize_param, param_value, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM,
             MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
+            REPLACE_INVALID_UTF8_PARAM,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
         Source, SourcePartition,
@@ -62,6 +63,7 @@ pub struct Db2Options {
     pub query_timeout_secs: Option<usize>,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
+    pub replace_invalid_utf8: bool,
 }
 
 impl Db2Options {
@@ -76,6 +78,7 @@ impl Db2Options {
             unknown_type_fallback_to_varchar: odbc_core::env_bool(DB2_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
+            replace_invalid_utf8: false,
         }
     }
 }
@@ -100,6 +103,7 @@ impl Default for Db2Options {
             query_timeout_secs: None,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
+            replace_invalid_utf8: false,
         }
     }
 }
@@ -117,6 +121,7 @@ pub struct Db2Source {
     execution_options: OdbcExecutionOptions,
     unknown_type_fallback_to_varchar: bool,
     replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
     profile_config: Db2ProfileConfig,
 }
 
@@ -136,6 +141,11 @@ impl Db2Source {
             .transpose()?
             .flatten()
             .unwrap_or(options.replace_invalid_utf16);
+        let replace_invalid_utf8 = params
+            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF8_PARAM))
+            .transpose()?
+            .flatten()
+            .unwrap_or(options.replace_invalid_utf8);
         let max_connections = params
             .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
             .transpose()?
@@ -158,6 +168,7 @@ impl Db2Source {
             execution_options,
             unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
             replace_invalid_utf16,
+            replace_invalid_utf8,
             profile_config,
         }
     }
@@ -273,6 +284,7 @@ where
                     Arc::clone(&self.connection_limiter),
                     self.execution_options,
                     self.replace_invalid_utf16,
+                    self.replace_invalid_utf8,
                 )
             })
             .collect()
@@ -291,6 +303,7 @@ pub struct Db2SourcePartition {
     connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
     replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
 }
 
 impl Db2SourcePartition {
@@ -304,6 +317,7 @@ impl Db2SourcePartition {
         connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
         execution_options: OdbcExecutionOptions,
         replace_invalid_utf16: bool,
+        replace_invalid_utf8: bool,
     ) -> Self {
         Self {
             conn,
@@ -317,6 +331,7 @@ impl Db2SourcePartition {
             connection_limiter,
             execution_options,
             replace_invalid_utf16,
+            replace_invalid_utf8,
         }
     }
 }
@@ -356,6 +371,7 @@ impl SourcePartition for Db2SourcePartition {
             Arc::clone(&self.names),
             Arc::clone(&self.schema),
             self.replace_invalid_utf16,
+            self.replace_invalid_utf8,
             connection_permit,
         )
     }
@@ -433,6 +449,20 @@ impl OdbcCoreError for Db2SourceError {
             row_index,
             byte_offset,
             surrogate,
+        }
+    }
+
+    fn invalid_utf8(
+        source_name: &'static str,
+        column_name: Option<&str>,
+        row_index: usize,
+        byte_offset: usize,
+    ) -> Self {
+        Self::InvalidUtf8 {
+            source_name,
+            column_name: column_name.unwrap_or("<unknown>").to_string(),
+            row_index,
+            byte_offset,
         }
     }
 }
@@ -584,6 +614,8 @@ pub(crate) fn db2_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
         .unwrap_or(options.replace_invalid_utf16);
+    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
+        .unwrap_or(options.replace_invalid_utf8);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
@@ -603,6 +635,7 @@ pub(crate) fn db2_get_arrow(
         execution_options,
         pre_execution_queries,
         replace_invalid_utf16,
+        replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             Db2TypeSystem::from_odbc(
                 data_type,
@@ -636,6 +669,8 @@ pub(crate) fn db2_record_batch_iter(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
         .unwrap_or(options.replace_invalid_utf16);
+    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
+        .unwrap_or(options.replace_invalid_utf8);
     let max_connections =
         param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
     let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
@@ -652,6 +687,7 @@ pub(crate) fn db2_record_batch_iter(
         execution_options,
         pre_execution_queries,
         replace_invalid_utf16,
+        replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             Db2TypeSystem::from_odbc(
                 data_type,
@@ -737,6 +773,7 @@ mod tests {
                 query_timeout_secs: Some(30),
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
+                replace_invalid_utf8: true,
             },
         )
         .unwrap();
@@ -748,6 +785,7 @@ mod tests {
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));
         assert!(source.unknown_type_fallback_to_varchar);
         assert!(source.replace_invalid_utf16);
+        assert!(source.replace_invalid_utf8);
         assert_eq!(source.profile_config(), &Db2ProfileConfig::default());
     }
 
@@ -763,6 +801,7 @@ mod tests {
                 query_timeout_secs: None,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
+                replace_invalid_utf8: false,
             }
         );
     }
@@ -806,8 +845,8 @@ mod tests {
     }
 
     #[test]
-    fn replace_invalid_utf16_url_option_is_connector_only() {
-        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30&db2_profile=sailfish&replication_key_columns=IBMREPKEY1,IBMREPKEY2";
+    fn replace_invalid_encoding_url_options_are_connector_only() {
+        let conn = "db2://db2inst1:password@127.0.0.1:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER&replace_invalid_utf16=true&replace_invalid_utf8=true&max_connections=3&login_timeout_secs=5&query_timeout_secs=30&db2_profile=sailfish&replication_key_columns=IBMREPKEY1,IBMREPKEY2";
         assert_eq!(
             db2_conn_string(conn).unwrap(),
             "Driver={IBM DB2 ODBC DRIVER};Hostname=127.0.0.1;Port=50000;Protocol=TCPIP;UID=db2inst1;PWD=password;Database=testdb;"
@@ -815,6 +854,7 @@ mod tests {
 
         let source = Db2Source::with_options(conn, 1, Db2Options::default()).unwrap();
         assert!(source.replace_invalid_utf16);
+        assert!(source.replace_invalid_utf8);
         assert_eq!(source.connection_limiter.max_connections(), 3);
         assert_eq!(source.execution_options.login_timeout_secs, Some(5));
         assert_eq!(source.execution_options.query_timeout_secs, Some(30));
