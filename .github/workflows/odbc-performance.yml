@@ -1,0 +1,85 @@
+name: odbc-performance
+
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Rows read from the PostgreSQL ODBC benchmark table
+        required: false
+        default: "100000"
+      batch_sizes:
+        description: Comma-separated ODBC_BATCH_SIZE values
+        required: false
+        default: "1024,8192"
+      partitions:
+        description: Partition count for partitioned benchmark cases
+        required: false
+        default: "4"
+      sample_size:
+        description: Criterion sample size
+        required: false
+        default: "10"
+      measurement_time:
+        description: Criterion measurement time in seconds
+        required: false
+        default: "2"
+      warm_up_time:
+        description: Criterion warm-up time in seconds
+        required: false
+        default: "1"
+      postgres_driver:
+        description: Registered psqlODBC driver name
+        required: false
+        default: "PostgreSQL Unicode"
+  schedule:
+    - cron: "37 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-odbc-baseline:
+    name: PostgreSQL ODBC baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ODBC_POSTGRES_DRIVER: ${{ github.event.inputs.postgres_driver || 'PostgreSQL Unicode' }}
+      ODBC_BENCH_ROWS: ${{ github.event.inputs.rows || '100000' }}
+      ODBC_BENCH_BATCH_SIZES: ${{ github.event.inputs.batch_sizes || '1024,8192' }}
+      ODBC_BENCH_PARTITIONS: ${{ github.event.inputs.partitions || '4' }}
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ODBC dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev odbc-postgresql pkg-config libssl-dev libkrb5-dev libclang-dev
+
+      - name: Run no-secret PostgreSQL ODBC baseline
+        run: |
+          set -euo pipefail
+          docker ps
+          odbcinst -q -d
+          scripts/odbc_postgres_baseline.sh \
+            --sample-size "${{ github.event.inputs.sample_size || '10' }}" \
+            --measurement-time "${{ github.event.inputs.measurement_time || '2' }}" \
+            --warm-up-time "${{ github.event.inputs.warm_up_time || '1' }}"
+
+      - name: Upload ODBC performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: odbc-performance-${{ runner.os }}-${{ github.run_id }}
+          path: |
+            target/odbc-performance/*.json
+            target/odbc-performance/*.csv
+            target/criterion/odbc
+          if-no-files-found: warn

@@ -163,7 +163,21 @@ Tuning environment variables:
 
 For URL-style generic ODBC, `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` override the matching environment variables for that source instance and are not passed through to the ODBC driver.
 
-To benchmark the generic ODBC Arrow path against the PostgreSQL testcontainer fixture:
+To collect a generic ODBC performance baseline against the PostgreSQL testcontainer fixture:
+
+```bash
+scripts/odbc_postgres_baseline.sh --sample-size 10 --measurement-time 2 --warm-up-time 1
+```
+
+This is the same no-secret baseline used by the `odbc-performance` GitHub Actions workflow. It runs the PostgreSQL ODBC testcontainer benchmark, records ODBC runtime metadata, and writes comparable artifacts under `target/odbc-performance/`:
+
+* `odbc-runtime.json`: driver manager and registered driver discovery.
+* `odbc-performance-baseline.json`: structured benchmark metadata and Criterion estimates.
+* `odbc-performance-baseline.csv`: flat rows for spreadsheets or dashboards.
+
+The baseline covers both the Arrow table path and Arrow stream path, single-query and partitioned-query reads, primitive columns, and mixed decimal/text/binary/temporal columns. It is reporting-only: do not add hard thresholds until enough runs exist to understand normal runner variance.
+
+To run only the Criterion benchmark without generating JSON/CSV artifacts:
 
 ```bash
 scripts/odbc_postgres_bench.sh --sample-size 10 --measurement-time 2 --warm-up-time 1
@@ -173,7 +187,13 @@ Useful benchmark controls:
 
 * `ODBC_BENCH_ROWS`: number of rows read from the seeded benchmark table. Defaults to `100000`.
 * `ODBC_BENCH_BATCH_SIZES`: comma-separated `ODBC_BATCH_SIZE` values to compare. Defaults to `1024,4096,8192,16384`.
+* `ODBC_BENCH_PARTITIONS`: partition count for partitioned benchmark cases. Defaults to `4`.
+* `ODBC_BENCH_ARTIFACT_DIR`: output directory used by `scripts/odbc_postgres_baseline.sh`. Defaults to `target/odbc-performance`.
 * `ODBC_BENCH_QUERY`: custom benchmark query. When set, the benchmark runs only that query.
+
+Each JSON/CSV result row identifies the backend, OS, CPU, ODBC driver, driver manager, feature flags, benchmark mode (`table` or `stream`), case, batch size, partitioning, row count, estimated batch count, median/mean seconds, rows/sec, and approximate bytes/sec for the built-in cases. `peak_memory_mb` is present but null for Criterion baselines; use `scripts/odbc_arrow_compare.py` when you need process RSS deltas.
+
+Update stored baselines only after an intentional performance change or after rerunning enough samples to confirm the difference is runner noise. Prefer comparing rows/sec for the same OS, driver, batch size, partitioning, and feature flags.
 
 To compare ConnectorX ODBC-family routes against Polars `arrow-odbc`, use the Python correctness benchmark:
 
@@ -196,6 +216,8 @@ scripts/odbc_arrow_compare.py --backend sybase
 ```
 
 The script compares ConnectorX dedicated routes, ConnectorX generic `odbc://`, ConnectorX partitioned routes for partitionable cases, and `pl.read_database(..., connection=...)` through `arrow-odbc` where the required connection strings are configured. It reports wall-clock time, rows/sec, peak RSS delta when available, route partition count, schema, null counts, min/max summaries, and row hashes. By default it exits non-zero on correctness mismatches; pass `--warn-only` to keep timings while only warning about mismatches.
+
+When `scripts/odbc_arrow_compare.py` is run with `--output-json`, its output can be attached to a baseline artifact with `scripts/odbc_bench_report.py --arrow-compare-json path/to/compare.json ...`. This keeps optional `arrow-odbc`, Db2, or Sybase live comparisons alongside the no-secret PostgreSQL ODBC baseline without making proprietary credentials mandatory.
 
 Useful controls:
 
