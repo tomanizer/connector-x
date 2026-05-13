@@ -17,25 +17,19 @@ use crate::{
     sources::{
         odbc_common::{
             connection_query_pairs, is_connector_option_key, is_raw_odbc_conn_string,
-            is_valid_odbc_key, odbc_conn_value, param_bool_param, param_u32_param,
-            param_usize_param, param_value, url_query_pairs, LOGIN_TIMEOUT_SECS_PARAM,
-            MAX_CONNECTIONS_PARAM, QUERY_TIMEOUT_SECS_PARAM, REPLACE_INVALID_UTF16_PARAM,
-            REPLACE_INVALID_UTF8_PARAM,
+            is_valid_odbc_key, odbc_conn_value, param_value, url_query_pairs,
         },
         odbc_core::{self, OdbcCoreError, OdbcExecutionOptions, OdbcTypePolicy},
         Produce, Source, SourcePartition,
     },
-    sql::{count_query, CXQuery},
+    sql::CXQuery,
 };
 use anyhow::anyhow;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use fehler::{throw, throws};
-use odbc_api::{
-    buffers::{BufferDesc, ColumnarAnyBuffer},
-    Cursor,
-};
+use odbc_api::buffers::BufferDesc;
 use rust_decimal::Decimal;
-use sqlparser::dialect::MsSqlDialect;
+#[cfg(feature = "dst_arrow")]
 use std::sync::Arc;
 use url::Url;
 use urlencoding::decode;
@@ -75,6 +69,8 @@ impl SybaseOptions {
     }
 }
 
+odbc_core::impl_odbc_runtime_options!(SybaseOptions);
+
 fn validate_sybase_options(options: &SybaseOptions) -> Result<(), anyhow::Error> {
     odbc_core::validate_batch_and_buffer_limits(
         SybaseTypeSystem::source_name(),
@@ -101,19 +97,7 @@ impl Default for SybaseOptions {
 }
 
 pub struct SybaseSource {
-    conn: String,
-    origin_query: Option<String>,
-    queries: Vec<CXQuery<String>>,
-    names: Vec<String>,
-    schema: Vec<SybaseTypeSystem>,
-    column_buffer_max_lens: Vec<usize>,
-    batch_size: usize,
-    max_str_len: usize,
-    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
-    execution_options: OdbcExecutionOptions,
-    unknown_type_fallback_to_varchar: bool,
-    replace_invalid_utf16: bool,
-    replace_invalid_utf8: bool,
+    state: odbc_core::OdbcSourceState<SybaseTypeSystem, SybaseSourceError>,
 }
 
 impl SybaseSource {
@@ -127,54 +111,24 @@ impl SybaseSource {
         validate_sybase_options(&options)?;
         let params = connection_query_pairs(conn)?;
         let params = params.as_deref();
-        let replace_invalid_utf16 = params
-            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF16_PARAM))
-            .transpose()?
-            .flatten()
-            .unwrap_or(options.replace_invalid_utf16);
-        let replace_invalid_utf8 = params
-            .map(|params| param_bool_param(params, REPLACE_INVALID_UTF8_PARAM))
-            .transpose()?
-            .flatten()
-            .unwrap_or(options.replace_invalid_utf8);
-        let max_connections = params
-            .map(|params| param_usize_param(params, MAX_CONNECTIONS_PARAM))
-            .transpose()?
-            .flatten()
-            .or(options.max_connections);
-        let connection_limiter = odbc_core::connection_limiter(max_connections, nconn)?;
-        let execution_options = sybase_execution_options_from_params(params, options)?;
+        let runtime_options = odbc_core::resolve_runtime_options(params, &options, nconn)?;
         Self {
-            conn: sybase_conn_string(conn)?,
-            origin_query: None,
-            queries: vec![],
-            names: vec![],
-            schema: vec![],
-            column_buffer_max_lens: vec![],
-            batch_size: options.batch_size,
-            max_str_len: options.max_str_len,
-            connection_limiter,
-            execution_options,
-            unknown_type_fallback_to_varchar: options.unknown_type_fallback_to_varchar,
-            replace_invalid_utf16,
-            replace_invalid_utf8,
+            state: odbc_core::OdbcSourceState::new(
+                sybase_conn_string(conn)?,
+                options.batch_size,
+                options.max_str_len,
+                options.unknown_type_fallback_to_varchar,
+                runtime_options,
+            ),
         }
     }
-
-    #[throws(SybaseSourceError)]
-    fn execute_query(
-        conn: &str,
-        query: &str,
-        execution_options: OdbcExecutionOptions,
-    ) -> odbc_core::OdbcCursor {
-        odbc_core::execute_query::<SybaseSourceError>(
-            SybaseTypeSystem::source_name(),
-            conn,
-            query,
-            execution_options,
-        )?
-    }
 }
+
+odbc_core::impl_odbc_source_partition_wrapper!(
+    SybaseSourcePartition,
+    SybaseTypeSystem,
+    SybaseSourceError
+);
 
 impl Source for SybaseSource
 where
@@ -194,179 +148,48 @@ where
     }
 
     fn set_queries<Q: ToString>(&mut self, queries: &[CXQuery<Q>]) {
-        self.queries = queries.iter().map(|q| q.map(Q::to_string)).collect();
+        self.state.set_queries(queries);
     }
 
     fn set_origin_query(&mut self, query: Option<String>) {
-        self.origin_query = query;
+        self.state.set_origin_query(query);
     }
 
     #[throws(SybaseSourceError)]
     fn fetch_metadata(&mut self) {
-        assert!(!self.queries.is_empty());
-
-        let first_query = self.queries[0].to_string();
-        let unknown_type_fallback_to_varchar = self.unknown_type_fallback_to_varchar;
-        let (names, schema, column_buffer_max_lens) =
-            odbc_core::fetch_metadata::<SybaseTypeSystem, SybaseSourceError, _>(
-                SybaseTypeSystem::source_name(),
-                &self.conn,
-                &first_query,
-                self.max_str_len,
-                &self.connection_limiter,
-                self.execution_options,
-                None,
-                |data_type, nullability, column_name| {
-                    SybaseTypeSystem::from_odbc(
-                        data_type,
-                        nullability,
-                        column_name,
-                        unknown_type_fallback_to_varchar,
-                    )
-                    .map_err(Into::into)
-                },
-            )?;
-        self.names = names;
-        self.schema = schema;
-        self.column_buffer_max_lens = column_buffer_max_lens;
+        let unknown_type_fallback_to_varchar = self.state.unknown_type_fallback_to_varchar;
+        self.state
+            .fetch_metadata(|data_type, nullability, column_name| {
+                SybaseTypeSystem::from_odbc(
+                    data_type,
+                    nullability,
+                    column_name,
+                    unknown_type_fallback_to_varchar,
+                )
+                .map_err(Into::into)
+            })?;
     }
 
     #[throws(SybaseSourceError)]
     fn result_rows(&mut self) -> Option<usize> {
-        match &self.origin_query {
-            Some(q) => Some(odbc_core::fetch_count::<SybaseSourceError, _>(
-                SybaseTypeSystem::source_name(),
-                &self.conn,
-                q,
-                &MsSqlDialect {},
-                &self.connection_limiter,
-                self.execution_options,
-            )?),
-            None => None,
-        }
+        self.state.result_rows(odbc_core::OdbcSqlDialect::MsSql)?
     }
 
     fn names(&self) -> Vec<String> {
-        self.names.clone()
+        self.state.names()
     }
 
     fn schema(&self) -> Vec<Self::TypeSystem> {
-        self.schema.clone()
+        self.state.schema()
     }
 
     #[throws(SybaseSourceError)]
     fn partition(self) -> Vec<Self::Partition> {
-        self.queries
-            .iter()
-            .map(|query| {
-                SybaseSourcePartition::new(
-                    self.conn.clone(),
-                    query,
-                    &self.names,
-                    &self.schema,
-                    &self.column_buffer_max_lens,
-                    self.batch_size,
-                    Arc::clone(&self.connection_limiter),
-                    self.execution_options,
-                    self.replace_invalid_utf16,
-                    self.replace_invalid_utf8,
-                )
-            })
+        self.state
+            .partition(odbc_core::OdbcSqlDialect::MsSql)
+            .into_iter()
+            .map(SybaseSourcePartition::new)
             .collect()
-    }
-}
-
-pub struct SybaseSourcePartition {
-    conn: String,
-    query: CXQuery<String>,
-    names: Arc<[String]>,
-    schema: Arc<[SybaseTypeSystem]>,
-    column_buffer_max_lens: Vec<usize>,
-    nrows: usize,
-    ncols: usize,
-    batch_size: usize,
-    connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
-    execution_options: OdbcExecutionOptions,
-    replace_invalid_utf16: bool,
-    replace_invalid_utf8: bool,
-}
-
-impl SybaseSourcePartition {
-    pub(crate) fn new(
-        conn: String,
-        query: &CXQuery<String>,
-        names: &[String],
-        schema: &[SybaseTypeSystem],
-        column_buffer_max_lens: &[usize],
-        batch_size: usize,
-        connection_limiter: Arc<odbc_core::OdbcConnectionLimiter>,
-        execution_options: OdbcExecutionOptions,
-        replace_invalid_utf16: bool,
-        replace_invalid_utf8: bool,
-    ) -> Self {
-        Self {
-            conn,
-            query: query.clone(),
-            names: names.to_vec().into(),
-            schema: schema.to_vec().into(),
-            column_buffer_max_lens: column_buffer_max_lens.to_vec(),
-            nrows: 0,
-            ncols: schema.len(),
-            batch_size,
-            connection_limiter,
-            execution_options,
-            replace_invalid_utf16,
-            replace_invalid_utf8,
-        }
-    }
-}
-
-impl SourcePartition for SybaseSourcePartition {
-    type TypeSystem = SybaseTypeSystem;
-    type Parser<'a> = SybaseSourceParser;
-    type Error = SybaseSourceError;
-
-    #[throws(SybaseSourceError)]
-    fn result_rows(&mut self) {
-        let cquery = count_query(&self.query, &MsSqlDialect {})?;
-        self.nrows = odbc_core::fetch_count_query::<SybaseSourceError>(
-            SybaseTypeSystem::source_name(),
-            &self.conn,
-            cquery.as_str(),
-            &self.connection_limiter,
-            self.execution_options,
-        )?;
-    }
-
-    #[throws(SybaseSourceError)]
-    fn parser(&mut self) -> Self::Parser<'_> {
-        let connection_permit = self.connection_limiter.acquire();
-        let cursor =
-            SybaseSource::execute_query(&self.conn, self.query.as_str(), self.execution_options)?;
-        let buffer = ColumnarAnyBuffer::try_from_descs(
-            self.batch_size,
-            self.schema
-                .iter()
-                .zip(&self.column_buffer_max_lens)
-                .map(|(ty, max_len)| ty.buffer_desc(*max_len)),
-        )?;
-        let cursor = cursor.bind_buffer(buffer)?;
-        SybaseSourceParser::new(
-            cursor,
-            Arc::clone(&self.names),
-            Arc::clone(&self.schema),
-            self.replace_invalid_utf16,
-            self.replace_invalid_utf8,
-            connection_permit,
-        )
-    }
-
-    fn nrows(&self) -> usize {
-        self.nrows
-    }
-
-    fn ncols(&self) -> usize {
-        self.ncols
     }
 }
 
@@ -607,26 +430,7 @@ pub(crate) fn fetch_i64_pair(
 #[throws(SybaseSourceError)]
 pub(crate) fn sybase_execution_options(conn: &str, options: SybaseOptions) -> OdbcExecutionOptions {
     let params = connection_query_pairs(conn)?;
-    sybase_execution_options_from_params(params.as_deref(), options)?
-}
-
-#[throws(SybaseSourceError)]
-fn sybase_execution_options_from_params(
-    params: Option<&[(String, String)]>,
-    options: SybaseOptions,
-) -> OdbcExecutionOptions {
-    OdbcExecutionOptions::new(
-        params
-            .map(|params| param_u32_param(params, LOGIN_TIMEOUT_SECS_PARAM))
-            .transpose()?
-            .flatten()
-            .or(options.login_timeout_secs),
-        params
-            .map(|params| param_usize_param(params, QUERY_TIMEOUT_SECS_PARAM))
-            .transpose()?
-            .flatten()
-            .or(options.query_timeout_secs),
-    )?
+    odbc_core::execution_options_from_params(params.as_deref(), &options)?
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -641,14 +445,8 @@ pub(crate) fn sybase_get_arrow(
     let params = url_query_pairs(conn)?;
     let conn_str = sybase_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
-    let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
-        .unwrap_or(options.replace_invalid_utf16);
-    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
-        .unwrap_or(options.replace_invalid_utf8);
-    let max_connections =
-        param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
-    let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
-    let execution_options = sybase_execution_options_from_params(Some(&params), options)?;
+    let runtime_options =
+        odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         SybaseTypeSystem,
         SybaseSourceError,
@@ -658,11 +456,11 @@ pub(crate) fn sybase_get_arrow(
         queries,
         options.max_str_len,
         options.batch_size,
-        connection_limiter,
-        execution_options,
+        runtime_options.connection_limiter,
+        runtime_options.execution_options,
         pre_execution_queries,
-        replace_invalid_utf16,
-        replace_invalid_utf8,
+        runtime_options.replace_invalid_utf16,
+        runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             SybaseTypeSystem::from_odbc(
                 data_type,
@@ -694,25 +492,19 @@ pub(crate) fn sybase_record_batch_iter(
     let params = url_query_pairs(conn)?;
     let conn_str = sybase_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
-    let replace_invalid_utf16 = param_bool_param(&params, REPLACE_INVALID_UTF16_PARAM)?
-        .unwrap_or(options.replace_invalid_utf16);
-    let replace_invalid_utf8 = param_bool_param(&params, REPLACE_INVALID_UTF8_PARAM)?
-        .unwrap_or(options.replace_invalid_utf8);
-    let max_connections =
-        param_usize_param(&params, MAX_CONNECTIONS_PARAM)?.or(options.max_connections);
-    let connection_limiter = odbc_core::connection_limiter(max_connections, queries.len())?;
-    let execution_options = sybase_execution_options_from_params(Some(&params), options)?;
+    let runtime_options =
+        odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
     let iterator = odbc_core::odbc_record_batch_iter_impl::<SybaseTypeSystem, SybaseSourceError>(
         &conn_str,
         origin_query,
         queries,
         options.max_str_len,
         batch_size,
-        connection_limiter,
-        execution_options,
+        runtime_options.connection_limiter,
+        runtime_options.execution_options,
         pre_execution_queries,
-        replace_invalid_utf16,
-        replace_invalid_utf8,
+        runtime_options.replace_invalid_utf16,
+        runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
             SybaseTypeSystem::from_odbc(
                 data_type,
@@ -982,14 +774,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(source.batch_size, 9);
-        assert_eq!(source.max_str_len, 8192);
-        assert_eq!(source.connection_limiter.max_connections(), 2);
-        assert_eq!(source.execution_options.login_timeout_secs, Some(5));
-        assert_eq!(source.execution_options.query_timeout_secs, Some(30));
-        assert!(source.unknown_type_fallback_to_varchar);
-        assert!(source.replace_invalid_utf16);
-        assert!(source.replace_invalid_utf8);
+        assert_eq!(source.state.batch_size, 9);
+        assert_eq!(source.state.max_str_len, 8192);
+        assert_eq!(source.state.connection_limiter.max_connections(), 2);
+        assert_eq!(source.state.execution_options.login_timeout_secs, Some(5));
+        assert_eq!(source.state.execution_options.query_timeout_secs, Some(30));
+        assert!(source.state.unknown_type_fallback_to_varchar);
+        assert!(source.state.replace_invalid_utf16);
+        assert!(source.state.replace_invalid_utf8);
     }
 
     #[test]
@@ -1056,11 +848,11 @@ mod tests {
         );
 
         let source = SybaseSource::with_options(conn, 1, SybaseOptions::default()).unwrap();
-        assert!(source.replace_invalid_utf16);
-        assert!(source.replace_invalid_utf8);
-        assert_eq!(source.connection_limiter.max_connections(), 3);
-        assert_eq!(source.execution_options.login_timeout_secs, Some(5));
-        assert_eq!(source.execution_options.query_timeout_secs, Some(30));
+        assert!(source.state.replace_invalid_utf16);
+        assert!(source.state.replace_invalid_utf8);
+        assert_eq!(source.state.connection_limiter.max_connections(), 3);
+        assert_eq!(source.state.execution_options.login_timeout_secs, Some(5));
+        assert_eq!(source.state.execution_options.query_timeout_secs, Some(30));
     }
 
     #[test]

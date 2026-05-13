@@ -1,5 +1,11 @@
 //! This module contains transport definitions for the sources and destinations implemented in ConnectorX.
 
+#[cfg(all(
+    feature = "dst_arrow",
+    any(feature = "src_db2", feature = "src_odbc", feature = "src_sybase")
+))]
+#[macro_use]
+mod odbc_arrow_common;
 #[cfg(all(feature = "src_bigquery", feature = "dst_arrow"))]
 mod bigquery_arrow;
 #[cfg(all(feature = "src_bigquery", feature = "dst_arrow"))]
