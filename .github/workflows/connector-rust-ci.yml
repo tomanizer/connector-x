@@ -58,6 +58,22 @@ jobs:
         shell: bash
         run: echo "### ODBC-family coverage" >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Record ODBC runtime metadata
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/odbc_runtime_smoke.py \
+            --json "odbc-runtime-${{ runner.os }}.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always() && runner.os != 'Windows'
+        with:
+          name: "connector-rust-odbc-runtime-${{ runner.os }}"
+          path: "odbc-runtime-${{ runner.os }}.json"
+          if-no-files-found: warn
+
       - name: Check Sybase connector
         shell: bash
         run: |

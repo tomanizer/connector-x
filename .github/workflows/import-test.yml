@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-10.15, windows-latest]
+        os: [ubuntu-latest, macos-15-intel, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6
@@ -29,8 +29,20 @@ jobs:
           architecture: x64
 
       - name: Check which python we use
+        run: which python
+
+      - name: Install ODBC runtime dependencies
+        shell: bash
         run: |
-          echo $(which python)
+          set -euo pipefail
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            sudo apt-get update
+            sudo apt-get install -y unixodbc
+          elif [[ "$RUNNER_OS" == "macOS" ]]; then
+            brew install unixodbc
+          else
+            echo "Windows provides the ODBC Driver Manager through odbc32.dll."
+          fi
 
       - name: Install ConnectorX - POSIX
         if: ${{ matrix.os != 'windows-latest' }}
@@ -47,6 +59,7 @@ jobs:
 
       - name: Install ConnectorX - Windows
         if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
         run: |
           pip install numpy importlib-metadata
 
@@ -58,4 +71,16 @@ jobs:
           }
 
       - name: Import
-        run: python -c "from connectorx import read_sql"
+        shell: bash
+        run: |
+          python -c "from connectorx import read_sql"
+          python scripts/odbc_runtime_smoke.py \
+            --json "odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: "import-test-odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}"
+          path: "odbc-runtime-${{ matrix.os }}-${{ matrix.python-version }}.json"
+          if-no-files-found: warn

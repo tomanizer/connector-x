@@ -17,6 +17,7 @@ The Python wheel includes ConnectorX itself, but not database-specific ODBC driv
 * Windows uses the Windows ODBC manager and needs the vendor driver installed and registered.
 
 See the [ODBC database page](./databases/odbc.md) for connection-string forms, driver examples, and live-test setup.
+Release and package-index verification now smoke-test the platform ODBC manager on Linux, macOS, and Windows, but they still do not bundle or validate every database-specific driver you may use in production.
 
 ### Build from source code
 
