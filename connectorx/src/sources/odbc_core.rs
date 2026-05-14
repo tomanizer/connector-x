@@ -4408,6 +4408,21 @@ pub(crate) fn build_timestamp_micro_array_from_owned<E: OdbcCoreError>(
 #[allow(unused_macros)]
 macro_rules! impl_odbc_arrow_policy {
     ($TS:ty) => {
+        $crate::sources::odbc_core::impl_odbc_arrow_policy!(
+            @impl $TS,
+            text_variants = [Self::Char(..) | Self::Varchar(..) | Self::Text(..)]
+        );
+    };
+    ($TS:ty, wide_text) => {
+        $crate::sources::odbc_core::impl_odbc_arrow_policy!(
+            @impl $TS,
+            text_variants = [
+                Self::Char(..) | Self::Varchar(..) | Self::Text(..) |
+                Self::WChar(..) | Self::WVarchar(..) | Self::WText(..)
+            ]
+        );
+    };
+    (@impl $TS:ty, text_variants = [$($text_variant:pat_param)|+]) => {
         #[cfg(feature = "dst_arrow")]
         impl $crate::sources::odbc_core::OdbcArrowPolicy for $TS {
             fn arrow_type(self) -> $crate::destinations::arrow::ArrowTypeSystem {
@@ -4423,9 +4438,7 @@ macro_rules! impl_odbc_arrow_policy {
                         ArrowTypeSystem::Decimal128(nullable, precision, scale)
                     }
                     Self::Bit(..) => ArrowTypeSystem::Boolean(nullable),
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
-                        ArrowTypeSystem::LargeUtf8(nullable)
-                    }
+                    $($text_variant)|+ => ArrowTypeSystem::LargeUtf8(nullable),
                     Self::Binary(..) => ArrowTypeSystem::LargeBinary(nullable),
                     Self::Date(..) => ArrowTypeSystem::Date32(nullable),
                     Self::Time(..) => ArrowTypeSystem::Time64Micro(nullable),
@@ -4445,7 +4458,7 @@ macro_rules! impl_odbc_arrow_policy {
                         ArrowDataType::Decimal128(precision, scale)
                     }
                     Self::Bit(..) => ArrowDataType::Boolean,
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => ArrowDataType::LargeUtf8,
+                    $($text_variant)|+ => ArrowDataType::LargeUtf8,
                     Self::Binary(..) => ArrowDataType::LargeBinary,
                     Self::Date(..) => ArrowDataType::Date32,
                     Self::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),
@@ -4490,7 +4503,7 @@ macro_rules! impl_odbc_arrow_policy {
                         )
                     }
                     Self::Bit(..) => build_bool_array(column, nrows, nullable),
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => build_string_array(
+                    $($text_variant)|+ => build_string_array(
                         column,
                         nrows,
                         nullable,
@@ -4535,7 +4548,7 @@ macro_rules! impl_odbc_arrow_policy {
                         build_decimal_array_from_owned(column, nrows, nullable, precision, scale)
                     }
                     Self::Bit(..) => build_bool_array_from_owned(column, nrows, nullable),
-                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
+                    $($text_variant)|+ => {
                         build_string_array_from_owned(
                             column,
                             nrows,

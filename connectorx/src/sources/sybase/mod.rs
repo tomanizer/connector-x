@@ -302,6 +302,9 @@ impl OdbcTypePolicy for SybaseTypeSystem {
             | SybaseTypeSystem::Char(nullable)
             | SybaseTypeSystem::Varchar(nullable)
             | SybaseTypeSystem::Text(nullable)
+            | SybaseTypeSystem::WChar(nullable)
+            | SybaseTypeSystem::WVarchar(nullable)
+            | SybaseTypeSystem::WText(nullable)
             | SybaseTypeSystem::Binary(nullable)
             | SybaseTypeSystem::Date(nullable)
             | SybaseTypeSystem::Time(nullable)
@@ -328,6 +331,9 @@ impl OdbcTypePolicy for SybaseTypeSystem {
             | SybaseTypeSystem::Date(_)
             | SybaseTypeSystem::Time(_)
             | SybaseTypeSystem::Timestamp(_) => BufferDesc::Text { max_str_len },
+            SybaseTypeSystem::WChar(_)
+            | SybaseTypeSystem::WVarchar(_)
+            | SybaseTypeSystem::WText(_) => BufferDesc::WText { max_str_len },
         }
     }
 }
@@ -554,7 +560,10 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Bit(..) => ArrowTypeSystem::Boolean(nullable),
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => ArrowTypeSystem::LargeUtf8(nullable),
+            | SybaseTypeSystem::Text(..)
+            | SybaseTypeSystem::WChar(..)
+            | SybaseTypeSystem::WVarchar(..)
+            | SybaseTypeSystem::WText(..) => ArrowTypeSystem::LargeUtf8(nullable),
             SybaseTypeSystem::Binary(..) => ArrowTypeSystem::LargeBinary(nullable),
             SybaseTypeSystem::Date(..) => ArrowTypeSystem::Date32(nullable),
             SybaseTypeSystem::Time(..) => ArrowTypeSystem::Time64Micro(nullable),
@@ -577,7 +586,10 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Bit(..) => ArrowDataType::Boolean,
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => ArrowDataType::LargeUtf8,
+            | SybaseTypeSystem::Text(..)
+            | SybaseTypeSystem::WChar(..)
+            | SybaseTypeSystem::WVarchar(..)
+            | SybaseTypeSystem::WText(..) => ArrowDataType::LargeUtf8,
             SybaseTypeSystem::Binary(..) => ArrowDataType::LargeBinary,
             SybaseTypeSystem::Date(..) => ArrowDataType::Date32,
             SybaseTypeSystem::Time(..) => ArrowDataType::Time64(TimeUnit::Microsecond),
@@ -619,7 +631,10 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Bit(..) => build_bool_array(column, nrows, nullable),
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => build_string_array(
+            | SybaseTypeSystem::Text(..)
+            | SybaseTypeSystem::WChar(..)
+            | SybaseTypeSystem::WVarchar(..)
+            | SybaseTypeSystem::WText(..) => build_string_array(
                 column,
                 nrows,
                 nullable,
@@ -659,7 +674,10 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Bit(..) => build_bool_array_from_owned(column, nrows, nullable),
             SybaseTypeSystem::Char(..)
             | SybaseTypeSystem::Varchar(..)
-            | SybaseTypeSystem::Text(..) => build_string_array_from_owned(
+            | SybaseTypeSystem::Text(..)
+            | SybaseTypeSystem::WChar(..)
+            | SybaseTypeSystem::WVarchar(..)
+            | SybaseTypeSystem::WText(..) => build_string_array_from_owned(
                 column,
                 nrows,
                 nullable,

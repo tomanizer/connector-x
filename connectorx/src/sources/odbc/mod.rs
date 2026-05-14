@@ -282,7 +282,7 @@ pub(crate) fn odbc_record_batch_iter(
     Ok(Box::new(iterator))
 }
 
-odbc_core::impl_odbc_arrow_policy!(OdbcTypeSystem);
+odbc_core::impl_odbc_arrow_policy!(OdbcTypeSystem, wide_text);
 
 impl OdbcCoreError for OdbcSourceError {
     fn get_nrows_failed() -> Self {
@@ -389,6 +389,9 @@ impl OdbcTypePolicy for OdbcTypeSystem {
             | OdbcTypeSystem::Char(nullable)
             | OdbcTypeSystem::Varchar(nullable)
             | OdbcTypeSystem::Text(nullable)
+            | OdbcTypeSystem::WChar(nullable)
+            | OdbcTypeSystem::WVarchar(nullable)
+            | OdbcTypeSystem::WText(nullable)
             | OdbcTypeSystem::Binary(nullable)
             | OdbcTypeSystem::Date(nullable)
             | OdbcTypeSystem::Time(nullable)
@@ -411,6 +414,9 @@ impl OdbcTypePolicy for OdbcTypeSystem {
             | OdbcTypeSystem::Char(_)
             | OdbcTypeSystem::Varchar(_)
             | OdbcTypeSystem::Text(_) => BufferDesc::Text { max_str_len },
+            OdbcTypeSystem::WChar(_) | OdbcTypeSystem::WVarchar(_) | OdbcTypeSystem::WText(_) => {
+                BufferDesc::WText { max_str_len }
+            }
             OdbcTypeSystem::Binary(_) => BufferDesc::Binary {
                 max_bytes: max_str_len,
             },

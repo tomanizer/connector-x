@@ -164,7 +164,7 @@ Timeout enforcement ultimately depends on the ODBC driver. When a driver reports
 
 ## Performance
 
-The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and text columns use text buffers for driver compatibility.
+The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and narrow text columns use text buffers for driver compatibility; ODBC wide-character metadata uses wide text buffers and is decoded as UTF-16.
 
 ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and shares it across generic ODBC, Db2, and Sybase connections. Each active query still uses its own ODBC connection, but concurrent ODBC connections are capped per source instance so partitioned reads do not open unbounded connections.
 

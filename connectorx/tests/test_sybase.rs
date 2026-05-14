@@ -23,7 +23,7 @@ use connectorx::{
 use odbc_api::{
     buffers::TextRowSet, environment, Connection, ConnectionOptions, Cursor, ResultSetMetadata,
 };
-use sqlparser::dialect::MsSqlDialect;
+use sqlparser::dialect::{GenericDialect, MsSqlDialect};
 
 mod test_db;
 
@@ -310,7 +310,10 @@ fn sybase_driver_matrix_buffer_policy(ty: SybaseTypeSystem) -> &'static str {
             "text ODBC buffer -> Arrow Decimal128"
         }
         SybaseTypeSystem::Char(_) | SybaseTypeSystem::Varchar(_) | SybaseTypeSystem::Text(_) => {
-            "text or wide-text ODBC buffer -> Arrow LargeUtf8"
+            "text ODBC buffer -> Arrow LargeUtf8"
+        }
+        SybaseTypeSystem::WChar(_) | SybaseTypeSystem::WVarchar(_) | SybaseTypeSystem::WText(_) => {
+            "wide-text ODBC buffer -> Arrow LargeUtf8"
         }
         SybaseTypeSystem::Binary(_) => "text/binary-compatible ODBC buffer -> Arrow LargeBinary",
         SybaseTypeSystem::Date(_) => "text ODBC buffer -> Arrow Date32",
@@ -750,12 +753,12 @@ fn test_sybase_arrow_date_money_and_text_variants() {
 }
 
 #[test]
-fn test_sybase_testcontainer_time2_and_null_bit() {
+fn test_sybase_testcontainer_time2_and_bit() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
         eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase TIME2/null bit test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+            "CONNECTORX_SKIP: skipping Sybase TIME2/bit test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
         );
         return;
     }
@@ -763,7 +766,8 @@ fn test_sybase_testcontainer_time2_and_null_bit() {
     let conn = test_db::sybase_odbc_conn();
     let queries = [CXQuery::naked(
         "select convert(bigtime, '03:04:05.123456') as time_v, \
-         convert(bit, null) as nullable_bit",
+         convert(bit, 1) as true_bit, \
+         convert(bit, 0) as false_bit",
     )];
 
     let source = SybaseSource::new(&conn, 1).unwrap();
@@ -776,7 +780,7 @@ fn test_sybase_testcontainer_time2_and_null_bit() {
     assert_eq!(result.len(), 1);
     let rb = result.pop().unwrap();
     assert_eq!(rb.num_rows(), 1);
-    assert_eq!(rb.num_columns(), 2);
+    assert_eq!(rb.num_columns(), 3);
 
     let time_v = rb
         .column(0)
@@ -790,12 +794,19 @@ fn test_sybase_testcontainer_time2_and_null_bit() {
         + 123_456;
     assert_eq!(time_v.value(0), expected_time);
 
-    let nullable_bit = rb
+    let true_bit = rb
         .column(1)
         .as_any()
         .downcast_ref::<BooleanArray>()
         .unwrap();
-    assert!(nullable_bit.is_null(0));
+    assert!(true_bit.value(0));
+
+    let false_bit = rb
+        .column(2)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert!(!false_bit.value(0));
 }
 
 #[test]
@@ -1169,26 +1180,43 @@ fn test_sybase_query_wrapping_sql_shapes() {
 
     let count_sql = count_query(&query, &MsSqlDialect {}).unwrap().to_string();
     assert!(count_sql.contains("SELECT count(*) FROM ("));
-    assert!(count_sql.contains("TOP (4)"));
     assert!(count_sql.contains("[TradeId]"));
     assert!(count_sql.contains("[select]"));
     assert!(count_sql.contains("convert(datetime"));
     assert!(count_sql.contains("dbo.cx_odbc_partition_edge"));
+    assert!(count_sql.contains("[TradeId] <= 4"));
     assert!(!count_sql.contains("ORDER BY"));
 
     let range_sql = get_partition_range_query(query.as_str(), "TradeId", &MsSqlDialect {}).unwrap();
     assert!(range_sql.contains("SELECT min(CXTMPTAB_RANGE.TradeId), max(CXTMPTAB_RANGE.TradeId)"));
     assert!(range_sql.contains("FROM ("));
-    assert!(range_sql.contains("TOP (4)"));
+    assert!(range_sql.contains("[TradeId] <= 4"));
     assert!(!range_sql.contains("ORDER BY"));
 
     let part_sql =
         single_col_partition_query(query.as_str(), "TradeId", 1, 3, &MsSqlDialect {}).unwrap();
     assert!(part_sql.contains("SELECT * FROM ("));
-    assert!(part_sql.contains("TOP (4)"));
-    assert!(part_sql.contains("ORDER BY [TradeId]"));
+    assert!(part_sql.contains("[TradeId] <= 4"));
+    assert!(!part_sql.contains("ORDER BY"));
     assert!(part_sql.contains("1 <= CXTMPTAB_PART.TradeId"));
     assert!(part_sql.contains("CXTMPTAB_PART.TradeId < 3"));
+}
+
+#[test]
+fn test_sybase_partition_query_wraps_union_all_inputs() {
+    let query = "select convert(int, 1) as id, convert(bit, 1) as flag \
+                 union all \
+                 select convert(int, 2) as id, convert(bit, 0) as flag";
+
+    let mssql_part = single_col_partition_query(query, "id", 1, 3, &MsSqlDialect {}).unwrap();
+    assert!(mssql_part.contains("UNION ALL"));
+    assert!(mssql_part.contains("1 <= CXTMPTAB_PART.id"));
+    assert!(mssql_part.contains("CXTMPTAB_PART.id < 3"));
+
+    let generic_part = single_col_partition_query(query, "id", 1, 3, &GenericDialect {}).unwrap();
+    assert!(generic_part.contains("UNION ALL"));
+    assert!(generic_part.contains("1 <= CXTMPTAB_PART.id"));
+    assert!(generic_part.contains("CXTMPTAB_PART.id < 3"));
 }
 
 #[test]
@@ -1280,11 +1308,10 @@ fn test_sybase_testcontainer_query_wrapping_nested_subquery_partition() {
 
 fn sybase_partition_edge_query() -> CXQuery<String> {
     CXQuery::naked(
-        "select top 4 [TradeId] as TradeId, [select], trade_label, \
+        "select [TradeId] as TradeId, [select], trade_label, \
          convert(datetime, cob_date) as cob_date \
          from dbo.cx_odbc_partition_edge \
-         where [TradeId] is not null \
-         order by [TradeId]",
+         where [TradeId] is not null and [TradeId] <= 4",
     )
 }
 

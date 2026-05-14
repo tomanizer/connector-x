@@ -164,10 +164,18 @@ impl StatementExt for Statement {
 }
 
 trait QueryExt {
+    fn as_select(&self) -> Option<&Select>;
     fn as_select_mut(&mut self) -> Option<&mut Select>;
 }
 
 impl QueryExt for Query {
+    fn as_select(&self) -> Option<&Select> {
+        match *self.body {
+            SetExpr::Select(ref select) => Some(select),
+            _ => None,
+        }
+    }
+
     fn as_select_mut(&mut self) -> Option<&mut Select> {
         match *self.body {
             SetExpr::Select(ref mut select) => Some(select),
@@ -221,10 +229,9 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
                     if query.limit.is_none() && query.offset.is_none() && query.fetch.is_none() {
                         query.order_by = vec![]; // mssql offset must appear with order by
                     }
-                    let select = query
-                        .as_select_mut()
-                        .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?;
-                    select.sort_by = vec![];
+                    if let Some(select) = query.as_select_mut() {
+                        select.sort_by = vec![];
+                    }
                     wrap_query(&mut query, projection, None, table_alias)
                 }
                 CXQuery::Wrapped(ast) => {
@@ -235,11 +242,12 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
                         .as_query()
                         .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                         .clone();
-                    let select = query
-                        .as_select_mut()
-                        .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?;
-                    select.projection = projection;
-                    Statement::Query(Box::new(query))
+                    if let Some(select) = query.as_select_mut() {
+                        select.projection = projection;
+                        Statement::Query(Box::new(query))
+                    } else {
+                        wrap_query(&mut query, projection, None, table_alias)
+                    }
                 }
             };
             format!("{}", ast_count)
@@ -366,11 +374,6 @@ pub fn single_col_partition_query<T: Dialect>(
                 .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                 .clone();
 
-            let select = query
-                .as_select_mut()
-                .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
-                .clone();
-
             let ast_part: Statement;
 
             let lb = Expr::BinaryOp {
@@ -391,10 +394,14 @@ pub fn single_col_partition_query<T: Dialect>(
                 right: Box::new(ub),
             };
 
+            let has_top = query
+                .as_select()
+                .map(|select| select.top.is_some())
+                .unwrap_or(false);
             if query.limit.is_none()
                 && query.offset.is_none()
                 && query.fetch.is_none()
-                && select.top.is_none()
+                && !has_top
                 && !query.order_by.is_empty()
             {
                 // order by in a partition query does not make sense because partition is unordered.
