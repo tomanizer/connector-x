@@ -36,6 +36,23 @@ conn = ConnectionUrl(
 )
 ```
 
+Set ConnectorX-only Db2 options in the same `database_options` mapping. For example, to use the opt-in piecewise LOB path while keeping the driver name explicit:
+
+```python
+conn = ConnectionUrl(
+    backend="db2",
+    username="db2inst1",
+    password="password",
+    server="127.0.0.1",
+    port=50000,
+    database="testdb",
+    database_options={
+        "driver": "IBM DB2 ODBC DRIVER",
+        "lob_strategy": "piecewise",
+    },
+)
+```
+
 ConnectorX expands this URL into an ODBC connection string using `Driver`, `Hostname`, `Port`, `Protocol`, `Database`, `UID`, and `PWD`. `Protocol` defaults to `TCPIP`. Generated values are wrapped in ODBC braces only when required, such as when a value is empty or contains whitespace, semicolons, braces, or equals signs; embedded `}` characters are escaped inside braced values. A raw ODBC connection string starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` is also accepted.
 
 Additional URL query parameters are appended to the ODBC connection string, so settings such as `Security=SSL` can be passed through.

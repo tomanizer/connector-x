@@ -32,11 +32,15 @@ conn = ConnectionUrl(
     server="127.0.0.1",
     port=5000,
     database="tempdb",
-    database_options={"driver": "FreeTDS", "tds_version": "5.0"},
+    database_options={
+        "driver": "FreeTDS",
+        "tds_version": "5.0",
+        "lob_strategy": "piecewise",
+    },
 )
 ```
 
-`tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.
+`tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS. Omit `lob_strategy` to use the default bounded buffer path.
 Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
 `replace_invalid_utf16=true` and `replace_invalid_utf8=true` are ConnectorX-only URL options. They are not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers and invalid UTF-8 returned through narrow text buffers; use these options only when you explicitly want invalid sequences replaced with U+FFFD.

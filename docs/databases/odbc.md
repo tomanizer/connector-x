@@ -134,6 +134,20 @@ Large text and binary columns have an opt-in piecewise path for `return_type="ar
 conn = "odbc://user:password@server/database?driver=PostgreSQL%20Unicode&lob_strategy=piecewise"
 ```
 
+The same option can be set with `ConnectionUrl`:
+
+```python
+conn = ConnectionUrl(
+    backend="odbc",
+    driver="PostgreSQL Unicode",
+    username="user",
+    password="password",
+    server="server",
+    database="database",
+    database_options={"lob_strategy": "piecewise"},
+)
+```
+
 `lob_strategy=piecewise`, or `ODBC_LOB_STRATEGY=piecewise`, keeps ordinary queries on the batch-oriented ODBC buffer path. It switches a query to row-wise `SQLGetData` only when selected metadata contains long or unknown-size text/binary columns, including `SQL_LONGVARCHAR`, `SQL_WLONGVARCHAR`, `SQL_LONGVARBINARY`, unknown-size variable text/binary, or vendor `SQL_OTHER` values that the selected route maps to text or binary. This avoids truncating CLOB/BLOB-style values when the normal buffer bound is deliberately small. The piecewise path still has a 64 MiB per-cell hard limit and can be slower because it cannot use the columnar block cursor for that query. If a driver cannot return a selected LOB through `SQLGetData`, cast or substr the column explicitly.
 
 ## Timeouts
