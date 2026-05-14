@@ -30,7 +30,7 @@ ConnectorX expands the URL into an ODBC connection string using `Driver` or `DSN
 
 All generated ODBC values are escaped when required, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
-ODBC URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. Generic ODBC first-class URL parameters are `driver`, `dsn`, `server_key`, `odbc_connect`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the ODBC driver connection string.
+ODBC URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. Generic ODBC first-class URL parameters are `driver`, `dsn`, `server_key`, `odbc_connect`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, and `lob_strategy`; other non-duplicate parameters are passed through to the ODBC driver connection string.
 
 Python users can also build ODBC URLs with `ConnectionUrl`:
 
@@ -128,6 +128,28 @@ Wide text buffers are decoded as UTF-16. Invalid UTF-16 sequences are rejected b
 
 Text, wide text, and binary buffers are checked after every fetch. If the ODBC driver reports that a value was truncated, ConnectorX returns an error that names the relevant max-length setting. Increase the setting or cast/substr the selected column in the query.
 
+Large text and binary columns have an opt-in piecewise path for `return_type="arrow"` and `return_type="arrow_stream"`:
+
+```python
+conn = "odbc://user:password@server/database?driver=PostgreSQL%20Unicode&lob_strategy=piecewise"
+```
+
+The same option can be set with `ConnectionUrl`:
+
+```python
+conn = ConnectionUrl(
+    backend="odbc",
+    driver="PostgreSQL Unicode",
+    username="user",
+    password="password",
+    server="server",
+    database="database",
+    database_options={"lob_strategy": "piecewise"},
+)
+```
+
+`lob_strategy=piecewise`, or `ODBC_LOB_STRATEGY=piecewise`, keeps ordinary queries on the batch-oriented ODBC buffer path. It switches a query to row-wise `SQLGetData` only when selected metadata contains long or unknown-size text/binary columns, including `SQL_LONGVARCHAR`, `SQL_WLONGVARCHAR`, `SQL_LONGVARBINARY`, unknown-size variable text/binary, or vendor `SQL_OTHER` values that the selected route maps to text or binary. This avoids truncating CLOB/BLOB-style values when the normal buffer bound is deliberately small. The piecewise path still has a 64 MiB per-cell hard limit and can be slower because it cannot use the columnar block cursor for that query. If a driver cannot return a selected LOB through `SQLGetData`, cast or substr the column explicitly.
+
 ## Timeouts
 
 ConnectorX can set ODBC login and statement timeouts for generic ODBC, Db2, and Sybase connections. Use URL options for per-source control:
@@ -157,11 +179,12 @@ Tuning environment variables:
 * `ODBC_MAX_CONNECTIONS`: maximum active ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `ODBC_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `ODBC_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
+* `ODBC_LOB_STRATEGY`: `bounded` by default. Set to `piecewise` to fetch detected long or unknown-size text/binary columns with `SQLGetData` on Arrow table/stream reads.
 * `ODBC_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
 `ODBC_BATCH_SIZE * ODBC_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. If a workload needs very large text, binary, or LOB cells, lower `ODBC_BATCH_SIZE` when raising `ODBC_MAX_STR_LEN`.
 
-For URL-style generic ODBC, `max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` override the matching environment variables for that source instance and are not passed through to the ODBC driver.
+For URL-style generic ODBC, `max_connections=N`, `login_timeout_secs=N`, `query_timeout_secs=N`, and `lob_strategy=bounded|piecewise` override the matching environment variables for that source instance and are not passed through to the ODBC driver.
 
 To collect a generic ODBC performance baseline against the PostgreSQL testcontainer fixture:
 

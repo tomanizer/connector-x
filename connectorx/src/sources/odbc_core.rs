@@ -19,8 +19,8 @@ use odbc_api::handles::StatementConnection;
 use odbc_api::sys::{Date, Time, Timestamp};
 use odbc_api::{
     buffers::{AnySlice, BufferDesc, ColumnarAnyBuffer, Indicator, TextRowSet},
-    environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl, DataType,
-    Environment, Nullability, ResultSetMetadata,
+    environment, Bit, BlockCursor, Connection, ConnectionOptions, Cursor, CursorImpl, CursorRow,
+    DataType, Environment, Nullability, Nullable, ResultSetMetadata,
 };
 use rust_decimal::{Decimal, Error as DecimalParseError};
 use sqlparser::dialect::{Dialect, GenericDialect, MsSqlDialect};
@@ -45,6 +45,25 @@ pub(crate) type OdbcBlockCursor = BlockCursor<OdbcCursor, ColumnarAnyBuffer>;
 pub(crate) const MAX_BATCH_SIZE: usize = 65_536;
 pub(crate) const MAX_STR_LEN: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_VARIABLE_COLUMN_BUFFER_BYTES: usize = 256 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OdbcLobStrategy {
+    #[default]
+    Bounded,
+    Piecewise,
+}
+
+impl OdbcLobStrategy {
+    pub(crate) fn parse(value: &str) -> Result<Self, anyhow::Error> {
+        match value.to_ascii_lowercase().as_str() {
+            "bounded" | "buffered" | "off" | "false" | "0" => Ok(Self::Bounded),
+            "piecewise" | "sqlgetdata" | "on" | "true" | "1" => Ok(Self::Piecewise),
+            _ => Err(anyhow!(
+                "lob_strategy must be either 'bounded' or 'piecewise'"
+            )),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct OdbcConnectionLimiter {
@@ -947,7 +966,7 @@ fn column_description(
 // Primitive columns are copied compactly once per batch. Text, wide text, and
 // binary values are owned only in their source column until the destination
 // builder requests a `String` or `Vec<u8>`.
-enum OdbcColumn {
+pub(crate) enum OdbcColumn {
     Bytes(Vec<Option<Vec<u8>>>),
     U8(Vec<u8>),
     I8(Vec<i8>),
@@ -1630,6 +1649,45 @@ where
     T: OdbcTypePolicy,
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
+    let metadata = fetch_metadata_with_data_types(
+        source_name,
+        conn,
+        query,
+        default_max_len,
+        connection_limiter,
+        execution_options,
+        pre_execution_queries,
+        map_type,
+    )?;
+    Ok((
+        metadata.names,
+        metadata.schema,
+        metadata.column_buffer_max_lens,
+    ))
+}
+
+pub(crate) struct OdbcMetadata<T> {
+    pub(crate) names: Vec<String>,
+    pub(crate) schema: Vec<T>,
+    pub(crate) column_buffer_max_lens: Vec<usize>,
+    pub(crate) data_types: Vec<DataType>,
+}
+
+pub(crate) fn fetch_metadata_with_data_types<T, E, F>(
+    source_name: &'static str,
+    conn: &str,
+    query: &str,
+    default_max_len: usize,
+    connection_limiter: &Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
+    map_type: F,
+) -> Result<OdbcMetadata<T>, E>
+where
+    E: OdbcCoreError,
+    T: OdbcTypePolicy,
+    F: Fn(DataType, Nullability, &str) -> Result<T, E>,
+{
     let _connection_permit = connection_limiter.acquire();
     let mut cursor = execute_query_with_pre_execution::<E>(
         source_name,
@@ -1652,6 +1710,7 @@ where
     let mut names = Vec::with_capacity(ncols as usize);
     let mut schema = Vec::with_capacity(ncols as usize);
     let mut buffer_max_lens = Vec::with_capacity(ncols as usize);
+    let mut data_types = Vec::with_capacity(ncols as usize);
     for col in 1..=ncols {
         let column_name = cursor.col_name(col)?;
         let data_type = cursor.col_data_type(col)?;
@@ -1660,9 +1719,15 @@ where
         buffer_max_lens.push(ty.buffer_max_len(data_type, default_max_len));
         schema.push(ty);
         names.push(column_name);
+        data_types.push(data_type);
     }
 
-    Ok((names, schema, buffer_max_lens))
+    Ok(OdbcMetadata {
+        names,
+        schema,
+        column_buffer_max_lens: buffer_max_lens,
+        data_types,
+    })
 }
 
 pub(crate) fn fetch_count<E, D>(
@@ -2165,6 +2230,28 @@ pub(crate) fn env_bool(name: &str) -> Option<bool> {
     }
 }
 
+pub(crate) fn env_lob_strategy(name: &str) -> Option<OdbcLobStrategy> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| OdbcLobStrategy::parse(&value).ok())
+}
+
+pub(crate) fn lob_strategy_from_params(
+    params: Option<&[(String, String)]>,
+    default: OdbcLobStrategy,
+) -> Result<OdbcLobStrategy, anyhow::Error> {
+    params
+        .and_then(|params| {
+            crate::sources::odbc_common::param_value(
+                params,
+                crate::sources::odbc_common::LOB_STRATEGY_PARAM,
+            )
+        })
+        .map(OdbcLobStrategy::parse)
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
 pub(crate) fn unknown_odbc_type_error(
     source_name: &'static str,
     fallback_env: &'static str,
@@ -2307,6 +2394,17 @@ mod tests {
             _col_index: usize,
             _column_name: Option<&str>,
             _replace_invalid_utf16: bool,
+            _replace_invalid_utf8: bool,
+        ) -> Result<ArrayRef, E> {
+            unreachable!("stream lifecycle tests do not build arrays")
+        }
+
+        fn build_arrow_array_from_owned<E: OdbcCoreError>(
+            self,
+            _column: &OdbcColumn,
+            _nrows: usize,
+            _col_index: usize,
+            _column_name: Option<&str>,
             _replace_invalid_utf8: bool,
         ) -> Result<ArrayRef, E> {
             unreachable!("stream lifecycle tests do not build arrays")
@@ -2538,6 +2636,7 @@ mod tests {
             names: Arc::from(Vec::<String>::new().into_boxed_slice()),
             schema: Arc::from(Vec::<TestType>::new().into_boxed_slice()),
             column_buffer_max_lens: Arc::from(Vec::<usize>::new().into_boxed_slice()),
+            use_piecewise_lobs: false,
             batch_size: 1,
             connection_limiter: OdbcConnectionLimiter::new(1),
             execution_options: OdbcExecutionOptions::default(),
@@ -2915,6 +3014,49 @@ mod tests {
             ),
             1024
         );
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn piecewise_lob_strategy_only_selects_long_or_unknown_variable_columns() {
+        assert!(!uses_piecewise_lobs(
+            OdbcLobStrategy::Bounded,
+            &[TestType::Text],
+            &[DataType::LongVarchar { length: None }],
+            4,
+        ));
+        assert!(uses_piecewise_lobs(
+            OdbcLobStrategy::Piecewise,
+            &[TestType::Text],
+            &[DataType::LongVarchar { length: None }],
+            4,
+        ));
+        assert!(uses_piecewise_lobs(
+            OdbcLobStrategy::Piecewise,
+            &[TestType::Binary],
+            &[DataType::LongVarbinary {
+                length: std::num::NonZeroUsize::new(128),
+            }],
+            4,
+        ));
+        assert!(!uses_piecewise_lobs(
+            OdbcLobStrategy::Piecewise,
+            &[TestType::Text],
+            &[DataType::Varchar {
+                length: std::num::NonZeroUsize::new(128),
+            }],
+            4,
+        ));
+        assert!(uses_piecewise_lobs(
+            OdbcLobStrategy::Piecewise,
+            &[TestType::Binary],
+            &[DataType::Other {
+                data_type: odbc_api::sys::SqlDataType(-98),
+                column_size: None,
+                decimal_digits: 0,
+            }],
+            4,
+        ));
     }
 
     #[test]
@@ -3381,6 +3523,14 @@ pub(crate) trait OdbcArrowPolicy: OdbcTypePolicy {
         replace_invalid_utf16: bool,
         replace_invalid_utf8: bool,
     ) -> Result<ArrayRef, E>;
+    fn build_arrow_array_from_owned<E: OdbcCoreError>(
+        self,
+        column: &OdbcColumn,
+        nrows: usize,
+        col_index: usize,
+        column_name: Option<&str>,
+        replace_invalid_utf8: bool,
+    ) -> Result<ArrayRef, E>;
 }
 
 // --- helper functions used by the generic array builders ------------------
@@ -3468,6 +3618,19 @@ fn append_decimal_value<E: OdbcCoreError>(
 macro_rules! append_direct_cell_arrow {
     ($E:ty, $column:expr, $row:expr, $builder:expr, $nullable:expr, $ty:literal, $parse:expr) => {
         match odbc_cell_from_column($column, $row) {
+            Some(cell) => $builder.append_value(($parse)(cell)?),
+            None => {
+                require_nullable::<$E>($nullable, $ty)?;
+                $builder.append_null();
+            }
+        }
+    };
+}
+
+#[cfg(feature = "dst_arrow")]
+macro_rules! append_owned_cell_arrow {
+    ($E:ty, $column:expr, $row:expr, $builder:expr, $nullable:expr, $ty:literal, $parse:expr) => {
+        match $column.cell($row) {
             Some(cell) => $builder.append_value(($parse)(cell)?),
             None => {
                 require_nullable::<$E>($nullable, $ty)?;
@@ -4006,6 +4169,232 @@ pub(crate) fn build_timestamp_micro_array<E: OdbcCoreError>(
     Ok(Arc::new(builder.finish()))
 }
 
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_int64_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = Int64Builder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        append_owned_cell_arrow!(
+            E,
+            column,
+            row_index,
+            builder,
+            nullable,
+            "i64",
+            cell_i64::<E>
+        );
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_float32_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = Float32Builder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        append_owned_cell_arrow!(
+            E,
+            column,
+            row_index,
+            builder,
+            nullable,
+            "f32",
+            cell_f32::<E>
+        );
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_float64_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = Float64Builder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        append_owned_cell_arrow!(
+            E,
+            column,
+            row_index,
+            builder,
+            nullable,
+            "f64",
+            cell_f64::<E>
+        );
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_decimal_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+    precision: u8,
+    scale: i8,
+) -> Result<ArrayRef, E> {
+    let mut builder = Decimal128Builder::with_capacity(nrows)
+        .with_data_type(ArrowDataType::Decimal128(precision, scale));
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(OdbcValue::Bytes(bytes)) => {
+                append_decimal_value::<E>(&mut builder, bytes.as_ref(), scale)?
+            }
+            Some(cell) => {
+                append_decimal_value::<E>(&mut builder, cell.to_utf8_string().as_bytes(), scale)?
+            }
+            None => {
+                require_nullable::<E>(nullable, "Decimal")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_bool_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = BooleanBuilder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        append_owned_cell_arrow!(
+            E,
+            column,
+            row_index,
+            builder,
+            nullable,
+            "bool",
+            cell_bool::<E>
+        );
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_string_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+    source_name: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+    replace_invalid_utf8: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = LargeStringBuilder::with_capacity(nrows, nrows * 8);
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(OdbcValue::Bytes(bytes)) => builder.append_value(decode_utf8_to_string::<E>(
+                bytes.as_ref(),
+                source_name,
+                col_index,
+                column_name,
+                row_index,
+                replace_invalid_utf8,
+            )?),
+            Some(cell) => builder.append_value(cell.to_utf8_string()),
+            None => {
+                require_nullable::<E>(nullable, "String")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_binary_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = LargeBinaryBuilder::with_capacity(nrows, nrows * 8);
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(cell) => builder.append_value(cell.try_bytes().ok_or_else(|| {
+                ConnectorXError::cannot_produce::<Vec<u8>>(Some(
+                    "ODBC typed value for byte-only Vec<u8>".to_string(),
+                ))
+            })?),
+            None => {
+                require_nullable::<E>(nullable, "Vec<u8>")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_date32_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = Date32Builder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(cell) => {
+                builder.append_value(naive_date_to_arrow_i32::<E>(cell_date::<E>(cell)?)?)
+            }
+            None => {
+                require_nullable::<E>(nullable, "NaiveDate")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_time64_micro_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = Time64MicrosecondBuilder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(cell) => builder.append_value(naive_time_to_micro(cell_time::<E>(cell)?)),
+            None => {
+                require_nullable::<E>(nullable, "NaiveTime")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
+#[cfg(feature = "dst_arrow")]
+pub(crate) fn build_timestamp_micro_array_from_owned<E: OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = TimestampMicrosecondBuilder::with_capacity(nrows);
+    for row_index in 0..nrows {
+        match column.cell(row_index) {
+            Some(cell) => {
+                builder.append_value(cell_timestamp::<E>(cell)?.and_utc().timestamp_micros())
+            }
+            None => {
+                require_nullable::<E>(nullable, "NaiveDateTime")?;
+                builder.append_null();
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 // --- impl_odbc_arrow_policy! macro ----------------------------------------
 
 /// Generate an [`OdbcArrowPolicy`] implementation for a standard ODBC-like
@@ -4117,6 +4506,54 @@ macro_rules! impl_odbc_arrow_policy {
                     Self::Timestamp(..) => build_timestamp_micro_array(column, nrows, nullable),
                 }
             }
+
+            fn build_arrow_array_from_owned<E: $crate::sources::odbc_core::OdbcCoreError>(
+                self,
+                column: &$crate::sources::odbc_core::OdbcColumn,
+                nrows: usize,
+                col_index: usize,
+                column_name: Option<&str>,
+                replace_invalid_utf8: bool,
+            ) -> Result<::std::sync::Arc<dyn ::arrow::array::Array>, E> {
+                use $crate::sources::odbc_core::{
+                    build_binary_array_from_owned, build_bool_array_from_owned,
+                    build_date32_array_from_owned, build_decimal_array_from_owned,
+                    build_float32_array_from_owned, build_float64_array_from_owned,
+                    build_int64_array_from_owned, build_string_array_from_owned,
+                    build_time64_micro_array_from_owned, build_timestamp_micro_array_from_owned,
+                };
+                let nullable = $crate::sources::odbc_core::OdbcTypePolicy::nullable(self);
+                let source_name =
+                    <Self as $crate::sources::odbc_core::OdbcTypePolicy>::source_name();
+                match self {
+                    Self::TinyInt(..) | Self::SmallInt(..) | Self::Int(..) | Self::BigInt(..) => {
+                        build_int64_array_from_owned(column, nrows, nullable)
+                    }
+                    Self::Real(..) => build_float32_array_from_owned(column, nrows, nullable),
+                    Self::Double(..) => build_float64_array_from_owned(column, nrows, nullable),
+                    Self::Numeric(_, precision, scale) | Self::Decimal(_, precision, scale) => {
+                        build_decimal_array_from_owned(column, nrows, nullable, precision, scale)
+                    }
+                    Self::Bit(..) => build_bool_array_from_owned(column, nrows, nullable),
+                    Self::Char(..) | Self::Varchar(..) | Self::Text(..) => {
+                        build_string_array_from_owned(
+                            column,
+                            nrows,
+                            nullable,
+                            source_name,
+                            col_index,
+                            column_name,
+                            replace_invalid_utf8,
+                        )
+                    }
+                    Self::Binary(..) => build_binary_array_from_owned(column, nrows, nullable),
+                    Self::Date(..) => build_date32_array_from_owned(column, nrows, nullable),
+                    Self::Time(..) => build_time64_micro_array_from_owned(column, nrows, nullable),
+                    Self::Timestamp(..) => {
+                        build_timestamp_micro_array_from_owned(column, nrows, nullable)
+                    }
+                }
+            }
         }
     };
 }
@@ -4143,6 +4580,7 @@ pub(crate) fn odbc_get_arrow_impl<TS, E>(
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
     pre_execution_queries: Option<&[String]>,
+    lob_strategy: OdbcLobStrategy,
     replace_invalid_utf16: bool,
     replace_invalid_utf8: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
@@ -4154,42 +4592,75 @@ where
     let first_query = queries.first().ok_or_else(|| {
         ConnectorXError::Other(anyhow!("ODBC Arrow stream requires at least one query"))
     })?;
-    let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+    let metadata = fetch_metadata_with_data_types::<TS, E, _>(
         TS::source_name(),
         conn,
-        &first_query.to_string(),
+        first_query.as_ref(),
         max_str_len,
         &connection_limiter,
         execution_options,
         pre_execution_queries,
         map_type,
     )?;
+    let use_piecewise_lobs = uses_piecewise_lobs(
+        lob_strategy,
+        &metadata.schema,
+        &metadata.data_types,
+        max_str_len,
+    );
 
-    let (arrow_types, record_schema) = odbc_arrow_schema(&names, &schema);
+    let (arrow_types, record_schema) = odbc_arrow_schema(&metadata.names, &metadata.schema);
 
     let mut destination = ArrowDestination::new();
-    destination.allocate_with_schema(names.clone(), arrow_types, Arc::clone(&record_schema));
+    destination.allocate_with_schema(
+        metadata.names.clone(),
+        arrow_types,
+        Arc::clone(&record_schema),
+    );
 
-    let names = Arc::from(names.into_boxed_slice());
-    let schema = Arc::from(schema.into_boxed_slice());
-    let column_buffer_max_lens = Arc::from(column_buffer_max_lens.into_boxed_slice());
+    let names = Arc::from(metadata.names.into_boxed_slice());
+    let schema = Arc::from(metadata.schema.into_boxed_slice());
+    let column_buffer_max_lens = Arc::from(metadata.column_buffer_max_lens.into_boxed_slice());
 
     queries.par_iter().try_for_each(|query| {
-        arrow_fetch_partition::<TS, E>(
-            conn,
-            query.as_str(),
-            &names,
-            &schema,
-            &column_buffer_max_lens,
-            batch_size,
-            Arc::clone(&connection_limiter),
-            execution_options,
-            pre_execution_queries,
-            replace_invalid_utf16,
-            replace_invalid_utf8,
-            Arc::clone(&record_schema),
-            &destination,
-        )
+        if use_piecewise_lobs {
+            piecewise_fetch_partition::<TS, E, _, _>(
+                conn,
+                query.as_str(),
+                &names,
+                &schema,
+                batch_size,
+                Arc::clone(&connection_limiter),
+                execution_options,
+                pre_execution_queries,
+                replace_invalid_utf16,
+                replace_invalid_utf8,
+                Arc::clone(&record_schema),
+                |record_batch| {
+                    destination
+                        .push_record_batch(record_batch)
+                        .map_err(anyhow::Error::from)?;
+                    Ok(true)
+                },
+                || false,
+            )
+        } else {
+            arrow_fetch_partition::<TS, E>(
+                conn,
+                query.as_str(),
+                &names,
+                &schema,
+                &column_buffer_max_lens,
+                batch_size,
+                Arc::clone(&connection_limiter),
+                execution_options,
+                pre_execution_queries,
+                replace_invalid_utf16,
+                replace_invalid_utf8,
+                Arc::clone(&record_schema),
+                &destination,
+            )
+        }
     })?;
 
     Ok(destination)
@@ -4243,6 +4714,385 @@ where
         )?);
     }
     Ok(RecordBatch::try_new(arrow_schema, columns).map_err(anyhow::Error::from)?)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn uses_piecewise_lobs<TS>(
+    lob_strategy: OdbcLobStrategy,
+    schema: &[TS],
+    data_types: &[DataType],
+    max_str_len: usize,
+) -> bool
+where
+    TS: OdbcTypePolicy,
+{
+    lob_strategy == OdbcLobStrategy::Piecewise
+        && schema
+            .iter()
+            .zip(data_types)
+            .any(|(&ty, &data_type)| is_piecewise_lob_candidate(ty, data_type, max_str_len))
+}
+
+#[cfg(feature = "dst_arrow")]
+fn is_piecewise_lob_candidate<TS>(ty: TS, data_type: DataType, max_str_len: usize) -> bool
+where
+    TS: OdbcTypePolicy,
+{
+    match ty.buffer_desc(max_str_len) {
+        BufferDesc::Text { .. } => text_lob_exceeds_bound(data_type, max_str_len),
+        BufferDesc::WText { .. } => wide_text_lob_exceeds_bound(data_type, max_str_len),
+        BufferDesc::Binary { .. } => binary_lob_exceeds_bound(data_type, max_str_len),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn text_lob_exceeds_bound(data_type: DataType, max_str_len: usize) -> bool {
+    match data_type {
+        DataType::LongVarchar { length } | DataType::WLongVarchar { length } => {
+            optional_len_exceeds(length, 4, max_str_len)
+        }
+        DataType::Varchar { length } | DataType::WVarchar { length } => length.is_none(),
+        DataType::Other { column_size, .. } => optional_len_exceeds(column_size, 4, max_str_len),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn wide_text_lob_exceeds_bound(data_type: DataType, max_str_len: usize) -> bool {
+    match data_type {
+        DataType::LongVarchar { length } | DataType::WLongVarchar { length } => {
+            optional_len_exceeds(length, 2, max_str_len)
+        }
+        DataType::Varchar { length } | DataType::WVarchar { length } => length.is_none(),
+        DataType::Other { column_size, .. } => optional_len_exceeds(column_size, 2, max_str_len),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn binary_lob_exceeds_bound(data_type: DataType, max_str_len: usize) -> bool {
+    match data_type {
+        DataType::LongVarbinary { length } => optional_len_exceeds(length, 1, max_str_len),
+        DataType::Binary { length } | DataType::Varbinary { length } => length.is_none(),
+        DataType::Other { column_size, .. } => optional_len_exceeds(column_size, 1, max_str_len),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn optional_len_exceeds(
+    length: Option<std::num::NonZeroUsize>,
+    multiplier: usize,
+    max_str_len: usize,
+) -> bool {
+    length
+        .map(|length| length.get().saturating_mul(multiplier) > max_str_len)
+        .unwrap_or(true)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn empty_owned_columns(ncols: usize) -> Vec<OdbcColumn> {
+    (0..ncols).map(|_| OdbcColumn::Unsupported).collect()
+}
+
+#[cfg(feature = "dst_arrow")]
+fn fetch_piecewise_cell<TS, E>(
+    row: &mut CursorRow<'_>,
+    column: &mut OdbcColumn,
+    ty: TS,
+    col_index: usize,
+    column_name: Option<&str>,
+    row_index: usize,
+    replace_invalid_utf16: bool,
+) -> Result<(), E>
+where
+    TS: OdbcTypePolicy,
+    E: OdbcCoreError,
+{
+    let column_number = u16::try_from(col_index + 1).map_err(|_| {
+        anyhow!(
+            "ODBC column index {} exceeds SQLGetData limit",
+            col_index + 1
+        )
+    })?;
+    match ty.buffer_desc(1) {
+        BufferDesc::Text { .. } => {
+            let mut value = Vec::new();
+            push_piecewise_bytes::<E>(
+                column,
+                row.get_text(column_number, &mut value)?,
+                value,
+                TS::source_name(),
+                TS::max_str_len_env(),
+                col_index,
+                column_name,
+            )
+        }
+        BufferDesc::WText { .. } => {
+            let mut chars = Vec::new();
+            if row.get_wide_text(column_number, &mut chars)? {
+                let mut bytes = Vec::with_capacity(chars.len().saturating_mul(2));
+                decode_utf16_to_utf8::<E>(
+                    &chars,
+                    &mut bytes,
+                    TS::source_name(),
+                    col_index,
+                    column_name,
+                    row_index,
+                    replace_invalid_utf16,
+                )?;
+                push_piecewise_bytes::<E>(
+                    column,
+                    true,
+                    bytes,
+                    TS::source_name(),
+                    TS::max_str_len_env(),
+                    col_index,
+                    column_name,
+                )
+            } else {
+                push_piecewise_bytes::<E>(
+                    column,
+                    false,
+                    Vec::new(),
+                    TS::source_name(),
+                    TS::max_str_len_env(),
+                    col_index,
+                    column_name,
+                )
+            }
+        }
+        BufferDesc::Binary { .. } => {
+            let mut value = Vec::new();
+            push_piecewise_bytes::<E>(
+                column,
+                row.get_binary(column_number, &mut value)?,
+                value,
+                TS::source_name(),
+                TS::max_str_len_env(),
+                col_index,
+                column_name,
+            )
+        }
+        BufferDesc::U8 { .. } => {
+            let mut value = Nullable::<u8>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_u8().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::I8 { .. } => {
+            let mut value = Nullable::<i8>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_i8().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::I16 { .. } => {
+            let mut value = Nullable::<i16>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_i16().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::I32 { .. } => {
+            let mut value = Nullable::<i32>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_i32().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::I64 { .. } => {
+            let mut value = Nullable::<i64>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_i64().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::F32 { .. } => {
+            let mut value = Nullable::<f32>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_f32().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::F64 { .. } => {
+            let mut value = Nullable::<f64>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_f64().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::Bit { .. } => {
+            let mut value = Nullable::<Bit>::null();
+            row.get_data(column_number, &mut value)?;
+            column
+                .ensure_nullable_bool()
+                .push(value.into_opt().map(bit_to_bool));
+            Ok(())
+        }
+        BufferDesc::Date { .. } => {
+            let mut value = Nullable::<Date>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_date().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::Time { .. } => {
+            let mut value = Nullable::<Time>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_time().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::Timestamp { .. } => {
+            let mut value = Nullable::<Timestamp>::null();
+            row.get_data(column_number, &mut value)?;
+            column.ensure_nullable_timestamp().push(value.into_opt());
+            Ok(())
+        }
+        BufferDesc::Numeric => {
+            Err(anyhow!("ODBC piecewise LOB strategy does not support numeric row buffers").into())
+        }
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn push_piecewise_bytes<E>(
+    column: &mut OdbcColumn,
+    is_not_null: bool,
+    bytes: Vec<u8>,
+    source_name: &'static str,
+    max_str_len_env: &'static str,
+    col_index: usize,
+    column_name: Option<&str>,
+) -> Result<(), E>
+where
+    E: OdbcCoreError,
+{
+    let values = column.ensure_bytes();
+    if is_not_null {
+        if bytes.len() > MAX_STR_LEN {
+            let column = column_description(col_index, column_name, None::<()>);
+            return Err(anyhow!(
+                "{source_name} {column} exceeded the piecewise LOB hard limit \
+                 ({actual} bytes fetched, {limit} byte limit); cast/substr the \
+                 column in the query or reduce the selected value. {max_str_len_env} \
+                 controls the bounded-buffer path only.",
+                actual = bytes.len(),
+                limit = MAX_STR_LEN
+            )
+            .into());
+        }
+        values.push(Some(bytes));
+    } else {
+        values.push(None);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "dst_arrow")]
+fn build_owned_record_batch<TS, E>(
+    columns: &[OdbcColumn],
+    names: &[String],
+    schema: &[TS],
+    nrows: usize,
+    replace_invalid_utf8: bool,
+    arrow_schema: Arc<Schema>,
+) -> Result<RecordBatch, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+{
+    let mut arrays = Vec::with_capacity(columns.len());
+    for (col_index, column) in columns.iter().enumerate() {
+        arrays.push(schema[col_index].build_arrow_array_from_owned::<E>(
+            column,
+            nrows,
+            col_index,
+            names.get(col_index).map(String::as_str),
+            replace_invalid_utf8,
+        )?);
+    }
+    Ok(RecordBatch::try_new(arrow_schema, arrays).map_err(anyhow::Error::from)?)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn piecewise_fetch_partition<TS, E, Emit, Cancel>(
+    conn: &str,
+    query: &str,
+    names: &[String],
+    schema: &[TS],
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
+    replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
+    arrow_schema: Arc<Schema>,
+    mut emit_batch: Emit,
+    should_cancel: Cancel,
+) -> Result<(), E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+    Emit: FnMut(RecordBatch) -> Result<bool, E>,
+    Cancel: Fn() -> bool,
+{
+    if should_cancel() {
+        return Ok(());
+    }
+
+    let _connection_permit = connection_limiter.acquire();
+    let mut cursor = execute_query_with_pre_execution::<E>(
+        TS::source_name(),
+        conn,
+        query,
+        execution_options,
+        pre_execution_queries,
+    )?;
+    let mut columns = empty_owned_columns(schema.len());
+    let mut nrows = 0usize;
+
+    while !should_cancel() {
+        let Some(mut row) = cursor.next_row()? else {
+            break;
+        };
+        for (col_index, (&ty, column)) in schema.iter().zip(&mut columns).enumerate() {
+            fetch_piecewise_cell::<TS, E>(
+                &mut row,
+                column,
+                ty,
+                col_index,
+                names.get(col_index).map(String::as_str),
+                nrows,
+                replace_invalid_utf16,
+            )?;
+        }
+        nrows += 1;
+
+        if nrows >= batch_size {
+            let record_batch = build_owned_record_batch::<TS, E>(
+                &columns,
+                names,
+                schema,
+                nrows,
+                replace_invalid_utf8,
+                Arc::clone(&arrow_schema),
+            )?;
+            if !emit_batch(record_batch)? {
+                return Ok(());
+            }
+            columns = empty_owned_columns(schema.len());
+            nrows = 0;
+        }
+    }
+
+    if nrows > 0 && !should_cancel() {
+        let record_batch = build_owned_record_batch::<TS, E>(
+            &columns,
+            names,
+            schema,
+            nrows,
+            replace_invalid_utf8,
+            arrow_schema,
+        )?;
+        let _ = emit_batch(record_batch)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -4306,6 +5156,7 @@ struct OdbcRecordBatchStreamPlan<TS, E> {
     names: Arc<[String]>,
     schema: Arc<[TS]>,
     column_buffer_max_lens: Arc<[usize]>,
+    use_piecewise_lobs: bool,
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
@@ -4400,6 +5251,7 @@ where
                     &plan.names,
                     &plan.schema,
                     &plan.column_buffer_max_lens,
+                    plan.use_piecewise_lobs,
                     plan.batch_size,
                     Arc::clone(&plan.connection_limiter),
                     plan.execution_options,
@@ -4464,6 +5316,7 @@ pub(crate) fn odbc_record_batch_iter_impl<TS, E>(
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
     pre_execution_queries: Option<&[String]>,
+    lob_strategy: OdbcLobStrategy,
     replace_invalid_utf16: bool,
     replace_invalid_utf8: bool,
     map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
@@ -4472,17 +5325,23 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
     E: OdbcCoreError + Send + 'static,
 {
-    let (names, schema, column_buffer_max_lens) = fetch_metadata::<TS, E, _>(
+    let metadata = fetch_metadata_with_data_types::<TS, E, _>(
         TS::source_name(),
         conn,
-        &queries[0].to_string(),
+        queries[0].as_ref(),
         max_str_len,
         &connection_limiter,
         execution_options,
         pre_execution_queries,
         map_type,
     )?;
-    let (_, record_schema) = odbc_arrow_schema(&names, &schema);
+    let use_piecewise_lobs = uses_piecewise_lobs(
+        lob_strategy,
+        &metadata.schema,
+        &metadata.data_types,
+        max_str_len,
+    );
+    let (_, record_schema) = odbc_arrow_schema(&metadata.names, &metadata.schema);
     let cancelled = Arc::new(AtomicBool::new(false));
 
     let plan = OdbcRecordBatchStreamPlan {
@@ -4492,9 +5351,10 @@ where
             .map(|query| query.as_str().to_string())
             .collect(),
         cancelled,
-        names: Arc::from(names.clone().into_boxed_slice()),
-        schema: Arc::from(schema.into_boxed_slice()),
-        column_buffer_max_lens: Arc::from(column_buffer_max_lens.into_boxed_slice()),
+        names: Arc::from(metadata.names.clone().into_boxed_slice()),
+        schema: Arc::from(metadata.schema.into_boxed_slice()),
+        column_buffer_max_lens: Arc::from(metadata.column_buffer_max_lens.into_boxed_slice()),
+        use_piecewise_lobs,
         batch_size,
         stream_queue_capacity: stream_queue_capacity(
             connection_limiter.max_connections,
@@ -4511,7 +5371,11 @@ where
         _marker: PhantomData,
     };
 
-    Ok(OdbcRecordBatchIterator::new(names, record_schema, plan))
+    Ok(OdbcRecordBatchIterator::new(
+        metadata.names,
+        record_schema,
+        plan,
+    ))
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -4521,6 +5385,7 @@ fn arrow_stream_fetch_partition<TS, E>(
     names: &[String],
     schema: &[TS],
     column_buffer_max_lens: &[usize],
+    use_piecewise_lobs: bool,
     batch_size: usize,
     connection_limiter: Arc<OdbcConnectionLimiter>,
     execution_options: OdbcExecutionOptions,
@@ -4537,6 +5402,23 @@ where
 {
     if cancelled.load(Ordering::Acquire) {
         return Ok(());
+    }
+    if use_piecewise_lobs {
+        return piecewise_fetch_partition::<TS, E, _, _>(
+            conn,
+            query,
+            names,
+            schema,
+            batch_size,
+            connection_limiter,
+            execution_options,
+            Some(pre_execution_queries),
+            replace_invalid_utf16,
+            replace_invalid_utf8,
+            arrow_schema,
+            |record_batch| Ok(send_stream_message(&sender, &cancelled, Ok(record_batch))),
+            || cancelled.load(Ordering::Acquire),
+        );
     }
     let _connection_permit = connection_limiter.acquire();
     let cursor = execute_query_with_pre_execution::<E>(

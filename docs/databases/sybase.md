@@ -32,18 +32,22 @@ conn = ConnectionUrl(
     server="127.0.0.1",
     port=5000,
     database="tempdb",
-    database_options={"driver": "FreeTDS", "tds_version": "5.0"},
+    database_options={
+        "driver": "FreeTDS",
+        "tds_version": "5.0",
+        "lob_strategy": "piecewise",
+    },
 )
 ```
 
-`tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS.
+`tds_version` defaults to `5.0`, which is the usual value for Sybase ASE through FreeTDS. Omit `lob_strategy` to use the default bounded buffer path.
 Generated ODBC values are brace-escaped, including `}` characters. Raw ODBC connection strings starting with `Driver=`, `DSN=`, `FileDSN=`, or `Database=` are passed through unchanged.
 
 `replace_invalid_utf16=true` and `replace_invalid_utf8=true` are ConnectorX-only URL options. They are not passed to the Sybase ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers and invalid UTF-8 returned through narrow text buffers; use these options only when you explicitly want invalid sequences replaced with U+FFFD.
 
-`max_connections=N`, `login_timeout_secs=N`, and `query_timeout_secs=N` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
+`max_connections=N`, `login_timeout_secs=N`, `query_timeout_secs=N`, and `lob_strategy=bounded|piecewise` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
-Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, and `query_timeout_secs`; other non-duplicate parameters are passed through to the Sybase ODBC driver connection string.
+Sybase URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Sybase URL parameters are `driver`, `tds_version`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, and `lob_strategy`; other non-duplicate parameters are passed through to the Sybase ODBC driver connection string.
 
 ## Dedicated Versus Generic ODBC Route
 
@@ -138,11 +142,11 @@ The ODBC path currently maps these Sybase/ASE types:
 
 `char`, `varchar`, and `text` map to Arrow `LargeUtf8`. Sybase Unicode types reported through ODBC wide-character metadata, including `unichar` and `univarchar`, also map to Arrow `LargeUtf8`. If a driver reports `nchar` or `nvarchar` as ODBC `WCHAR`/`WVARCHAR`, ConnectorX applies the same mapping; SAP ASE deployments should verify whether those names are supported aliases for the configured server and driver.
 
-`unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output. The Sybase live tests cover `unitext` through an explicit `convert(univarchar(...), unitext_column)` projection.
+`unitext` may be reported by FreeTDS as binary UCS-2 bytes. Cast it to `varchar` or `univarchar` in the query if you need text output. The Sybase live tests cover `unitext` through an explicit `convert(univarchar(...), unitext_column)` projection. When a driver reports `text`, `unitext`, or long Unicode values as long or unknown-size text metadata, `lob_strategy=piecewise` can fetch the selected Arrow table/stream query with `SQLGetData` instead of the bounded text buffer.
 
 Sybase `timestamp` is a rowversion-like binary value, not a wall-clock timestamp. When the ODBC driver reports it as `binary` or `varbinary`, ConnectorX returns `LargeBinary`. Cast it explicitly in the query if your driver exposes a non-standard representation and you need a different output type.
 
-Sybase `binary`, `varbinary`, `image`, and rowversion-like `timestamp` values map to Arrow `LargeBinary`. FreeTDS commonly returns binary-family values through text buffers as ASCII hex; ConnectorX hex-decodes those values before producing Arrow arrays. Drivers that expose true ODBC binary buffers are passed through as raw bytes. `image` is treated as a bounded ODBC binary value, so very large values are still subject to the configured `SYBASE_MAX_STR_LEN` buffer limit and truncation checks.
+Sybase `binary`, `varbinary`, `image`, and rowversion-like `timestamp` values map to Arrow `LargeBinary`. FreeTDS commonly returns binary-family values through text buffers as ASCII hex; ConnectorX hex-decodes those values before producing Arrow arrays on the default bounded path. Drivers that expose true ODBC binary buffers are passed through as raw bytes. `image` uses the bounded binary buffer by default. When the driver reports `image` or another binary family as long or unknown-size binary metadata, `lob_strategy=piecewise` or `SYBASE_LOB_STRATEGY=piecewise` fetches it with `SQLGetData` on Arrow table/stream reads. Validate SAP ASE and FreeTDS binary LOB behavior against the target driver because `SQLGetData` may return raw binary where the bounded FreeTDS path returned text-compatible hex.
 
 FreeTDS reports ASE `time` and `bigtime` through the SQL Server `TIME2` extension on common ASE 16 configurations; ConnectorX maps that metadata to Arrow `Time64(Microsecond)`. `datetime`, `smalldatetime`, and `bigdatetime` map to Arrow `Timestamp(Microsecond)`, with the precision bounded by the source type and driver formatting.
 
@@ -169,9 +173,10 @@ The defaults are tuned for throughput over small memory use:
 * `SYBASE_MAX_CONNECTIONS`: maximum active Sybase ODBC connections per source instance. Defaults to the number of partition queries, with a minimum of `1`.
 * `SYBASE_LOGIN_TIMEOUT_SECS`: ODBC login timeout in seconds. Unset by default.
 * `SYBASE_QUERY_TIMEOUT_SECS`: ODBC statement timeout in seconds. Unset by default.
+* `SYBASE_LOB_STRATEGY`: `bounded` by default. Set to `piecewise` to use `SQLGetData` for detected `text`, `unitext`-cast, `image`, or other long/unknown-size text/binary columns on Arrow table/stream reads.
 * `SYBASE_TYPE_FALLBACK_TO_VARCHAR`: when `true`, map unknown or vendor-specific ODBC types to `String` instead of returning an error. Defaults to `false`.
 
-`SYBASE_BATCH_SIZE * SYBASE_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N` or `query_timeout_secs=N` on the Sybase URL for source-specific timeouts, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound; lower `SYBASE_BATCH_SIZE` when raising `SYBASE_MAX_STR_LEN` for large LOB cells.
+`SYBASE_BATCH_SIZE * SYBASE_MAX_STR_LEN` must not exceed `268435456` bytes, which caps the per-column allocation for variable-width ODBC buffers. Increase `SYBASE_BATCH_SIZE` for wide network latency or large scans. Set `max_connections=N` on the Sybase URL, or `SYBASE_MAX_CONNECTIONS`, when partition count is higher than the number of server connections you want ConnectorX to hold concurrently. Set `login_timeout_secs=N`, `query_timeout_secs=N`, or `lob_strategy=piecewise` on the Sybase URL for source-specific behavior, or use the matching environment variables as defaults. Increase `SYBASE_MAX_STR_LEN` only when selected character, decimal, date/time, or binary columns can exceed the default bound; lower `SYBASE_BATCH_SIZE` when raising `SYBASE_MAX_STR_LEN` for large LOB cells. The piecewise path still has a 64 MiB per-cell hard limit and is slower for affected queries because it switches that query from columnar block fetches to row-wise `SQLGetData`.
 If the ODBC driver reports truncation for a text-compatible value, ConnectorX returns an error instead of returning partial data.
 Arrow stream reads use the shared ODBC bounded producer queue documented in `docs/databases/odbc.md`; tune `SYBASE_BATCH_SIZE` and `SYBASE_MAX_CONNECTIONS` together to control throughput and stream memory.
 

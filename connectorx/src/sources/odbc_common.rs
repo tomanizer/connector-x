@@ -8,6 +8,7 @@ pub(crate) const REPLACE_INVALID_UTF8_PARAM: &str = "replace_invalid_utf8";
 pub(crate) const MAX_CONNECTIONS_PARAM: &str = "max_connections";
 pub(crate) const LOGIN_TIMEOUT_SECS_PARAM: &str = "login_timeout_secs";
 pub(crate) const QUERY_TIMEOUT_SECS_PARAM: &str = "query_timeout_secs";
+pub(crate) const LOB_STRATEGY_PARAM: &str = "lob_strategy";
 
 pub(crate) fn is_raw_odbc_conn_string(conn: &str) -> bool {
     let lower = conn.trim_start().to_ascii_lowercase();
@@ -24,6 +25,7 @@ pub(crate) fn is_connector_option_key(key: &str) -> bool {
         || key.eq_ignore_ascii_case(MAX_CONNECTIONS_PARAM)
         || key.eq_ignore_ascii_case(LOGIN_TIMEOUT_SECS_PARAM)
         || key.eq_ignore_ascii_case(QUERY_TIMEOUT_SECS_PARAM)
+        || key.eq_ignore_ascii_case(LOB_STRATEGY_PARAM)
 }
 
 pub(crate) fn connection_query_pairs(conn: &str) -> Result<Option<Vec<(String, String)>>> {
