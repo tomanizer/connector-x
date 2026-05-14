@@ -5,6 +5,7 @@ mod typesystem;
 
 pub use self::errors::OdbcSourceError;
 pub use self::typesystem::OdbcTypeSystem;
+pub use crate::sources::odbc_core::OdbcLobStrategy;
 
 use self::typesystem::ODBC_UNKNOWN_TYPE_FALLBACK_ENV;
 #[cfg(feature = "dst_arrow")]
@@ -44,6 +45,7 @@ pub struct OdbcOptions {
     pub max_connections: Option<usize>,
     pub login_timeout_secs: Option<u32>,
     pub query_timeout_secs: Option<usize>,
+    pub lob_strategy: OdbcLobStrategy,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
     pub replace_invalid_utf8: bool,
@@ -58,6 +60,7 @@ impl OdbcOptions {
             max_connections: odbc_core::env_usize("ODBC_MAX_CONNECTIONS"),
             login_timeout_secs: odbc_core::env_u32("ODBC_LOGIN_TIMEOUT_SECS"),
             query_timeout_secs: odbc_core::env_usize("ODBC_QUERY_TIMEOUT_SECS"),
+            lob_strategy: odbc_core::env_lob_strategy("ODBC_LOB_STRATEGY").unwrap_or_default(),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(ODBC_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
@@ -86,6 +89,7 @@ impl Default for OdbcOptions {
             max_connections: None,
             login_timeout_secs: None,
             query_timeout_secs: None,
+            lob_strategy: OdbcLobStrategy::Bounded,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
             replace_invalid_utf8: false,
@@ -203,6 +207,7 @@ pub(crate) fn odbc_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let runtime_options =
         odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
+    let lob_strategy = odbc_core::lob_strategy_from_params(Some(&params), options.lob_strategy)?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         OdbcTypeSystem,
         OdbcSourceError,
@@ -215,6 +220,7 @@ pub(crate) fn odbc_get_arrow(
         runtime_options.connection_limiter,
         runtime_options.execution_options,
         pre_execution_queries,
+        lob_strategy,
         runtime_options.replace_invalid_utf16,
         runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
@@ -250,6 +256,7 @@ pub(crate) fn odbc_record_batch_iter(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let runtime_options =
         odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
+    let lob_strategy = odbc_core::lob_strategy_from_params(Some(&params), options.lob_strategy)?;
     let iterator = odbc_core::odbc_record_batch_iter_impl::<OdbcTypeSystem, OdbcSourceError>(
         &conn_str,
         origin_query,
@@ -259,6 +266,7 @@ pub(crate) fn odbc_record_batch_iter(
         runtime_options.connection_limiter,
         runtime_options.execution_options,
         pre_execution_queries,
+        lob_strategy,
         runtime_options.replace_invalid_utf16,
         runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
@@ -561,6 +569,7 @@ mod tests {
                 max_connections: Some(1),
                 login_timeout_secs: Some(5),
                 query_timeout_secs: Some(30),
+                lob_strategy: OdbcLobStrategy::Piecewise,
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
                 replace_invalid_utf8: true,
@@ -576,6 +585,7 @@ mod tests {
                 max_connections: Some(4),
                 login_timeout_secs: None,
                 query_timeout_secs: None,
+                lob_strategy: OdbcLobStrategy::Bounded,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
                 replace_invalid_utf8: false,
@@ -613,6 +623,7 @@ mod tests {
                 max_connections: None,
                 login_timeout_secs: None,
                 query_timeout_secs: None,
+                lob_strategy: OdbcLobStrategy::Bounded,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
                 replace_invalid_utf8: false,

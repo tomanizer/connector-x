@@ -5,6 +5,7 @@ mod typesystem;
 
 pub use self::errors::SybaseSourceError;
 pub use self::typesystem::SybaseTypeSystem;
+pub use crate::sources::odbc_core::OdbcLobStrategy;
 
 use self::typesystem::SYBASE_UNKNOWN_TYPE_FALLBACK_ENV;
 #[cfg(feature = "dst_arrow")]
@@ -46,6 +47,7 @@ pub struct SybaseOptions {
     pub max_connections: Option<usize>,
     pub login_timeout_secs: Option<u32>,
     pub query_timeout_secs: Option<usize>,
+    pub lob_strategy: OdbcLobStrategy,
     pub unknown_type_fallback_to_varchar: bool,
     pub replace_invalid_utf16: bool,
     pub replace_invalid_utf8: bool,
@@ -61,6 +63,7 @@ impl SybaseOptions {
             max_connections: odbc_core::env_usize("SYBASE_MAX_CONNECTIONS"),
             login_timeout_secs: odbc_core::env_u32("SYBASE_LOGIN_TIMEOUT_SECS"),
             query_timeout_secs: odbc_core::env_usize("SYBASE_QUERY_TIMEOUT_SECS"),
+            lob_strategy: odbc_core::env_lob_strategy("SYBASE_LOB_STRATEGY").unwrap_or_default(),
             unknown_type_fallback_to_varchar: odbc_core::env_bool(SYBASE_UNKNOWN_TYPE_FALLBACK_ENV)
                 .unwrap_or(false),
             replace_invalid_utf16: false,
@@ -89,6 +92,7 @@ impl Default for SybaseOptions {
             max_connections: None,
             login_timeout_secs: None,
             query_timeout_secs: None,
+            lob_strategy: OdbcLobStrategy::Bounded,
             unknown_type_fallback_to_varchar: false,
             replace_invalid_utf16: false,
             replace_invalid_utf8: false,
@@ -402,9 +406,14 @@ use {
     crate::{
         destinations::arrow::ArrowTypeSystem,
         sources::odbc_core::{
-            build_bool_array, build_date32_array, build_decimal_array, build_float32_array,
-            build_float64_array, build_int64_array, build_string_array, build_time64_micro_array,
-            build_timestamp_micro_array, require_nullable, OdbcArrowPolicy,
+            build_binary_array_from_owned, build_bool_array, build_bool_array_from_owned,
+            build_date32_array, build_date32_array_from_owned, build_decimal_array,
+            build_decimal_array_from_owned, build_float32_array, build_float32_array_from_owned,
+            build_float64_array, build_float64_array_from_owned, build_int64_array,
+            build_int64_array_from_owned, build_string_array, build_string_array_from_owned,
+            build_time64_micro_array, build_time64_micro_array_from_owned,
+            build_timestamp_micro_array, build_timestamp_micro_array_from_owned, require_nullable,
+            OdbcArrowPolicy, OdbcColumn,
         },
     },
     arrow::array::{ArrayRef, LargeBinaryBuilder},
@@ -447,6 +456,7 @@ pub(crate) fn sybase_get_arrow(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let runtime_options =
         odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
+    let lob_strategy = odbc_core::lob_strategy_from_params(Some(&params), options.lob_strategy)?;
     Ok(odbc_core::odbc_get_arrow_impl::<
         SybaseTypeSystem,
         SybaseSourceError,
@@ -459,6 +469,7 @@ pub(crate) fn sybase_get_arrow(
         runtime_options.connection_limiter,
         runtime_options.execution_options,
         pre_execution_queries,
+        lob_strategy,
         runtime_options.replace_invalid_utf16,
         runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
@@ -494,6 +505,7 @@ pub(crate) fn sybase_record_batch_iter(
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let runtime_options =
         odbc_core::resolve_runtime_options(Some(&params), &options, queries.len())?;
+    let lob_strategy = odbc_core::lob_strategy_from_params(Some(&params), options.lob_strategy)?;
     let iterator = odbc_core::odbc_record_batch_iter_impl::<SybaseTypeSystem, SybaseSourceError>(
         &conn_str,
         origin_query,
@@ -503,6 +515,7 @@ pub(crate) fn sybase_record_batch_iter(
         runtime_options.connection_limiter,
         runtime_options.execution_options,
         pre_execution_queries,
+        lob_strategy,
         runtime_options.replace_invalid_utf16,
         runtime_options.replace_invalid_utf8,
         move |data_type, nullability, column_name| {
@@ -620,6 +633,49 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
             SybaseTypeSystem::Date(..) => build_date32_array(column, nrows, nullable),
             SybaseTypeSystem::Time(..) => build_time64_micro_array(column, nrows, nullable),
             SybaseTypeSystem::Timestamp(..) => build_timestamp_micro_array(column, nrows, nullable),
+        }
+    }
+
+    fn build_arrow_array_from_owned<E: odbc_core::OdbcCoreError>(
+        self,
+        column: &OdbcColumn,
+        nrows: usize,
+        col_index: usize,
+        column_name: Option<&str>,
+        replace_invalid_utf8: bool,
+    ) -> Result<ArrayRef, E> {
+        let nullable = OdbcTypePolicy::nullable(self);
+        match self {
+            SybaseTypeSystem::TinyInt(..)
+            | SybaseTypeSystem::SmallInt(..)
+            | SybaseTypeSystem::Int(..)
+            | SybaseTypeSystem::BigInt(..) => build_int64_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Real(..) => build_float32_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Double(..) => build_float64_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Numeric(_, precision, scale)
+            | SybaseTypeSystem::Decimal(_, precision, scale) => {
+                build_decimal_array_from_owned(column, nrows, nullable, precision, scale)
+            }
+            SybaseTypeSystem::Bit(..) => build_bool_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Char(..)
+            | SybaseTypeSystem::Varchar(..)
+            | SybaseTypeSystem::Text(..) => build_string_array_from_owned(
+                column,
+                nrows,
+                nullable,
+                <Self as OdbcTypePolicy>::source_name(),
+                col_index,
+                column_name,
+                replace_invalid_utf8,
+            ),
+            SybaseTypeSystem::Binary(..) => build_binary_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Date(..) => build_date32_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Time(..) => {
+                build_time64_micro_array_from_owned(column, nrows, nullable)
+            }
+            SybaseTypeSystem::Timestamp(..) => {
+                build_timestamp_micro_array_from_owned(column, nrows, nullable)
+            }
         }
     }
 }
@@ -767,6 +823,7 @@ mod tests {
                 max_connections: Some(2),
                 login_timeout_secs: Some(5),
                 query_timeout_secs: Some(30),
+                lob_strategy: OdbcLobStrategy::Piecewise,
                 unknown_type_fallback_to_varchar: true,
                 replace_invalid_utf16: true,
                 replace_invalid_utf8: true,
@@ -794,6 +851,7 @@ mod tests {
                 max_connections: None,
                 login_timeout_secs: None,
                 query_timeout_secs: None,
+                lob_strategy: OdbcLobStrategy::Bounded,
                 unknown_type_fallback_to_varchar: false,
                 replace_invalid_utf16: false,
                 replace_invalid_utf8: false,

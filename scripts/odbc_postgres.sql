@@ -56,6 +56,19 @@ values
         'short'
     );
 
+drop table if exists cx_odbc_lob;
+
+create table cx_odbc_lob (
+    id integer primary key,
+    long_text text,
+    payload bytea
+);
+
+insert into cx_odbc_lob (id, long_text, payload)
+values
+    (1, repeat('lob-text-', 32), decode(repeat('ab', 128), 'hex')),
+    (2, null, null);
+
 drop table if exists cx_odbc_perf;
 
 create table cx_odbc_perf (

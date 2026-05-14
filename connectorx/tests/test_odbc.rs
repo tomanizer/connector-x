@@ -556,6 +556,102 @@ fn test_odbc_testcontainer_arrow_stream_route() {
 }
 
 #[test]
+fn test_odbc_testcontainer_piecewise_lob_arrow_table() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC piecewise LOB table test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let _guard = lock_odbc_env();
+    let _max_len_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let _lob_guard = EnvGuard::set("ODBC_LOB_STRATEGY", "piecewise");
+    let conn = test_db::postgres_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let destination = get_arrow(
+        &source_conn,
+        None,
+        &[CXQuery::naked(
+            "select long_text, payload from cx_odbc_lob order by id",
+        )],
+        None,
+    )
+    .unwrap();
+
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let batch = batches.pop().unwrap();
+    assert_eq!(batch.num_rows(), 2);
+
+    let long_text = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .unwrap();
+    assert_eq!(long_text.value(0), "lob-text-".repeat(32));
+    assert!(long_text.is_null(1));
+
+    let payload = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    assert_eq!(payload.value(0), vec![0xab_u8; 128].as_slice());
+    assert!(payload.is_null(1));
+}
+
+#[test]
+fn test_odbc_testcontainer_piecewise_lob_arrow_stream() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_postgres_testcontainer() {
+        eprintln!(
+            "CONNECTORX_SKIP: skipping ODBC piecewise LOB stream test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        );
+        return;
+    }
+
+    let _guard = lock_odbc_env();
+    let _max_len_guard = EnvGuard::set("ODBC_MAX_STR_LEN", "4");
+    let _lob_guard = EnvGuard::set("ODBC_LOB_STRATEGY", "piecewise");
+    let conn = test_db::postgres_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked(
+        "select long_text, payload from cx_odbc_lob order by id",
+    )];
+    let mut iter = new_record_batch_iter_result(&source_conn, None, &queries, 1, None).unwrap();
+
+    let mut seen_rows = 0;
+    iter.prepare();
+    while let Some(batch) = iter.next_batch_result().unwrap() {
+        assert!(batch.num_rows() <= 1);
+        if seen_rows == 0 {
+            let long_text = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .unwrap();
+            let payload = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap();
+            assert_eq!(long_text.value(0), "lob-text-".repeat(32));
+            assert_eq!(payload.value(0), vec![0xab_u8; 128].as_slice());
+        } else {
+            assert!(batch.column(0).is_null(0));
+            assert!(batch.column(1).is_null(0));
+        }
+        seen_rows += batch.num_rows();
+    }
+
+    assert_eq!(seen_rows, 2);
+}
+
+#[test]
 fn test_odbc_testcontainer_arrow_stream_runs_pre_execution_queries() {
     let _ = env_logger::builder().is_test(true).try_init();
 
