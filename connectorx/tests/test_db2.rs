@@ -877,7 +877,8 @@ fn db2_cte_partition_edge_query() -> CXQuery<String> {
          select TRADE_ID, \"TradeId\", \"select\", TRADE_LABEL \
          from q \
          where COB_DATE = date('2026-05-08') \
-         order by TRADE_ID",
+         order by TRADE_ID \
+         fetch first 4 rows only",
     )
 }
 
