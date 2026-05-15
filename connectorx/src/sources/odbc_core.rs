@@ -4400,11 +4400,16 @@ pub(crate) fn build_timestamp_micro_array_from_owned<E: OdbcCoreError>(
 /// Generate an [`OdbcArrowPolicy`] implementation for a standard ODBC-like
 /// type system.
 ///
-/// The type system must expose the canonical variants:
+/// The default mode expects the type system to expose the canonical variants:
 /// `TinyInt`, `SmallInt`, `Int`, `BigInt`, `Real`, `Double`, `Numeric`,
 /// `Decimal`, `Bit`, `Char`, `Varchar`, `Text`, `Binary`, `Date`, `Time`,
 /// `Timestamp` — each carrying a single `bool` nullable flag, except
 /// `Numeric` and `Decimal`, which carry `(nullable, precision, scale)`.
+///
+/// The `wide_text` mode additionally expects `WChar`, `WVarchar`, and `WText`
+/// variants carrying the same nullable flag. Those variants map to Arrow
+/// strings and should be paired with `BufferDesc::WText` in the source's
+/// [`OdbcTypePolicy`] implementation.
 #[allow(unused_macros)]
 macro_rules! impl_odbc_arrow_policy {
     ($TS:ty) => {

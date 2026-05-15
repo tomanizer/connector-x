@@ -1220,6 +1220,34 @@ fn test_sybase_partition_query_wraps_union_all_inputs() {
 }
 
 #[test]
+fn test_sybase_count_query_wraps_union_all_inputs() {
+    let query = "select convert(int, 1) as id, convert(bit, 1) as flag \
+                 union all \
+                 select convert(int, 2) as id, convert(bit, 0) as flag";
+
+    let mssql_count = count_query(&CXQuery::naked(query), &MsSqlDialect {})
+        .unwrap()
+        .to_string();
+    assert!(mssql_count.contains("SELECT count(*) FROM ("));
+    assert!(mssql_count.contains("UNION ALL"));
+    assert!(mssql_count.contains("CXTMPTAB_COUNT"));
+
+    let generic_count = count_query(&CXQuery::naked(query), &GenericDialect {})
+        .unwrap()
+        .to_string();
+    assert!(generic_count.contains("SELECT count(*) FROM ("));
+    assert!(generic_count.contains("UNION ALL"));
+    assert!(generic_count.contains("CXTMPTAB_COUNT"));
+
+    let wrapped_count = count_query(&CXQuery::Wrapped(query.to_string()), &MsSqlDialect {})
+        .unwrap()
+        .to_string();
+    assert!(wrapped_count.contains("SELECT count(*) FROM ("));
+    assert!(wrapped_count.contains("UNION ALL"));
+    assert!(wrapped_count.contains("CXTMPTAB_COUNT"));
+}
+
+#[test]
 fn test_sybase_testcontainer_query_wrapping_count_range_and_partition() {
     let _ = env_logger::builder().is_test(true).try_init();
 
