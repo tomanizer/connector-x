@@ -152,7 +152,7 @@ FreeTDS reports ASE `time` and `bigtime` through the SQL Server `TIME2` extensio
 
 Sybase narrow text buffers are decoded as UTF-8 and Unicode/wide text buffers are decoded as UTF-16. Invalid sequences are errors by default and report source, column name, row index, and byte offset. Add `replace_invalid_utf8=true` or `replace_invalid_utf16=true` to the Sybase URL only for explicit replacement-character compatibility. With FreeTDS, set `charset=UTF-8` or another driver/session setting that makes narrow text UTF-8 when selecting text into Arrow strings.
 
-ASE may reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Use a typed expression such as a table column, parameter, or `case` expression when selecting nullable `bit` values.
+ASE rejects nullable `bit` columns and may also reject expressions like `convert(bit, null)` because the untyped `NULL` literal is treated as `VOID TYPE`. Select concrete `bit` values as booleans, and use a nullable integer type when a tri-state flag must preserve nulls.
 
 ConnectorX rejects unknown/vendor-specific ODBC types by default. Cast them in the query to a supported type when you need a specific output type, or set `SYBASE_TYPE_FALLBACK_TO_VARCHAR=true` to opt into the older string fallback behavior. The known FreeTDS `TIME2` extension is still mapped to time.
 
@@ -160,11 +160,11 @@ See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runti
 
 ## Query Wrapping And Partitioning
 
-Sybase count, partition-range, and partition predicates are generated with ConnectorX's T-SQL-compatible wrapping path. The live Sybase tests cover schema-qualified tables, bracketed identifiers, reserved-word columns, `top`, `order by`, nested subqueries, `convert(datetime, ...)`, and nullable partition columns. Query shapes outside that set should be validated against the target ASE server and ODBC driver before relying on partitioned extraction in production.
+Sybase count, partition-range, and partition predicates are generated with ConnectorX's T-SQL-compatible wrapping path. The live Sybase tests cover schema-qualified tables, bracketed identifiers, reserved-word columns, nested subqueries, `union all`, `convert(datetime, ...)`, and nullable partition columns. ASE rejects `ORDER BY` in derived tables, so ConnectorX only relies on order stripping for unordered partition wrappers; avoid `top` plus `order by` in partitioned Sybase source queries unless the target ASE server and ODBC driver are validated with that exact shape.
 
 ## Performance Tuning
 
-The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, and `bit` columns avoid text conversion in the hot path. Decimal, date/time, text, and binary columns still use text buffers for driver compatibility.
+The ODBC reader fetches rows in batches and binds primitive columns with typed ODBC buffers. Integer, floating-point, and `bit` columns avoid text conversion in the hot path. Decimal, date/time, narrow text, and binary columns still use text buffers for driver compatibility; Sybase `unichar`, `univarchar`, and other ODBC wide-text metadata use wide text buffers.
 
 The defaults are tuned for throughput over small memory use:
 

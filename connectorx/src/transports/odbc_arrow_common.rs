@@ -8,6 +8,7 @@ macro_rules! impl_odbc_family_arrow_transport {
         source = $source:ident,
         source_error = $source_error:ident,
         type_system = $type_system:ident
+        $(, extra_mappings = { $($extra_mapping:tt)* })?
     ) => {
         mod $module {
             use crate::destinations::$destination::{
@@ -52,6 +53,7 @@ macro_rules! impl_odbc_family_arrow_transport {
                     { Char[String]                 => LargeUtf8[String]     | conversion auto }
                     { Varchar[String]              => LargeUtf8[String]     | conversion none }
                     { Text[String]                 => LargeUtf8[String]     | conversion none }
+                    $($($extra_mapping)*)?
                     { Binary[Vec<u8>]              => LargeBinary[Vec<u8>]  | conversion none }
                     { Date[NaiveDate]              => Date32[NaiveDate]     | conversion auto }
                     { Time[NaiveTime]              => Time64Micro[NaiveTimeWrapperMicro]       | conversion option }

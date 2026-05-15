@@ -88,6 +88,30 @@ fn escape_odbc_braced_value(value: &str) -> String {
     value.replace('}', "}}")
 }
 
+#[cfg(feature = "src_sybase")]
+fn sybase_conn_with_utf8_charset(conn: &str) -> String {
+    let lower = conn.to_ascii_lowercase();
+    if lower.contains("charset=") || lower.contains("clientcharset=") {
+        conn.to_string()
+    } else if conn.ends_with(';') {
+        format!("{conn}charset=UTF-8;")
+    } else {
+        format!("{conn};charset=UTF-8;")
+    }
+}
+
+#[cfg(feature = "src_sybase")]
+fn sybase_url_with_utf8_charset(url: &str) -> String {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("charset=") || lower.contains("clientcharset=") {
+        url.to_string()
+    } else if url.contains('?') {
+        format!("{url}&charset=UTF-8")
+    } else {
+        format!("{url}?charset=UTF-8")
+    }
+}
+
 #[cfg(any(feature = "src_db2", feature = "src_sybase"))]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
@@ -372,7 +396,9 @@ pub fn sybase_odbc_url() -> String {
         );
         set_default_env("SYBASE_PARTITION_COLUMN", "id");
 
-        if env::var("SYBASE_URL").is_ok() && env::var("SYBASE_ODBC_CONN").is_ok() {
+        if let (Ok(url), Ok(conn)) = (env::var("SYBASE_URL"), env::var("SYBASE_ODBC_CONN")) {
+            env::set_var("SYBASE_URL", sybase_url_with_utf8_charset(&url));
+            env::set_var("SYBASE_ODBC_CONN", sybase_conn_with_utf8_charset(&conn));
             return;
         }
 
@@ -414,7 +440,7 @@ pub fn sybase_odbc_url() -> String {
         };
 
         let odbc_conn = format!(
-            "Driver={{{escaped_driver}}};Server={{{}}};Port={port};TDS_Version=5.0;UID=sa;PWD={{{}}};Database=tempdb;",
+            "Driver={{{escaped_driver}}};Server={{{}}};Port={port};TDS_Version=5.0;UID=sa;PWD={{{}}};Database=tempdb;charset=UTF-8;",
             escape_odbc_braced_value(host_for_url),
             escape_odbc_braced_value(&password)
         );
@@ -446,7 +472,7 @@ pub fn sybase_odbc_url() -> String {
         env::set_var(
             "SYBASE_URL",
             format!(
-                "sybase://sa:{}@{host_for_url}:{port}/tempdb?driver={}&tds_version=5.0",
+                "sybase://sa:{}@{host_for_url}:{port}/tempdb?driver={}&tds_version=5.0&charset=UTF-8",
                 urlencoding::encode(&password),
                 urlencoding::encode(&driver)
             ),

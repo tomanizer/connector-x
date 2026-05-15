@@ -8,5 +8,10 @@ impl_odbc_family_arrow_transport!(
     source_module = sybase,
     source = SybaseSource,
     source_error = SybaseSourceError,
-    type_system = SybaseTypeSystem
+    type_system = SybaseTypeSystem,
+    extra_mappings = {
+        { WChar[String]                => LargeUtf8[String]     | conversion none }
+        { WVarchar[String]             => LargeUtf8[String]     | conversion none }
+        { WText[String]                => LargeUtf8[String]     | conversion none }
+    }
 );

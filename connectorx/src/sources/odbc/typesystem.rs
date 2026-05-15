@@ -29,6 +29,9 @@ pub enum OdbcTypeSystem {
     Char(bool),
     Varchar(bool),
     Text(bool),
+    WChar(bool),
+    WVarchar(bool),
+    WText(bool),
     Binary(bool),
     Date(bool),
     Time(bool),
@@ -46,7 +49,7 @@ impl_typesystem! {
         { Double => f64 }
         { Numeric | Decimal => Decimal }
         { Bit => bool }
-        { Char | Varchar | Text => String }
+        { Char | Varchar | Text | WChar | WVarchar | WText => String }
         { Binary => Vec<u8> }
         { Date => NaiveDate }
         { Time => NaiveTime }
@@ -79,9 +82,12 @@ impl OdbcTypeSystem {
                 Decimal(nullable, decimal_precision(precision), decimal_scale(scale))
             }
             DataType::Bit => Bit(nullable),
-            DataType::Char { .. } | DataType::WChar { .. } => Char(nullable),
-            DataType::Varchar { .. } | DataType::WVarchar { .. } => Varchar(nullable),
-            DataType::LongVarchar { .. } | DataType::WLongVarchar { .. } => Text(nullable),
+            DataType::Char { .. } => Char(nullable),
+            DataType::Varchar { .. } => Varchar(nullable),
+            DataType::LongVarchar { .. } => Text(nullable),
+            DataType::WChar { .. } => WChar(nullable),
+            DataType::WVarchar { .. } => WVarchar(nullable),
+            DataType::WLongVarchar { .. } => WText(nullable),
             DataType::Binary { .. }
             | DataType::Varbinary { .. }
             | DataType::LongVarbinary { .. } => Binary(nullable),
@@ -212,6 +218,44 @@ mod tests {
             )
             .unwrap(),
             OdbcTypeSystem::Timestamp(false)
+        ));
+    }
+
+    #[test]
+    fn maps_wide_text_metadata_to_wide_text_variants() {
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::WChar {
+                    length: std::num::NonZeroUsize::new(8),
+                },
+                Nullability::NoNulls,
+                "wide_char",
+                false
+            )
+            .unwrap(),
+            OdbcTypeSystem::WChar(false)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::WVarchar {
+                    length: std::num::NonZeroUsize::new(32),
+                },
+                Nullability::Nullable,
+                "wide_varchar",
+                false
+            )
+            .unwrap(),
+            OdbcTypeSystem::WVarchar(true)
+        ));
+        assert!(matches!(
+            OdbcTypeSystem::from_odbc(
+                DataType::WLongVarchar { length: None },
+                Nullability::Nullable,
+                "wide_text",
+                false
+            )
+            .unwrap(),
+            OdbcTypeSystem::WText(true)
         ));
     }
 

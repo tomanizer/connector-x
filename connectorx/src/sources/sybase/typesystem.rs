@@ -29,6 +29,9 @@ pub enum SybaseTypeSystem {
     Char(bool),
     Varchar(bool),
     Text(bool),
+    WChar(bool),
+    WVarchar(bool),
+    WText(bool),
     Binary(bool),
     Date(bool),
     Time(bool),
@@ -46,7 +49,7 @@ impl_typesystem! {
         { Double => f64 }
         { Numeric | Decimal => Decimal }
         { Bit => bool }
-        { Char | Varchar | Text => String }
+        { Char | Varchar | Text | WChar | WVarchar | WText => String }
         { Binary => Vec<u8> }
         { Date => NaiveDate }
         { Time => NaiveTime }
@@ -79,9 +82,12 @@ impl SybaseTypeSystem {
                 Decimal(nullable, decimal_precision(precision), decimal_scale(scale))
             }
             DataType::Bit => Bit(nullable),
-            DataType::Char { .. } | DataType::WChar { .. } => Char(nullable),
-            DataType::Varchar { .. } | DataType::WVarchar { .. } => Varchar(nullable),
-            DataType::LongVarchar { .. } | DataType::WLongVarchar { .. } => Text(nullable),
+            DataType::Char { .. } => Char(nullable),
+            DataType::Varchar { .. } => Varchar(nullable),
+            DataType::LongVarchar { .. } => Text(nullable),
+            DataType::WChar { .. } => WChar(nullable),
+            DataType::WVarchar { .. } => WVarchar(nullable),
+            DataType::WLongVarchar { .. } => WText(nullable),
             DataType::Binary { .. }
             | DataType::Varbinary { .. }
             | DataType::LongVarbinary { .. } => Binary(nullable),
@@ -203,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_sybase_unicode_text_types_to_text_variants() {
+    fn maps_sybase_unicode_text_types_to_wide_text_variants() {
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
                 DataType::WChar {
@@ -214,7 +220,7 @@ mod tests {
                 false
             )
             .unwrap(),
-            SybaseTypeSystem::Char(false)
+            SybaseTypeSystem::WChar(false)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
@@ -226,7 +232,7 @@ mod tests {
                 false
             )
             .unwrap(),
-            SybaseTypeSystem::Char(true)
+            SybaseTypeSystem::WChar(true)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
@@ -238,7 +244,7 @@ mod tests {
                 false
             )
             .unwrap(),
-            SybaseTypeSystem::Varchar(true)
+            SybaseTypeSystem::WVarchar(true)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
@@ -250,7 +256,7 @@ mod tests {
                 false
             )
             .unwrap(),
-            SybaseTypeSystem::Varchar(false)
+            SybaseTypeSystem::WVarchar(false)
         ));
         assert!(matches!(
             SybaseTypeSystem::from_odbc(
@@ -260,7 +266,7 @@ mod tests {
                 false
             )
             .unwrap(),
-            SybaseTypeSystem::Text(true)
+            SybaseTypeSystem::WText(true)
         ));
     }
 
