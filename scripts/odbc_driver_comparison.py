@@ -1233,6 +1233,7 @@ def parse_args() -> argparse.Namespace:
             env("CX_DRIVER_COMPARE_PREPARE_BATCH_SIZE"),
             DEFAULT_PREPARE_BATCH_SIZE,
         ),
+        help="Rows inserted per pyodbc batch while preparing benchmark data.",
     )
     parser.add_argument(
         "--prepare-fast-executemany",

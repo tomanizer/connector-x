@@ -15,6 +15,7 @@ RUN dnf install -y \
         gcc-c++ \
         git \
         jq \
+        krb5-devel \
         libpq-devel \
         make \
         openssl-devel \
@@ -23,8 +24,6 @@ RUN dnf install -y \
         python3.11 \
         python3.11-devel \
         python3.11-pip \
-        rust \
-        cargo \
         unixODBC \
         unixODBC-devel \
     && dnf clean all \
@@ -93,10 +92,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
         | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" \
     && rustc --version \
     && cargo --version
-
-RUN dnf install -y krb5-devel \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
 
 ENV OPENSSL_NO_VENDOR=1
 

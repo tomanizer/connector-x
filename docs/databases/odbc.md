@@ -270,7 +270,7 @@ the same unixODBC ABI.
 
 Useful controls:
 
-* `CX_DRIVER_COMPARE_BACKENDS`: comma-separated `odbc`, `db2`, and/or `sybase` when `--backend` is omitted.
+* `CX_DRIVER_COMPARE_BACKENDS`: comma-separated `postgres`, `db2`, and/or `sybase` when `--backend` is omitted.
 * `CX_DRIVER_COMPARE_ITERATIONS` and `CX_DRIVER_COMPARE_WARMUPS`: measured and warmup iterations per route.
 * `CX_DRIVER_COMPARE_PARTITION_NUM`: ConnectorX partition count for partitionable cases. Defaults to `4`.
 * `CX_DRIVER_COMPARE_QUERY`, `CX_DRIVER_COMPARE_PARTITION_ON`, and `CX_DRIVER_COMPARE_PARTITION_RANGE`: run one custom query instead of the built-in edge cases.

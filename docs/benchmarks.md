@@ -75,7 +75,7 @@ just odbc-driver-comparison-container-smoke
 just odbc-driver-comparison-container
 ```
 
-The default container run prepares and reads 10,000 rows with three measured iterations and one warmup:
+The default container run prepares and reads 10,000 rows with three measured iterations and one warmup. Override those defaults for a larger run:
 
 ```bash
 CX_DRIVER_COMPARE_PREPARE_ROWS=100000 \
