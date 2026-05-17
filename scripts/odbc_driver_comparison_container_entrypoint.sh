@@ -7,7 +7,9 @@ cd "$workspace"
 export PATH="${VIRTUAL_ENV:-/opt/connectorx-bench-venv}/bin:${PATH}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$workspace/target/odbc-benchmark-runner-build}"
 export CX_DRIVER_COMPARE_OUTPUT_DIR="${CX_DRIVER_COMPARE_OUTPUT_DIR:-$workspace/target/odbc-driver-comparison-container}"
-export CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON="${CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON:-{\"max_text_size\": 4096, \"max_binary_size\": 65536}}"
+if [ -z "${CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON:-}" ]; then
+    export CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON='{"max_text_size": 4096, "max_binary_size": 65536}'
+fi
 export PYTHONPATH="$workspace/connectorx-python:${PYTHONPATH:-}"
 export DB2_CLIENT_PROFILE_PATH="${DB2_CLIENT_PROFILE_PATH:-/home/db2bench/sqllib/db2profile}"
 export DB2_CLI_DRIVER_LIB_DIR="${DB2_CLI_DRIVER_LIB_DIR:-/home/db2bench/sqllib/lib64}"
