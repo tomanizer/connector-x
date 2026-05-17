@@ -573,8 +573,9 @@ def run_route_in_child(
     partition_num: int,
     timeout_secs: int | None,
 ) -> dict[str, Any]:
-    context_name = "spawn" if sys.platform in {"darwin", "win32"} else "fork"
-    context = mp.get_context(context_name)
+    # ODBC drivers are C libraries and may not be fork-safe after prepare has
+    # initialized driver-manager state in the parent process.
+    context = mp.get_context("spawn")
     queue = context.Queue()
     process = context.Process(
         target=run_worker,
