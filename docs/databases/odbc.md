@@ -242,14 +242,40 @@ The script compares ConnectorX dedicated routes, ConnectorX generic `odbc://`, C
 
 When `scripts/odbc_arrow_compare.py` is run with `--output-json`, its output can be attached to a baseline artifact with `scripts/odbc_bench_report.py --arrow-compare-json path/to/compare.json ...`. This keeps optional `arrow-odbc`, Db2, or Sybase live comparisons alongside the no-secret PostgreSQL ODBC baseline without making proprietary credentials mandatory.
 
+For broader end-to-end comparisons against conventional Python DataFrame
+ingestion routes, use `scripts/odbc_driver_comparison.py`. It compares pandas
+over `pyodbc`, optional pandas over SQLAlchemy, Polars over `pyodbc`, Polars
+over `arrow-odbc`, ConnectorX native routes, and ConnectorX generic ODBC routes
+for PostgreSQL, Db2, and Sybase. It can also prepare a common synthetic
+benchmark table and writes raw JSON, CSV, and Markdown reports under
+`target/odbc-driver-comparison/` by default. See `docs/benchmarks.md` for the
+full workflow.
+
+When host ODBC libraries are not representative, run the same benchmark inside
+the Linux x86_64 compose runner:
+
+```bash
+just odbc-driver-comparison-container-smoke
+just odbc-driver-comparison-container
+```
+
+The runner starts PostgreSQL, Sybase ASE, and Db2 containers and executes the
+benchmark from a Linux image with unixODBC, psqlODBC, FreeTDS, and IBM's
+Db2 Community client libraries registered through `libdb2o.so`. The image
+creates a Db2 client instance with `db2icrt -s client`, then registers
+`IBM DB2 ODBC DRIVER` to `/home/db2bench/sqllib/lib64/libdb2o.so`. This avoids
+local driver-manager and library-registration problems when collecting
+conventional ODBC baselines and keeps Db2 ConnectorX, `pyodbc`, and Polars on
+the same unixODBC ABI.
+
 Useful controls:
 
-* `CX_ODBC_COMPARE_BACKENDS`: comma-separated `odbc`, `db2`, and/or `sybase` when `--backend` is omitted.
-* `CX_ODBC_COMPARE_ITERATIONS` and `CX_ODBC_COMPARE_WARMUPS`: measured and warmup iterations per route.
-* `CX_ODBC_COMPARE_PARTITION_NUM`: ConnectorX partition count for partitionable cases. Defaults to `4`.
-* `CX_ODBC_COMPARE_QUERY`, `CX_ODBC_COMPARE_PARTITION_ON`, and `CX_ODBC_COMPARE_PARTITION_RANGE`: run one custom query instead of the built-in edge cases.
-* `CX_ODBC_COMPARE_CASES_JSON`: JSON array of `{ "name", "query", "partition_on", "partition_range" }` objects for a custom workload matrix.
-* `CX_ODBC_COMPARE_ARROW_EXECUTE_OPTIONS_JSON`: JSON object passed as Polars `read_database(..., execute_options=...)` for the `arrow-odbc` route.
+* `CX_DRIVER_COMPARE_BACKENDS`: comma-separated `postgres`, `db2`, and/or `sybase` when `--backend` is omitted.
+* `CX_DRIVER_COMPARE_ITERATIONS` and `CX_DRIVER_COMPARE_WARMUPS`: measured and warmup iterations per route.
+* `CX_DRIVER_COMPARE_PARTITION_NUM`: ConnectorX partition count for partitionable cases. Defaults to `4`.
+* `CX_DRIVER_COMPARE_QUERY`, `CX_DRIVER_COMPARE_PARTITION_ON`, and `CX_DRIVER_COMPARE_PARTITION_RANGE`: run one custom query instead of the built-in edge cases.
+* `CX_DRIVER_COMPARE_CASES_JSON`: JSON array of `{ "name", "query", "partition_on", "partition_range" }` objects for a custom workload matrix.
+* `CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON`: JSON object passed as Polars `read_database(..., execute_options=...)` for the `arrow-odbc` route.
 * `DB2_GENERIC_ODBC_URL` and `SYBASE_GENERIC_ODBC_URL`: override the generic ConnectorX `odbc://` route. If omitted, the script builds an `odbc_connect` URL from the raw ODBC connection string.
 
 ## Testing

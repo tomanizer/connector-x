@@ -1,0 +1,77 @@
+name: connectorx-odbc-driver-comparison
+
+services:
+  benchmark:
+    build:
+      context: .
+      dockerfile: docker/odbc-benchmark-runner.Dockerfile
+    image: connectorx-odbc-benchmark-runner:local
+    platform: linux/amd64
+    working_dir: /workspace
+    init: true
+    depends_on:
+      - postgres
+      - sybase
+      - db2
+    environment:
+      CARGO_TARGET_DIR: /workspace/target/odbc-benchmark-runner-build
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-1}
+      CONNECTORX_BENCH_ROOT: /workspace
+      DB2_CLI_DRIVER_LIB_DIR: /home/db2bench/sqllib/lib64
+      DB2_CLIENT_PROFILE_PATH: /home/db2bench/sqllib/db2profile
+      CX_BENCH_CONTAINER_WAIT_SECS: ${CX_BENCH_CONTAINER_WAIT_SECS:-1800}
+      CX_BENCH_CONTAINER_SKIP_BUILD: ${CX_BENCH_CONTAINER_SKIP_BUILD:-0}
+      CX_BENCH_CONTAINER_MATURIN_FEATURES: ${CX_BENCH_CONTAINER_MATURIN_FEATURES:-}
+      CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON: '${CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON:-{"max_text_size": 4096, "max_binary_size": 65536}}'
+      CX_DRIVER_COMPARE_OUTPUT_DIR: ${CX_DRIVER_COMPARE_OUTPUT_DIR:-/workspace/target/odbc-driver-comparison-container}
+      CX_DRIVER_COMPARE_PREPARE_ROWS: ${CX_DRIVER_COMPARE_PREPARE_ROWS:-10000}
+      CX_DRIVER_COMPARE_ROWS: ${CX_DRIVER_COMPARE_ROWS:-10000}
+      CX_DRIVER_COMPARE_ITERATIONS: ${CX_DRIVER_COMPARE_ITERATIONS:-3}
+      CX_DRIVER_COMPARE_WARMUPS: ${CX_DRIVER_COMPARE_WARMUPS:-1}
+      CX_DRIVER_COMPARE_ROUTE_TIMEOUT_SECS: ${CX_DRIVER_COMPARE_ROUTE_TIMEOUT_SECS:-600}
+      POSTGRES_URL: ${POSTGRES_URL:-postgresql://connectorx:connectorx@postgres:5432/connectorx}
+      POSTGRES_ODBC_CONN: ${POSTGRES_ODBC_CONN:-Driver={PostgreSQL Unicode};Server=postgres;Port=5432;Database=connectorx;UID=connectorx;PWD=connectorx;}
+      SYBASE_URL: ${SYBASE_URL:-sybase://sa:sybase@sybase:5000/tempdb?driver=FreeTDS&tds_version=5.0&charset=UTF-8}
+      SYBASE_ODBC_CONN: ${SYBASE_ODBC_CONN:-Driver={FreeTDS};Server=sybase;Port=5000;TDS_Version=5.0;Database=tempdb;UID=sa;PWD=sybase;charset=UTF-8;}
+      DB2_URL: ${DB2_URL:-db2://db2inst1:connectorx1@db2:50000/testdb?driver=IBM%20DB2%20ODBC%20DRIVER}
+      DB2_ODBC_CONN: ${DB2_ODBC_CONN:-Driver={IBM DB2 ODBC DRIVER};Hostname=db2;Port=50000;Protocol=TCPIP;Database=testdb;UID=db2inst1;PWD=connectorx1;}
+      HOST_UID: ${HOST_UID:-}
+      HOST_GID: ${HOST_GID:-}
+    volumes:
+      - ./target/odbc-driver-comparison-container:/workspace/target/odbc-driver-comparison-container
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target-runner:/workspace/target/odbc-benchmark-runner-build
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: connectorx
+      POSTGRES_PASSWORD: connectorx
+      POSTGRES_DB: connectorx
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  sybase:
+    image: blieusong/ase-server:latest
+    platform: linux/amd64
+    working_dir: /home/sybase
+    entrypoint: ["/home/sybase/bin/entrypoint.sh"]
+
+  db2:
+    image: icr.io/db2_community/db2:latest
+    platform: linux/amd64
+    privileged: true
+    environment:
+      LICENSE: accept
+      DB2INST1_PASSWORD: connectorx1
+      DBNAME: testdb
+    volumes:
+      - db2-data:/database
+
+volumes:
+  cargo-git:
+  cargo-registry:
+  cargo-target-runner:
+  postgres-data:
+  db2-data:

@@ -259,6 +259,21 @@ python-shell:
 benchmark-report: setup-python
     cd connectorx-python && \
     poetry run pytest connectorx/tests/benchmarks.py --benchmark-json ../benchmark.json
+
+odbc-driver-comparison +ARGS="":
+    python3 scripts/odbc_driver_comparison.py {{ARGS}}
+
+odbc-driver-comparison-container +ARGS="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST_UID="$(id -u)" HOST_GID="$(id -g)" \
+        docker compose -f docker-compose.odbc-driver-comparison.yml run --rm --build benchmark benchmark {{ARGS}}
+
+odbc-driver-comparison-container-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST_UID="$(id -u)" HOST_GID="$(id -g)" \
+        docker compose -f docker-compose.odbc-driver-comparison.yml run --rm --build benchmark smoke
     
 # releases
 build-python-wheel:

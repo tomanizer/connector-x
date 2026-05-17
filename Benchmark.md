@@ -54,6 +54,42 @@ psql -h localhost -U postgres -d tpch -c "\copy LINEITEM FROM '$YOUR_TPCH_DIR/tp
 psql -h localhost -U postgres -d tpch -c "CREATE INDEX lineitem_l_orderkey_idx ON LINEITEM USING btree (l_orderkey);"
 ```
 
+## ODBC Driver Comparison Benchmark
+
+Use `scripts/odbc_driver_comparison.py` for end-to-end Python comparisons
+between conventional ODBC DataFrame ingestion and ConnectorX. It compares
+pandas over `pyodbc`, optional pandas over SQLAlchemy, Polars over `pyodbc`,
+Polars over `arrow-odbc`, ConnectorX native routes, and ConnectorX generic
+`odbc://` routes where the required connection strings are configured.
+
+```bash
+scripts/odbc_driver_comparison.py \
+  --backend postgres \
+  --backend db2 \
+  --backend sybase \
+  --prepare-rows 100000 \
+  --rows 100000 \
+  --iterations 3 \
+  --warmups 1
+```
+
+The benchmark writes raw JSON, CSV, and a Markdown performance report under
+`target/odbc-driver-comparison/` by default. See `docs/benchmarks.md` for
+connection variables, TPC-H mode, custom workloads, and report guidance.
+
+For Db2 and other ODBC drivers where host libraries can skew or break results,
+run the Linux x86_64 containerized benchmark stack instead:
+
+```bash
+just odbc-driver-comparison-container-smoke
+just odbc-driver-comparison-container
+```
+
+This starts PostgreSQL, Sybase ASE, Db2, and a benchmark runner with unixODBC,
+psqlODBC, FreeTDS, and IBM's Db2 Community client libraries registered through
+`libdb2o.so` from a Db2 client instance. Containerized reports are written under
+`target/odbc-driver-comparison-container/`.
+
 ## Sybase ODBC Microbenchmark
 
 The Sybase connector has a Criterion benchmark for the current ODBC implementation. It is intentionally keyed by backend name (`odbc_get_arrow`) so a future native TDS/CT-Lib backend can be added to the same `sybase` benchmark group and compared on the same query.
