@@ -1,0 +1,10 @@
+.git
+.venv
+.venv-*
+target
+connectorx/target
+connectorx-cpp/target
+connectorx-python/target
+__pycache__
+*.pyc
+.DS_Store
