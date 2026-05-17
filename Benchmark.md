@@ -86,12 +86,9 @@ just odbc-driver-comparison-container
 ```
 
 This starts PostgreSQL, Sybase ASE, Db2, and a benchmark runner with unixODBC,
-psqlODBC, FreeTDS, and IBM's standalone Db2 `clidriver` installed from the
-`ibm_db` wheel. Containerized reports are written under
-`target/odbc-driver-comparison-container/`. Db2 `pyodbc`/Polars baselines work
-in this runner; Db2 ConnectorX routes currently record the known IBM SQLLEN ABI
-mismatch unless a compatible `libdb2o` driver is supplied or ConnectorX adds a
-compatibility path.
+psqlODBC, FreeTDS, and IBM's Db2 Community client libraries registered through
+`libdb2o.so` from a Db2 client instance. Containerized reports are written under
+`target/odbc-driver-comparison-container/`.
 
 ## Sybase ODBC Microbenchmark
 

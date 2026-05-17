@@ -5,16 +5,40 @@ workspace="${CONNECTORX_BENCH_ROOT:-/workspace}"
 cd "$workspace"
 
 export PATH="${VIRTUAL_ENV:-/opt/connectorx-bench-venv}/bin:${PATH}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$workspace/target/odbc-benchmark-container-build}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$workspace/target/odbc-benchmark-runner-build}"
 export CX_DRIVER_COMPARE_OUTPUT_DIR="${CX_DRIVER_COMPARE_OUTPUT_DIR:-$workspace/target/odbc-driver-comparison-container}"
 export CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON="${CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON:-{\"max_text_size\": 4096, \"max_binary_size\": 65536}}"
 export PYTHONPATH="$workspace/connectorx-python:${PYTHONPATH:-}"
-export DB2_CLI_DRIVER_LIB_DIR="${DB2_CLI_DRIVER_LIB_DIR:-/opt/ibm/clidriver/lib}"
+export DB2_CLIENT_PROFILE_PATH="${DB2_CLIENT_PROFILE_PATH:-/home/db2bench/sqllib/db2profile}"
+export DB2_CLI_DRIVER_LIB_DIR="${DB2_CLI_DRIVER_LIB_DIR:-/home/db2bench/sqllib/lib64}"
+if [ "${DB2_PROFILE:-}" = "$DB2_CLIENT_PROFILE_PATH" ]; then
+    unset DB2_PROFILE
+fi
 
 refresh_db2_client_path() {
+    if [ -f "$DB2_CLIENT_PROFILE_PATH" ] && [ "${CONNECTORX_DB2_PROFILE_LOADED:-0}" != "1" ]; then
+        # IBM's libdb2o driver expects the Db2 client instance environment.
+        # shellcheck disable=SC1090
+        . "$DB2_CLIENT_PROFILE_PATH"
+        export CONNECTORX_DB2_PROFILE_LOADED=1
+    fi
     if [ -d "$DB2_CLI_DRIVER_LIB_DIR" ]; then
         export LD_LIBRARY_PATH="$DB2_CLI_DRIVER_LIB_DIR:${LD_LIBRARY_PATH:-}"
     fi
+    local compacted=""
+    local part
+    local old_ifs="$IFS"
+    IFS=:
+    for part in ${LD_LIBRARY_PATH:-}; do
+        if [ -n "$part" ] && [ -d "$part" ]; then
+            case ":$compacted:" in
+                *":$part:"*) ;;
+                *) compacted="${compacted:+$compacted:}$part" ;;
+            esac
+        fi
+    done
+    IFS="$old_ifs"
+    export LD_LIBRARY_PATH="$compacted"
 }
 
 refresh_db2_client_path
@@ -46,7 +70,9 @@ print_runtime() {
     echo
     echo "Db2 CLI driver libraries:"
     if [ -d "$DB2_CLI_DRIVER_LIB_DIR" ]; then
-        find "$DB2_CLI_DRIVER_LIB_DIR" -maxdepth 1 \
+        local db2_lib_dir
+        db2_lib_dir="$(readlink -f "$DB2_CLI_DRIVER_LIB_DIR" || printf '%s\n' "$DB2_CLI_DRIVER_LIB_DIR")"
+        find "$db2_lib_dir" -maxdepth 1 \
             \( -name 'libdb2.so*' -o -name 'libdb2o.so*' -o -name 'libdb2clixml4c.so*' \) \
             -print | sort || true
     fi

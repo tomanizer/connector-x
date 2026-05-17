@@ -261,12 +261,12 @@ just odbc-driver-comparison-container
 
 The runner starts PostgreSQL, Sybase ASE, and Db2 containers and executes the
 benchmark from a Linux image with unixODBC, psqlODBC, FreeTDS, and IBM's
-standalone Db2 `clidriver` from the `ibm_db` wheel installed. This avoids local
-driver-manager and library-registration problems when collecting conventional
-ODBC baselines. The bundled Db2 `libdb2.so` still triggers the known SQLLEN ABI
-mismatch in ConnectorX's Rust ODBC path, so Db2 ConnectorX route failures in
-container reports should be treated as driver compatibility work rather than
-host setup failures.
+Db2 Community client libraries registered through `libdb2o.so`. The image
+creates a Db2 client instance with `db2icrt -s client`, then registers
+`IBM DB2 ODBC DRIVER` to `/home/db2bench/sqllib/lib64/libdb2o.so`. This avoids
+local driver-manager and library-registration problems when collecting
+conventional ODBC baselines and keeps Db2 ConnectorX, `pyodbc`, and Polars on
+the same unixODBC ABI.
 
 Useful controls:
 

@@ -1,41 +1,46 @@
-FROM rust:1-bookworm
+FROM icr.io/db2_community/db2:latest
 
-ENV DEBIAN_FRONTEND=noninteractive
+ARG RUST_TOOLCHAIN=stable
 
-RUN test "$(dpkg --print-architecture)" = "amd64" \
-    || (echo "The IBM Db2 ODBC/CLI driver used by this image is Linux x86_64 only. Build with --platform linux/amd64." >&2 && exit 1)
+RUN test "$(uname -m)" = "x86_64" \
+    || (echo "The IBM Db2 ODBC driver used by this image is Linux x86_64 only. Build with --platform linux/amd64." >&2 && exit 1)
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
+RUN dnf install -y \
         ca-certificates \
         clang \
         cmake \
-        curl \
-        freetds-bin \
+        freetds \
+        freetds-devel \
+        gcc \
+        gcc-c++ \
         git \
         jq \
-        libclang-dev \
-        libkrb5-dev \
-        libpq-dev \
-        libssl-dev \
-        odbc-postgresql \
-        pkg-config \
-        python3-dev \
-        python3-pip \
-        python3-venv \
-        tdsodbc \
-        unixodbc \
-        unixodbc-dev \
-    && (apt-get install -y --no-install-recommends libaio1 || apt-get install -y --no-install-recommends libaio1t64) \
-    && rm -rf /var/lib/apt/lists/*
+        libpq-devel \
+        make \
+        openssl-devel \
+        postgresql-odbc \
+        pkgconf-pkg-config \
+        python3.11 \
+        python3.11-devel \
+        python3.11-pip \
+        rust \
+        cargo \
+        unixODBC \
+        unixODBC-devel \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 ENV VIRTUAL_ENV=/opt/connectorx-bench-venv
-ENV PATH="/opt/connectorx-bench-venv/bin:${PATH}"
-ENV DB2_CLI_DRIVER_LIB_DIR=/opt/ibm/clidriver/lib
-ENV LD_LIBRARY_PATH=/opt/ibm/clidriver/lib
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV DB2_CLIENT_HOME=/home/db2bench/sqllib
+ENV DB2_CLIENT_PROFILE_PATH=/home/db2bench/sqllib/db2profile
+ENV DB2_CLI_DRIVER_LIB_DIR=/home/db2bench/sqllib/lib64
+ENV CARGO_BUILD_JOBS=1
+ENV LD_LIBRARY_PATH=/home/db2bench/sqllib/lib64:/home/db2bench/sqllib/lib64/gskit:/home/db2bench/sqllib/lib64/icc
+ENV PATH="/opt/connectorx-bench-venv/bin:/usr/local/cargo/bin:${PATH}"
 
-RUN python3 -m venv "$VIRTUAL_ENV" \
+RUN python3.11 -m venv "$VIRTUAL_ENV" \
     && pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir \
         arrow-odbc \
@@ -49,31 +54,51 @@ RUN python3 -m venv "$VIRTUAL_ENV" \
         pyarrow \
         pyodbc \
         sqlalchemy \
-    && mkdir -p /opt/ibm \
-    && python - <<'PY' > /tmp/db2-clidriver-dir
-import pathlib
-import sys
+    && mkdir -p "$CARGO_HOME/registry" "$CARGO_HOME/git"
 
-import ibm_db
-
-module_path = pathlib.Path(ibm_db.__file__).resolve()
-for parent in (module_path.parent, *module_path.parents):
-    candidate = parent / "clidriver"
-    if (candidate / "lib" / "libdb2.so").exists():
-        print(candidate)
-        sys.exit(0)
-
-raise SystemExit("ibm_db clidriver/lib/libdb2.so not found")
-PY
-RUN ln -s "$(cat /tmp/db2-clidriver-dir)" /opt/ibm/clidriver \
-    && test -f /opt/ibm/clidriver/lib/libdb2.so \
-    && { \
+RUN groupadd -g 2000 db2iadm1 \
+    && useradd -m -u 2000 -g db2iadm1 db2bench \
+    && /opt/ibm/db2/V12.1/instance/db2icrt -s client db2bench \
+    && test -f /home/db2bench/sqllib/lib64/libdb2o.so \
+    && test -f /usr/lib64/libtdsodbc.so \
+    && test -f /usr/lib64/psqlodbcw.so \
+    && if ! odbcinst -q -d -n "FreeTDS" >/dev/null 2>&1; then { \
+        echo ""; \
+        echo "[FreeTDS]"; \
+        echo "Description=FreeTDS unixODBC Driver"; \
+        echo "Driver=/usr/lib64/libtdsodbc.so"; \
+        echo "Setup=/usr/lib64/libtdsS.so"; \
+        echo "FileUsage=1"; \
+        echo "UsageCount=1"; \
+    } >> /etc/odbcinst.ini; fi \
+    && if ! odbcinst -q -d -n "PostgreSQL Unicode" >/dev/null 2>&1; then { \
+        echo ""; \
+        echo "[PostgreSQL Unicode]"; \
+        echo "Description=PostgreSQL ODBC Unicode Driver"; \
+        echo "Driver=/usr/lib64/psqlodbcw.so"; \
+        echo "Setup=/usr/lib64/libodbcpsqlS.so"; \
+        echo "FileUsage=1"; \
+        echo "UsageCount=1"; \
+    } >> /etc/odbcinst.ini; fi \
+    && if ! odbcinst -q -d -n "IBM DB2 ODBC DRIVER" >/dev/null 2>&1; then { \
         echo ""; \
         echo "[IBM DB2 ODBC DRIVER]"; \
-        echo "Description=IBM Db2 ODBC CLI Driver"; \
-        echo "Driver=/opt/ibm/clidriver/lib/libdb2.so"; \
+        echo "Description=IBM Db2 ODBC Driver"; \
+        echo "Driver=/home/db2bench/sqllib/lib64/libdb2o.so"; \
         echo "FileUsage=1"; \
-    } >> /etc/odbcinst.ini
+        echo "DontDLClose=1"; \
+    } >> /etc/odbcinst.ini; fi
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain "$RUST_TOOLCHAIN" \
+    && rustc --version \
+    && cargo --version
+
+RUN dnf install -y krb5-devel \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+ENV OPENSSL_NO_VENDOR=1
 
 WORKDIR /workspace
 

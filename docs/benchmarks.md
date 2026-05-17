@@ -64,11 +64,11 @@ There is no single portable SQLAlchemy ODBC URL that works well across all three
 
 Generic ConnectorX ODBC URLs can be built either with URL-style driver fields or with a URL-encoded `odbc_connect` value.
 
-On macOS, IBM's registered Db2 CLI driver may point at `libdb2.dylib`. That works for `pyodbc`, but Arrow-based readers can fail with an ODBC SQLLEN size mismatch. Use the Linux/Intel runner below to remove host-library drift from the Python baselines. Current IBM standalone `clidriver` packages expose `libdb2.so`; ConnectorX Db2 routes still need either a driver exposing the expected SQLLEN ABI, such as IBM's `libdb2o` where available, or a ConnectorX compatibility fix before they can produce authoritative Db2 ConnectorX timings.
+On macOS, IBM's registered Db2 CLI driver may point at `libdb2.dylib`. That works for `pyodbc`, but Arrow-based readers can fail with an ODBC SQLLEN size mismatch. Use the Linux/Intel runner below to remove host-library drift from the Python baselines. For host macOS setup, IBM publishes Data Server Driver Package builds through Fix Central from the [IBM Data Server Client Packages page](https://www.ibm.com/support/pages/ibm-data-server-client-packages-version-121-mod-2-fix-pack-0); keep that separate from the Linux benchmark runner so local driver choices do not affect published timings.
 
 ### Containerized Linux Runner
 
-Use the containerized benchmark runner when local ODBC driver libraries are not representative, especially for Db2 on macOS. The compose stack starts PostgreSQL, Sybase ASE, Db2, and a Linux x86_64 benchmark runner with unixODBC, psqlODBC, FreeTDS, and IBM's standalone Db2 `clidriver` from the `ibm_db` wheel registered inside the runner image.
+Use the containerized benchmark runner when local ODBC driver libraries are not representative, especially for Db2 on macOS. The compose stack starts PostgreSQL, Sybase ASE, Db2, and a Linux x86_64 benchmark runner with unixODBC, psqlODBC, FreeTDS, and IBM's Db2 Community client libraries registered through `libdb2o.so`.
 
 ```bash
 just odbc-driver-comparison-container-smoke
@@ -94,7 +94,7 @@ Reports are written to `target/odbc-driver-comparison-container/` on the host. T
 
 The bundled Sybase image uses `tempdb`; large synthetic loads can exhaust its log. For publication-sized Sybase runs, use a Sybase container or external ASE instance with a larger benchmark database and override `SYBASE_URL` and `SYBASE_ODBC_CONN`.
 
-Db2 note: the bundled IBM `clidriver` passes ODBC smoke tests and the `pyodbc`/Polars baselines, but ConnectorX's Rust ODBC path currently reports an SQLLEN ABI mismatch with that `libdb2.so` driver. Container reports run with `--warn-only` by default, so Db2 ConnectorX route errors are recorded instead of hiding the remaining driver compatibility work. PostgreSQL and Sybase ConnectorX routes run normally in this stack.
+Db2 note: the runner creates a Db2 client instance with `db2icrt -s client` and registers `IBM DB2 ODBC DRIVER` to `/home/db2bench/sqllib/lib64/libdb2o.so`, which resolves to `/opt/ibm/db2/V12.1/lib64/libdb2o.so` in the Db2 Community image. This is intentionally different from the standalone `clidriver/libdb2.so` bundled with Python packages, because the client-instance driver works for Db2 ConnectorX, `pyodbc`, and Polars on the same unixODBC ABI.
 
 ### Prepared Benchmark Table
 

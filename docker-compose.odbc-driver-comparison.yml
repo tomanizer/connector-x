@@ -14,12 +14,14 @@ services:
       - sybase
       - db2
     environment:
-      CARGO_TARGET_DIR: /workspace/target/odbc-benchmark-container-build
+      CARGO_TARGET_DIR: /workspace/target/odbc-benchmark-runner-build
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-1}
       CONNECTORX_BENCH_ROOT: /workspace
-      DB2_CLI_DRIVER_LIB_DIR: /opt/ibm/clidriver/lib
+      DB2_CLI_DRIVER_LIB_DIR: /home/db2bench/sqllib/lib64
+      DB2_CLIENT_PROFILE_PATH: /home/db2bench/sqllib/db2profile
       CX_BENCH_CONTAINER_WAIT_SECS: ${CX_BENCH_CONTAINER_WAIT_SECS:-1800}
       CX_BENCH_CONTAINER_SKIP_BUILD: ${CX_BENCH_CONTAINER_SKIP_BUILD:-0}
-      CX_BENCH_CONTAINER_MATURIN_FEATURES: ${CX_BENCH_CONTAINER_MATURIN_FEATURES:-extension,fptr,nbstr,dsts,srcs,federation,fed_exec}
+      CX_BENCH_CONTAINER_MATURIN_FEATURES: ${CX_BENCH_CONTAINER_MATURIN_FEATURES:-}
       CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON: '${CX_DRIVER_COMPARE_ARROW_EXECUTE_OPTIONS_JSON:-{"max_text_size": 4096, "max_binary_size": 65536}}'
       CX_DRIVER_COMPARE_OUTPUT_DIR: ${CX_DRIVER_COMPARE_OUTPUT_DIR:-/workspace/target/odbc-driver-comparison-container}
       CX_DRIVER_COMPARE_PREPARE_ROWS: ${CX_DRIVER_COMPARE_PREPARE_ROWS:-10000}
@@ -39,7 +41,7 @@ services:
       - ./target/odbc-driver-comparison-container:/workspace/target/odbc-driver-comparison-container
       - cargo-registry:/usr/local/cargo/registry
       - cargo-git:/usr/local/cargo/git
-      - cargo-target:/workspace/target/odbc-benchmark-container-build
+      - cargo-target-runner:/workspace/target/odbc-benchmark-runner-build
 
   postgres:
     image: postgres:16
@@ -70,6 +72,6 @@ services:
 volumes:
   cargo-git:
   cargo-registry:
-  cargo-target:
+  cargo-target-runner:
   postgres-data:
   db2-data:
