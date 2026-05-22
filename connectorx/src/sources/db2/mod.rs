@@ -511,9 +511,9 @@ fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<Stri
         if idx > 0 {
             query.push_str(" union all ");
         }
-        query.push_str("select * from (");
+        query.push_str("select * from (\n");
         query.push_str(trim_sql_terminator(part.as_str()));
-        query.push_str(") as cx_db2_union_part_");
+        query.push_str("\n) as cx_db2_union_part_");
         query.push_str(&idx.to_string());
     }
 
@@ -696,7 +696,10 @@ mod tests {
     #[test]
     fn db2_union_all_queries_collapses_multi_query_partitions() {
         let queries = vec![
-            CXQuery::Wrapped("select id from cx_bench_perf where id between 1 and 10;".to_string()),
+            CXQuery::Wrapped(
+                "select id from cx_bench_perf where id between 1 and 10 -- first partition"
+                    .to_string(),
+            ),
             CXQuery::Naked(" select id from cx_bench_perf where id between 11 and 20 ".to_string()),
         ];
 
@@ -705,7 +708,7 @@ mod tests {
         assert_eq!(collapsed.len(), 1);
         assert_eq!(
             collapsed[0].as_str(),
-            "select * from (select id from cx_bench_perf where id between 1 and 10) as cx_db2_union_part_0 union all select * from (select id from cx_bench_perf where id between 11 and 20) as cx_db2_union_part_1"
+            "select * from (\nselect id from cx_bench_perf where id between 1 and 10 -- first partition\n) as cx_db2_union_part_0 union all select * from (\nselect id from cx_bench_perf where id between 11 and 20\n) as cx_db2_union_part_1"
         );
     }
 

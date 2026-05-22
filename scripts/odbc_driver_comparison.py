@@ -442,12 +442,16 @@ def stringify(value: Any) -> str | None:
     return str(value)
 
 
+def column_label(value: Any) -> str:
+    return str(value)
+
+
 def frame_min_max(df: Any) -> dict[str, dict[str, str | None]]:
     values: dict[str, dict[str, str | None]] = {}
     for column in df.columns:
         series = df[column]
         try:
-            values[column] = {
+            values[column_label(column)] = {
                 "min": stringify(series.min()),
                 "max": stringify(series.max()),
             }
@@ -467,7 +471,10 @@ def sample_hash(df: Any, sample_rows: int = 5) -> str | None:
             if rows > sample_rows:
                 samples.extend(df.tail(sample_rows).to_dict(orient="records"))
             payload = json.dumps(
-                [{key: stringify(value) for key, value in row.items()} for row in samples],
+                [
+                    {column_label(key): stringify(value) for key, value in row.items()}
+                    for row in samples
+                ],
                 sort_keys=True,
                 default=str,
             ).encode("utf-8")
@@ -496,16 +503,19 @@ def summarize_frame(frame: Any) -> dict[str, Any]:
         rows, cols = frame.shape
         estimated_size_mb = None
         try:
-            estimated_size_mb = frame.memory_usage(deep=True).sum() / (1024 * 1024)
+            estimated_size_mb = frame.memory_usage(deep=False).sum() / (1024 * 1024)
         except Exception:
             pass
         return {
             "rows": int(rows),
             "cols": int(cols),
-            "columns": list(frame.columns),
-            "schema": {name: str(dtype) for name, dtype in frame.dtypes.items()},
+            "columns": [column_label(column) for column in frame.columns],
+            "schema": {
+                column_label(name): str(dtype) for name, dtype in frame.dtypes.items()
+            },
             "null_counts": {
-                key: int(value) for key, value in frame.isna().sum().to_dict().items()
+                column_label(key): int(value)
+                for key, value in frame.isna().sum().to_dict().items()
             },
             "min_max": frame_min_max(frame),
             "sample_hash": sample_hash(frame),
