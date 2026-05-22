@@ -442,12 +442,16 @@ def stringify(value: Any) -> str | None:
     return str(value)
 
 
+def column_label(value: Any) -> str:
+    return str(value)
+
+
 def frame_min_max(df: Any) -> dict[str, dict[str, str | None]]:
     values: dict[str, dict[str, str | None]] = {}
     for column in df.columns:
         series = df[column]
         try:
-            values[column] = {
+            values[column_label(column)] = {
                 "min": stringify(series.min()),
                 "max": stringify(series.max()),
             }
@@ -457,6 +461,27 @@ def frame_min_max(df: Any) -> dict[str, dict[str, str | None]]:
 
 
 def sample_hash(df: Any, sample_rows: int = 5) -> str | None:
+    module = df.__class__.__module__
+    if module.startswith("pandas"):
+        rows, cols = df.shape
+        if rows == 0 or cols == 0:
+            return None
+        try:
+            samples = df.head(sample_rows).to_dict(orient="records")
+            if rows > sample_rows:
+                samples.extend(df.tail(sample_rows).to_dict(orient="records"))
+            payload = json.dumps(
+                [
+                    {column_label(key): stringify(value) for key, value in row.items()}
+                    for row in samples
+                ],
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+            return hashlib.sha256(payload).hexdigest()
+        except Exception:
+            return None
+
     if df.height == 0 or df.width == 0:
         return None
     try:
@@ -473,6 +498,30 @@ def sample_hash(df: Any, sample_rows: int = 5) -> str | None:
 
 
 def summarize_frame(frame: Any) -> dict[str, Any]:
+    module = frame.__class__.__module__
+    if module.startswith("pandas"):
+        rows, cols = frame.shape
+        estimated_size_mb = None
+        try:
+            estimated_size_mb = frame.memory_usage(deep=False).sum() / (1024 * 1024)
+        except Exception:
+            pass
+        return {
+            "rows": int(rows),
+            "cols": int(cols),
+            "columns": [column_label(column) for column in frame.columns],
+            "schema": {
+                column_label(name): str(dtype) for name, dtype in frame.dtypes.items()
+            },
+            "null_counts": {
+                column_label(key): int(value)
+                for key, value in frame.isna().sum().to_dict().items()
+            },
+            "min_max": frame_min_max(frame),
+            "sample_hash": sample_hash(frame),
+            "estimated_frame_mb": estimated_size_mb,
+        }
+
     df = to_polars(frame)
     null_row = df.null_count().to_dicts()[0] if df.width else {}
     estimated_size_mb = None

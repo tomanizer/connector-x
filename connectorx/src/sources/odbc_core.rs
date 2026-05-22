@@ -1696,6 +1696,19 @@ where
         execution_options,
         pre_execution_queries,
     )?;
+    fetch_metadata_from_cursor::<T, E, F>(&mut cursor, default_max_len, map_type)
+}
+
+fn fetch_metadata_from_cursor<T, E, F>(
+    cursor: &mut OdbcCursor,
+    default_max_len: usize,
+    map_type: F,
+) -> Result<OdbcMetadata<T>, E>
+where
+    E: OdbcCoreError,
+    T: OdbcTypePolicy,
+    F: Fn(DataType, Nullability, &str) -> Result<T, E>,
+{
     let ncols = cursor.num_result_cols()?;
     if ncols < 0 {
         return Err(anyhow!("ODBC returned negative column count: {}", ncols).into());
@@ -3665,7 +3678,7 @@ pub(crate) fn build_int64_array<E: OdbcCoreError>(
                 builder.append_value(i64::from(v));
             }
         }
-        AnySlice::I64(values) => builder.append_values(&values[..nrows], &vec![true; nrows]),
+        AnySlice::I64(values) => builder.append_slice(&values[..nrows]),
         AnySlice::U8(values) => {
             for &v in &values[..nrows] {
                 builder.append_value(i64::from(v));
@@ -3745,7 +3758,7 @@ pub(crate) fn build_float32_array<E: OdbcCoreError>(
 ) -> Result<ArrayRef, E> {
     let mut builder = Float32Builder::with_capacity(nrows);
     match column {
-        AnySlice::F32(values) => builder.append_values(&values[..nrows], &vec![true; nrows]),
+        AnySlice::F32(values) => builder.append_slice(&values[..nrows]),
         AnySlice::NullableF32(values) => {
             let (vals, indicators) = values.raw_values();
             let validity = validity_from_indicators::<E>(&indicators[..nrows], nullable, "f32")?;
@@ -3781,7 +3794,7 @@ pub(crate) fn build_float64_array<E: OdbcCoreError>(
                 builder.append_value(f64::from(v));
             }
         }
-        AnySlice::F64(values) => builder.append_values(&values[..nrows], &vec![true; nrows]),
+        AnySlice::F64(values) => builder.append_slice(&values[..nrows]),
         AnySlice::NullableF32(values) => {
             for value in values.take(nrows) {
                 match value {
@@ -4610,6 +4623,23 @@ where
     let first_query = queries.first().ok_or_else(|| {
         ConnectorXError::Other(anyhow!("ODBC Arrow stream requires at least one query"))
     })?;
+
+    if queries.len() == 1 {
+        return odbc_get_arrow_single_query_impl::<TS, E>(
+            conn,
+            first_query.as_ref(),
+            max_str_len,
+            batch_size,
+            connection_limiter,
+            execution_options,
+            pre_execution_queries,
+            lob_strategy,
+            replace_invalid_utf16,
+            replace_invalid_utf8,
+            map_type,
+        );
+    }
+
     let metadata = fetch_metadata_with_data_types::<TS, E, _>(
         TS::source_name(),
         conn,
@@ -4680,6 +4710,83 @@ where
             )
         }
     })?;
+
+    Ok(destination)
+}
+
+#[cfg(feature = "dst_arrow")]
+fn odbc_get_arrow_single_query_impl<TS, E>(
+    conn: &str,
+    query: &str,
+    max_str_len: usize,
+    batch_size: usize,
+    connection_limiter: Arc<OdbcConnectionLimiter>,
+    execution_options: OdbcExecutionOptions,
+    pre_execution_queries: Option<&[String]>,
+    lob_strategy: OdbcLobStrategy,
+    replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
+    map_type: impl Fn(DataType, Nullability, &str) -> Result<TS, E> + Send + Sync,
+) -> Result<ArrowDestination, E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync + 'static,
+    E: OdbcCoreError + Send + 'static,
+{
+    let _connection_permit = connection_limiter.acquire();
+    let mut cursor = execute_query_with_pre_execution::<E>(
+        TS::source_name(),
+        conn,
+        query,
+        execution_options,
+        pre_execution_queries,
+    )?;
+    let metadata = fetch_metadata_from_cursor::<TS, E, _>(&mut cursor, max_str_len, map_type)?;
+    let use_piecewise_lobs = uses_piecewise_lobs(
+        lob_strategy,
+        &metadata.schema,
+        &metadata.data_types,
+        max_str_len,
+    );
+
+    let (arrow_types, record_schema) = odbc_arrow_schema(&metadata.names, &metadata.schema);
+
+    let mut destination = ArrowDestination::new();
+    destination.allocate_with_schema(
+        metadata.names.clone(),
+        arrow_types,
+        Arc::clone(&record_schema),
+    );
+
+    if use_piecewise_lobs {
+        piecewise_fetch_cursor::<TS, E, _, _>(
+            cursor,
+            &metadata.names,
+            &metadata.schema,
+            batch_size,
+            replace_invalid_utf16,
+            replace_invalid_utf8,
+            record_schema,
+            |record_batch| {
+                destination
+                    .push_record_batch(record_batch)
+                    .map_err(anyhow::Error::from)?;
+                Ok(true)
+            },
+            || false,
+        )?;
+    } else {
+        arrow_fetch_cursor_to_destination::<TS, E>(
+            cursor,
+            &metadata.names,
+            &metadata.schema,
+            &metadata.column_buffer_max_lens,
+            batch_size,
+            replace_invalid_utf16,
+            replace_invalid_utf8,
+            record_schema,
+            &destination,
+        )?;
+    }
 
     Ok(destination)
 }
@@ -5040,7 +5147,7 @@ fn piecewise_fetch_partition<TS, E, Emit, Cancel>(
     replace_invalid_utf16: bool,
     replace_invalid_utf8: bool,
     arrow_schema: Arc<Schema>,
-    mut emit_batch: Emit,
+    emit_batch: Emit,
     should_cancel: Cancel,
 ) -> Result<(), E>
 where
@@ -5054,13 +5161,44 @@ where
     }
 
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query_with_pre_execution::<E>(
+    let cursor = execute_query_with_pre_execution::<E>(
         TS::source_name(),
         conn,
         query,
         execution_options,
         pre_execution_queries,
     )?;
+    piecewise_fetch_cursor::<TS, E, Emit, Cancel>(
+        cursor,
+        names,
+        schema,
+        batch_size,
+        replace_invalid_utf16,
+        replace_invalid_utf8,
+        arrow_schema,
+        emit_batch,
+        should_cancel,
+    )
+}
+
+#[cfg(feature = "dst_arrow")]
+fn piecewise_fetch_cursor<TS, E, Emit, Cancel>(
+    mut cursor: OdbcCursor,
+    names: &[String],
+    schema: &[TS],
+    batch_size: usize,
+    replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
+    arrow_schema: Arc<Schema>,
+    mut emit_batch: Emit,
+    should_cancel: Cancel,
+) -> Result<(), E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+    Emit: FnMut(RecordBatch) -> Result<bool, E>,
+    Cancel: Fn() -> bool,
+{
     let mut columns = empty_owned_columns(schema.len());
     let mut nrows = 0usize;
 
@@ -5141,6 +5279,35 @@ where
         execution_options,
         pre_execution_queries,
     )?;
+    arrow_fetch_cursor_to_destination::<TS, E>(
+        cursor,
+        names,
+        schema,
+        column_buffer_max_lens,
+        batch_size,
+        replace_invalid_utf16,
+        replace_invalid_utf8,
+        arrow_schema,
+        destination,
+    )
+}
+
+#[cfg(feature = "dst_arrow")]
+fn arrow_fetch_cursor_to_destination<TS, E>(
+    cursor: OdbcCursor,
+    names: &[String],
+    schema: &[TS],
+    column_buffer_max_lens: &[usize],
+    batch_size: usize,
+    replace_invalid_utf16: bool,
+    replace_invalid_utf8: bool,
+    arrow_schema: Arc<Schema>,
+    destination: &ArrowDestination,
+) -> Result<(), E>
+where
+    TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
+    E: OdbcCoreError + Send,
+{
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
         schema
