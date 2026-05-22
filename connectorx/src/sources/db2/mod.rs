@@ -411,6 +411,8 @@ pub(crate) fn db2_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
     validate_db2_options(&options)?;
+    let optimized_queries = db2_union_all_queries(queries);
+    let queries = optimized_queries.as_deref().unwrap_or(queries);
     let params = url_query_pairs(conn)?;
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
@@ -455,6 +457,8 @@ pub(crate) fn db2_record_batch_iter(
     pre_execution_queries: Option<&[String]>,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = Db2Options::from_env();
+    let optimized_queries = db2_union_all_queries(queries);
+    let queries = optimized_queries.as_deref().unwrap_or(queries);
     odbc_core::validate_batch_and_buffer_limits(
         Db2TypeSystem::source_name(),
         "batch_size",
@@ -496,6 +500,34 @@ pub(crate) fn db2_record_batch_iter(
 }
 
 odbc_core::impl_odbc_arrow_policy!(Db2TypeSystem);
+
+fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<String>>> {
+    if queries.len() <= 1 {
+        return None;
+    }
+
+    let mut query = String::new();
+    for (idx, part) in queries.iter().enumerate() {
+        if idx > 0 {
+            query.push_str(" union all ");
+        }
+        query.push_str("select * from (");
+        query.push_str(trim_sql_terminator(part.as_str()));
+        query.push_str(") as cx_db2_union_part_");
+        query.push_str(&idx.to_string());
+    }
+
+    log::debug!(
+        "Collapsing {} Db2 partition queries into one UNION ALL query",
+        queries.len()
+    );
+    Some(vec![CXQuery::Wrapped(query)])
+}
+
+fn trim_sql_terminator(query: &str) -> &str {
+    let query = query.trim();
+    query.strip_suffix(';').unwrap_or(query).trim_end()
+}
 
 fn log_db2_profile_scope(profile_config: &Db2ProfileConfig) {
     if let Some(message) = profile_config.runtime_scope_message() {
@@ -659,5 +691,26 @@ mod tests {
             source.profile_config().replication_key_columns,
             vec!["IBMREPKEY1".to_string(), "IBMREPKEY2".to_string()]
         );
+    }
+
+    #[test]
+    fn db2_union_all_queries_collapses_multi_query_partitions() {
+        let queries = vec![
+            CXQuery::Wrapped("select id from cx_bench_perf where id between 1 and 10;".to_string()),
+            CXQuery::Naked(" select id from cx_bench_perf where id between 11 and 20 ".to_string()),
+        ];
+
+        let collapsed = db2_union_all_queries(&queries).unwrap();
+
+        assert_eq!(collapsed.len(), 1);
+        assert_eq!(
+            collapsed[0].as_str(),
+            "select * from (select id from cx_bench_perf where id between 1 and 10) as cx_db2_union_part_0 union all select * from (select id from cx_bench_perf where id between 11 and 20) as cx_db2_union_part_1"
+        );
+    }
+
+    #[test]
+    fn db2_union_all_queries_leaves_single_query_alone() {
+        assert!(db2_union_all_queries(&[CXQuery::Naked("select 1".to_string())]).is_none());
     }
 }
