@@ -1761,18 +1761,44 @@ where
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
 {
     let _connection_permit = connection_limiter.acquire();
-    let mut cursor = execute_query_with_pre_execution::<E>(
+    let connection = connect::<E>(source_name, conn, execution_options)?;
+    execute_pre_execution_queries::<E>(
         source_name,
-        conn,
-        query,
+        &connection,
         execution_options,
         pre_execution_queries,
     )?;
-    fetch_metadata_from_cursor::<T, E, F>(&mut cursor, default_max_len, map_type)
+
+    // Describe the prepared statement instead of executing it, so the first
+    // query is not run once just for its column metadata.
+    match connection.prepare(query) {
+        Ok(mut prepared) => match prepared.num_result_cols() {
+            Ok(ncols) if ncols > 0 => {
+                log::debug!("{source_name} read ODBC metadata from the prepared statement");
+                return fetch_metadata_from_cursor::<T, E, F, _>(
+                    &mut prepared,
+                    default_max_len,
+                    map_type,
+                );
+            }
+            Ok(_) => log::debug!(
+                "{source_name} driver reported no columns before execution; executing the query for metadata"
+            ),
+            Err(error) => log::debug!(
+                "{source_name} could not describe the prepared statement ({error}); executing the query for metadata"
+            ),
+        },
+        Err(error) => log::debug!(
+            "{source_name} could not prepare the query ({error}); executing it for metadata"
+        ),
+    }
+
+    let mut cursor = execute_cursor::<E>(source_name, connection, query, execution_options)?;
+    fetch_metadata_from_cursor::<T, E, F, _>(&mut cursor, default_max_len, map_type)
 }
 
-fn fetch_metadata_from_cursor<T, E, F>(
-    cursor: &mut OdbcCursor,
+fn fetch_metadata_from_cursor<T, E, F, M>(
+    cursor: &mut M,
     default_max_len: usize,
     map_type: F,
 ) -> Result<OdbcMetadata<T>, E>
@@ -1780,6 +1806,7 @@ where
     E: OdbcCoreError,
     T: OdbcTypePolicy,
     F: Fn(DataType, Nullability, &str) -> Result<T, E>,
+    M: ResultSetMetadata,
 {
     let ncols = cursor.num_result_cols()?;
     if ncols < 0 {
@@ -5030,7 +5057,7 @@ where
         execution_options,
         pre_execution_queries,
     )?;
-    let metadata = fetch_metadata_from_cursor::<TS, E, _>(&mut cursor, max_str_len, map_type)?;
+    let metadata = fetch_metadata_from_cursor::<TS, E, _, _>(&mut cursor, max_str_len, map_type)?;
     let use_piecewise_lobs = uses_piecewise_lobs(
         lob_strategy,
         &metadata.schema,
