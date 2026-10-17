@@ -60,7 +60,7 @@ jobs:
           {
             echo "[IBM DB2 ODBC DRIVER]"
             echo "Description=IBM DB2 ODBC CLI Driver"
-            echo "Driver=$RUNNER_TEMP/db2/clidriver/lib/libdb2.so"
+            echo "Driver=$RUNNER_TEMP/db2/clidriver/lib/libdb2o.so"
           } | sudo tee -a /etc/odbcinst.ini
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/db2/clidriver/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           echo "- Db2 driver setup: registered IBM DB2 ODBC DRIVER from IBM clidriver." >> "$GITHUB_STEP_SUMMARY"

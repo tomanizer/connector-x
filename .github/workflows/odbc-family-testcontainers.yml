@@ -103,7 +103,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/db2"
           curl -fsSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz -o "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz"
           tar -xzf "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz" -C "$RUNNER_TEMP/db2"
-          printf '[IBM DB2 ODBC DRIVER]\nDescription=IBM DB2 ODBC CLI Driver\nDriver=%s\n' "$RUNNER_TEMP/db2/clidriver/lib/libdb2.so" | sudo tee -a /etc/odbcinst.ini
+          # unixODBC on 64-bit Linux needs libdb2o.so (64-bit SQLLEN); libdb2.so
+          # fails with SQLLEN conversion errors.
+          driver="$RUNNER_TEMP/db2/clidriver/lib/libdb2o.so"
+          test -f "$driver" || { echo "::error::$driver not found in the IBM clidriver package"; ls "$RUNNER_TEMP/db2/clidriver/lib"; exit 1; }
+          printf '[IBM DB2 ODBC DRIVER]\nDescription=IBM DB2 ODBC CLI Driver\nDriver=%s\n' "$driver" | sudo tee -a /etc/odbcinst.ini
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/db2/clidriver/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
           odbcinst -q -d
           docker ps
