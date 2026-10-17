@@ -360,7 +360,10 @@ pub fn db2_odbc_url() -> String {
         };
 
         let db2_init = format!(
-            "db2 connect to {} user db2inst1 using {} && db2 -tvf /tmp/odbc_db2.sql",
+            // Keep a command after `db2 -tvf` so bash does not exec it: the CLP
+            // keys its connection on the parent process. Exit codes 1-3 are
+            // warnings/no-rows; 4 and above are errors.
+            "db2 connect to {} user db2inst1 using {} || exit 8; db2 -tvf /tmp/odbc_db2.sql; rc=$?; db2 terminate >/dev/null; [ $rc -lt 4 ]",
             shell_single_quote(&database),
             shell_single_quote(&password)
         );
