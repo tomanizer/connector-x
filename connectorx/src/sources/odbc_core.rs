@@ -45,6 +45,7 @@ pub(crate) type OdbcBlockCursor = BlockCursor<OdbcCursor, ColumnarAnyBuffer>;
 pub(crate) const MAX_BATCH_SIZE: usize = 65_536;
 pub(crate) const MAX_STR_LEN: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_VARIABLE_COLUMN_BUFFER_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_BATCH_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OdbcLobStrategy {
@@ -176,6 +177,69 @@ pub(crate) fn validate_batch_and_buffer_limits(
         ));
     }
     Ok(())
+}
+
+/// Bytes one row occupies in a bound ODBC column buffer, including its length
+/// indicator.
+fn buffer_desc_row_bytes(desc: BufferDesc) -> usize {
+    let indicator = std::mem::size_of::<isize>();
+    let value = match desc {
+        BufferDesc::Text { max_str_len } => max_str_len.saturating_add(1),
+        BufferDesc::WText { max_str_len } => max_str_len.saturating_add(1).saturating_mul(2),
+        BufferDesc::Binary { max_bytes } => max_bytes,
+        _ => 16,
+    };
+    value.saturating_add(indicator)
+}
+
+/// Returns the batch size to bind for `schema`, shrinking `batch_size` when the
+/// driver-reported column widths would make the batch buffers exceed
+/// `MAX_VARIABLE_COLUMN_BUFFER_BYTES` for one column or `MAX_BATCH_BUFFER_BYTES`
+/// in total. Driver widths are not capped by `max_str_len`, so a long/LOB column
+/// could otherwise reserve gigabytes per batch.
+pub(crate) fn bounded_batch_size<TS>(
+    source_name: &'static str,
+    schema: &[TS],
+    column_buffer_max_lens: &[usize],
+    names: &[String],
+    batch_size: usize,
+) -> Result<usize, anyhow::Error>
+where
+    TS: OdbcTypePolicy,
+{
+    let mut widest = 0_usize;
+    let mut widest_index = 0_usize;
+    let mut row_bytes = 0_usize;
+    for (index, (ty, &max_len)) in schema.iter().zip(column_buffer_max_lens).enumerate() {
+        let bytes = buffer_desc_row_bytes(ty.buffer_desc(max_len));
+        row_bytes = row_bytes.saturating_add(bytes);
+        if bytes > widest {
+            widest = bytes;
+            widest_index = index;
+        }
+    }
+    if row_bytes == 0 {
+        return Ok(batch_size);
+    }
+    let column_name = names
+        .get(widest_index)
+        .map(String::as_str)
+        .unwrap_or("<unnamed>");
+    if widest > MAX_VARIABLE_COLUMN_BUFFER_BYTES {
+        return Err(anyhow!(
+            "{source_name} column {column_name:?} (index {widest_index}) needs {widest} bytes per value, exceeding the {MAX_VARIABLE_COLUMN_BUFFER_BYTES}-byte column buffer limit; use lob_strategy=piecewise or CAST/SUBSTR the column"
+        ));
+    }
+    let bounded = batch_size
+        .min(MAX_VARIABLE_COLUMN_BUFFER_BYTES / widest)
+        .min(MAX_BATCH_BUFFER_BYTES / row_bytes)
+        .max(1);
+    if bounded < batch_size {
+        log::warn!(
+            "{source_name} reducing ODBC batch size from {batch_size} to {bounded} rows: column {column_name:?} needs {widest} bytes per value and a row needs {row_bytes} bytes of bound buffers"
+        );
+    }
+    Ok(bounded)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -606,8 +670,15 @@ where
             self.query.as_str(),
             self.execution_options,
         )?;
-        let buffer = ColumnarAnyBuffer::try_from_descs(
+        let batch_size = bounded_batch_size(
+            TS::source_name(),
+            &self.schema,
+            &self.column_buffer_max_lens,
+            &self.names,
             self.batch_size,
+        )?;
+        let buffer = ColumnarAnyBuffer::try_from_descs(
+            batch_size,
             self.schema
                 .iter()
                 .zip(&self.column_buffer_max_lens)
@@ -3157,6 +3228,70 @@ mod tests {
     }
 
     #[test]
+    fn bounded_batch_size_keeps_small_rows_unchanged() {
+        let names = vec!["id".to_string(), "name".to_string()];
+        let batch = bounded_batch_size(
+            "Test",
+            &[TestType::I32, TestType::Text],
+            &[0, 1020],
+            &names,
+            1024,
+        )
+        .unwrap();
+        assert_eq!(batch, 1024);
+    }
+
+    #[test]
+    fn bounded_batch_size_shrinks_for_wide_driver_reported_columns() {
+        // A CLOB(1M)-style column: utf8_len reports 4 MiB per value, which at
+        // 1024 rows would reserve 4 GiB for one column.
+        let names = vec!["id".to_string(), "doc".to_string()];
+        let batch = bounded_batch_size(
+            "Test",
+            &[TestType::I32, TestType::Text],
+            &[0, 4 * 1024 * 1024],
+            &names,
+            1024,
+        )
+        .unwrap();
+        assert!(batch < 1024);
+        assert!(batch >= 1);
+        assert!(batch * (4 * 1024 * 1024 + 1) <= MAX_VARIABLE_COLUMN_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn bounded_batch_size_caps_total_row_buffers() {
+        // Many medium-width columns each fit, but together exceed the batch cap.
+        let schema = vec![TestType::WText; 64];
+        let max_lens = vec![32 * 1024; 64];
+        let names: Vec<String> = (0..64).map(|i| format!("c{i}")).collect();
+        let batch = bounded_batch_size("Test", &schema, &max_lens, &names, 4096).unwrap();
+        let row_bytes: usize = schema
+            .iter()
+            .zip(&max_lens)
+            .map(|(ty, &len)| buffer_desc_row_bytes(ty.buffer_desc(len)))
+            .sum();
+        assert!(batch < 4096);
+        assert!(batch * row_bytes <= MAX_BATCH_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn bounded_batch_size_rejects_single_values_beyond_the_column_limit() {
+        let names = vec!["blob".to_string()];
+        let err = bounded_batch_size(
+            "Test",
+            &[TestType::Binary],
+            &[MAX_VARIABLE_COLUMN_BUFFER_BYTES + 1],
+            &names,
+            1024,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("\"blob\""), "{err}");
+        assert!(err.contains("lob_strategy=piecewise"), "{err}");
+    }
+
+    #[test]
     fn falls_back_to_default_buffer_length_without_metadata() {
         assert_eq!(
             TestType::Text.buffer_max_len(DataType::LongVarchar { length: None }, 1024),
@@ -5485,6 +5620,13 @@ where
     TS: OdbcTypePolicy + OdbcArrowPolicy + Send + Sync,
     E: OdbcCoreError + Send,
 {
+    let batch_size = bounded_batch_size(
+        TS::source_name(),
+        schema,
+        column_buffer_max_lens,
+        names,
+        batch_size,
+    )?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
         schema
@@ -5789,6 +5931,13 @@ where
         query,
         execution_options,
         Some(pre_execution_queries),
+    )?;
+    let batch_size = bounded_batch_size(
+        TS::source_name(),
+        schema,
+        column_buffer_max_lens,
+        names,
+        batch_size,
     )?;
     let buffer = ColumnarAnyBuffer::try_from_descs(
         batch_size,
