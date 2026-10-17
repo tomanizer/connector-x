@@ -478,7 +478,7 @@ pub fn sybase_odbc_url() -> String {
         wait_for_odbc_ready(&odbc_conn, Duration::from_secs(300), "Sybase ODBC");
 
         let init_cmd = format!(
-            "isql -Usa -P{} -SMYSYBASE -Dtempdb -i /tmp/odbc_sybase.sql",
+            "if [ -f /opt/sybase/SYBASE.sh ]; then . /opt/sybase/SYBASE.sh; fi; isql -Usa -P{} -SMYSYBASE -Dtempdb -Jutf8 -i /tmp/odbc_sybase.sql",
             shell_single_quote(&password)
         );
         let mut exec = container
