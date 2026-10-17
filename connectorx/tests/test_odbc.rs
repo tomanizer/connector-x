@@ -220,7 +220,7 @@ fn test_odbc_arrow_route_with_raw_conn() {
     let _guard = lock_odbc_env();
 
     let (Some(conn), Some(query)) = (odbc_conn(), odbc_query()) else {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC integration test: ODBC_CONN and ODBC_TEST_QUERY are not set");
+        test_db::skip("skipping ODBC integration test: ODBC_CONN and ODBC_TEST_QUERY are not set");
         return;
     };
 
@@ -245,7 +245,7 @@ fn test_odbc_get_arrow_route() {
     let _guard = lock_odbc_env();
 
     let (Some(conn), Some(query)) = (odbc_url(), odbc_query()) else {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC get_arrow test: ODBC_URL and ODBC_TEST_QUERY are not set");
+        test_db::skip("skipping ODBC get_arrow test: ODBC_URL and ODBC_TEST_QUERY are not set");
         return;
     };
 
@@ -273,8 +273,8 @@ fn test_odbc_testcontainer_get_arrow_runs_pre_execution_queries() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC pre-execution get_arrow test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC pre-execution get_arrow test: CONNECTORX_ODBC_TESTCONTAINER is not set",
         );
         return;
     }
@@ -308,8 +308,8 @@ fn test_odbc_partition_query() {
     let _guard = lock_odbc_env();
 
     let (Some(conn), Some((query, column))) = (odbc_url(), odbc_partition_query()) else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC partition test: ODBC_URL, ODBC_PARTITION_QUERY, and ODBC_PARTITION_COLUMN are not set"
+        test_db::skip(
+            "skipping ODBC partition test: ODBC_URL, ODBC_PARTITION_QUERY, and ODBC_PARTITION_COLUMN are not set"
         );
         return;
     };
@@ -326,7 +326,7 @@ fn test_odbc_testcontainer_edge_types() {
     let _guard = lock_odbc_env();
 
     if !use_postgres_testcontainer() {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC edge type test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+        test_db::skip("skipping ODBC edge type test: CONNECTORX_ODBC_TESTCONTAINER is not set");
         return;
     }
 
@@ -432,7 +432,9 @@ fn test_odbc_testcontainer_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!("CONNECTORX_SKIP: skipping ODBC per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set");
+        test_db::skip(
+            "skipping ODBC per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set",
+        );
         return;
     }
 
@@ -484,8 +486,8 @@ fn test_odbc_testcontainer_streaming_uses_metadata_for_long_text_buffer() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC streaming per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC streaming per-column buffer test: CONNECTORX_ODBC_TESTCONTAINER is not set"
         );
         return;
     }
@@ -518,8 +520,8 @@ fn test_odbc_testcontainer_arrow_stream_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC arrow_stream route test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC arrow_stream route test: CONNECTORX_ODBC_TESTCONTAINER is not set",
         );
         return;
     }
@@ -560,8 +562,8 @@ fn test_odbc_testcontainer_piecewise_lob_arrow_table() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC piecewise LOB table test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC piecewise LOB table test: CONNECTORX_ODBC_TESTCONTAINER is not set",
         );
         return;
     }
@@ -608,8 +610,8 @@ fn test_odbc_testcontainer_piecewise_lob_arrow_stream() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC piecewise LOB stream test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC piecewise LOB stream test: CONNECTORX_ODBC_TESTCONTAINER is not set",
         );
         return;
     }
@@ -656,8 +658,8 @@ fn test_odbc_testcontainer_arrow_stream_runs_pre_execution_queries() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_postgres_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping ODBC pre-execution arrow_stream test: CONNECTORX_ODBC_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping ODBC pre-execution arrow_stream test: CONNECTORX_ODBC_TESTCONTAINER is not set"
         );
         return;
     }

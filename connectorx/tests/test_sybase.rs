@@ -464,7 +464,7 @@ fn test_sybase_arrow_basic_types() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        test_db::skip("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -484,7 +484,7 @@ fn test_sybase_arrow_decimal_timestamp() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        test_db::skip("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -533,7 +533,7 @@ fn test_sybase_arrow_binary_time_and_nullable_values() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        test_db::skip("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -585,7 +585,7 @@ fn test_sybase_arrow_primitive_type_matrix() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        test_db::skip("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -672,7 +672,7 @@ fn test_sybase_arrow_date_money_and_text_variants() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
+        test_db::skip("skipping Sybase integration test: SYBASE_ODBC_CONN is not set");
         return;
     };
 
@@ -757,9 +757,7 @@ fn test_sybase_testcontainer_time2_and_bit() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase TIME2/bit test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
-        );
+        test_db::skip("skipping Sybase TIME2/bit test: CONNECTORX_SYBASE_TESTCONTAINER is not set");
         return;
     }
 
@@ -814,8 +812,8 @@ fn test_sybase_driver_matrix_metadata_report() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_driver_matrix_conn() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase driver matrix metadata test: SYBASE_ODBC_CONN or SYBASE_URL is not set"
+        test_db::skip(
+            "skipping Sybase driver matrix metadata test: SYBASE_ODBC_CONN or SYBASE_URL is not set"
         );
         return;
     };
@@ -834,8 +832,8 @@ fn test_sybase_testcontainer_temporal_type_family_and_nulls() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase temporal family test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase temporal family test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
         );
         return;
     }
@@ -943,8 +941,8 @@ fn test_sybase_testcontainer_timestamp_rowversion_is_binary() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase timestamp rowversion test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase timestamp rowversion test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
         );
         return;
     }
@@ -983,8 +981,8 @@ fn test_sybase_testcontainer_binary_image_and_rowversion_transport() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase binary/image test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase binary/image test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
         );
         return;
     }
@@ -1012,8 +1010,8 @@ fn test_sybase_testcontainer_binary_image_and_rowversion_fast_path() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase binary/image fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase binary/image fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
         );
         return;
     }
@@ -1037,8 +1035,8 @@ fn test_sybase_testcontainer_unicode_text_transport() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase Unicode text transport test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase Unicode text transport test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
         );
         return;
     }
@@ -1063,8 +1061,8 @@ fn test_sybase_testcontainer_unicode_text_fast_path() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase Unicode text fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase Unicode text fast-path test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
         );
         return;
     }
@@ -1086,8 +1084,8 @@ fn test_sybase_testcontainer_unicode_text_generic_odbc_fast_path() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase generic ODBC Unicode text test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase generic ODBC Unicode text test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
         );
         return;
     }
@@ -1108,7 +1106,7 @@ fn test_sybase_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase get_arrow test: SYBASE_URL is not set");
+        test_db::skip("skipping Sybase get_arrow test: SYBASE_URL is not set");
         return;
     };
 
@@ -1129,9 +1127,7 @@ fn test_sybase_pre_execution_query_failure_is_reported() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase pre-execution failure test: SYBASE_URL is not set"
-        );
+        test_db::skip("skipping Sybase pre-execution failure test: SYBASE_URL is not set");
         return;
     };
 
@@ -1152,7 +1148,7 @@ fn test_sybase_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase partition test: SYBASE_URL is not set");
+        test_db::skip("skipping Sybase partition test: SYBASE_URL is not set");
         return;
     };
 
@@ -1252,8 +1248,8 @@ fn test_sybase_testcontainer_query_wrapping_count_range_and_partition() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase query wrapping test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase query wrapping test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
         );
         return;
     }
@@ -1308,8 +1304,8 @@ fn test_sybase_testcontainer_query_wrapping_nested_subquery_partition() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_sybase_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase nested partition test: CONNECTORX_SYBASE_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Sybase nested partition test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
         );
         return;
     }
@@ -1532,7 +1528,7 @@ fn test_sybase_fast_path_decimal_precision_and_scale() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = sybase_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Sybase fast-path decimal test: SYBASE_URL is not set");
+        test_db::skip("skipping Sybase fast-path decimal test: SYBASE_URL is not set");
         return;
     };
 

@@ -1,0 +1,117 @@
+name: odbc-family-testcontainers
+
+# Live Db2 and Sybase coverage against throwaway containers, with no repository
+# secrets. Every test must actually run: CONNECTORX_FAIL_ON_SKIP turns any
+# CONNECTORX_SKIP into a failure.
+
+on:
+  pull_request:
+    branches:
+      - main
+      - prerelease
+    paths:
+      - "connectorx/src/sources/odbc_core.rs"
+      - "connectorx/src/sources/odbc_common.rs"
+      - "connectorx/src/sources/odbc/**"
+      - "connectorx/src/sources/db2/**"
+      - "connectorx/src/sources/sybase/**"
+      - "connectorx/src/partition.rs"
+      - "connectorx/src/sql.rs"
+      - "connectorx/src/get_arrow.rs"
+      - "connectorx/tests/test_db.rs"
+      - "connectorx/tests/test_db2.rs"
+      - "connectorx/tests/test_sybase.rs"
+      - "connectorx/tests/test_odbc_route_compare.rs"
+      - "scripts/odbc_db2.sql"
+      - "scripts/odbc_sybase.sql"
+      - "connectorx/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/odbc-family-testcontainers.yml"
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  sybase:
+    name: Sybase (FreeTDS) testcontainer
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CONNECTORX_SYBASE_TESTCONTAINER: "1"
+      CONNECTORX_FAIL_ON_SKIP: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install unixODBC and FreeTDS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev tdsodbc freetds-bin pkg-config libssl-dev libkrb5-dev libclang-dev
+          if ! odbcinst -q -d | grep -qx '\[FreeTDS\]'; then
+            driver="$(dpkg -L tdsodbc | grep -m1 'libtdsodbc.so$')"
+            printf '[FreeTDS]\nDescription=FreeTDS ODBC driver\nDriver=%s\n' "$driver" | sudo tee -a /etc/odbcinst.ini
+          fi
+          odbcinst -q -d
+          docker ps
+
+      - name: Run Sybase and route-comparison tests
+        run: |
+          set -euo pipefail
+          features="src_sybase src_odbc dst_arrow fptr"
+          cargo test -p connectorx --no-default-features --features "$features" \
+            --test test_sybase --test test_odbc_route_compare -- --nocapture --test-threads=1
+          echo "- Sybase testcontainer: test_sybase and the Sybase route comparisons ran with CONNECTORX_FAIL_ON_SKIP=1." >> "$GITHUB_STEP_SUMMARY"
+
+  db2:
+    name: Db2 testcontainer
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CONNECTORX_DB2_TESTCONTAINER: "1"
+      CONNECTORX_FAIL_ON_SKIP: "1"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space for the Db2 image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install unixODBC
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unixodbc unixodbc-dev pkg-config libssl-dev libkrb5-dev libclang-dev curl tar gzip libxml2 libstdc++6
+          sudo apt-get install -y libaio1 || sudo apt-get install -y libaio1t64
+
+      - name: Install Db2 ODBC/CLI driver
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/db2"
+          curl -fsSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz -o "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz"
+          tar -xzf "$RUNNER_TEMP/db2/linuxx64_odbc_cli.tar.gz" -C "$RUNNER_TEMP/db2"
+          printf '[IBM DB2 ODBC DRIVER]\nDescription=IBM DB2 ODBC CLI Driver\nDriver=%s\n' "$RUNNER_TEMP/db2/clidriver/lib/libdb2.so" | sudo tee -a /etc/odbcinst.ini
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/db2/clidriver/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+          odbcinst -q -d
+          docker ps
+
+      - name: Run Db2 and route-comparison tests
+        run: |
+          set -euo pipefail
+          features="src_db2 src_odbc dst_arrow fptr"
+          cargo test -p connectorx --no-default-features --features "$features" \
+            --test test_db2 --test test_odbc_route_compare -- --nocapture --test-threads=1
+          echo "- Db2 testcontainer: test_db2 and the Db2 route comparisons ran with CONNECTORX_FAIL_ON_SKIP=1." >> "$GITHUB_STEP_SUMMARY"

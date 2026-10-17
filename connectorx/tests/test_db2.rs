@@ -98,7 +98,7 @@ fn test_db2_arrow_basic_types() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        test_db::skip("skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -118,7 +118,7 @@ fn test_db2_arrow_decimal_timestamp() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        test_db::skip("skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -168,7 +168,7 @@ fn test_db2_arrow_binary_time_and_nullable_values() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        test_db::skip("skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -220,7 +220,7 @@ fn test_db2_arrow_primitive_type_matrix() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        test_db::skip("skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -292,7 +292,7 @@ fn test_db2_arrow_date_decimal_and_text_variants() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_odbc_conn() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 integration test: DB2_ODBC_CONN is not set");
+        test_db::skip("skipping Db2 integration test: DB2_ODBC_CONN is not set");
         return;
     };
 
@@ -378,9 +378,7 @@ fn test_db2_testcontainer_vendor_type_fallback_opt_in() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
-        );
+        test_db::skip("skipping Db2 vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set");
         return;
     }
 
@@ -439,9 +437,7 @@ fn test_db2_testcontainer_type_edge_supported_fast_path() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 type edge test: CONNECTORX_DB2_TESTCONTAINER is not set"
-        );
+        test_db::skip("skipping Db2 type edge test: CONNECTORX_DB2_TESTCONTAINER is not set");
         return;
     }
 
@@ -548,8 +544,8 @@ fn test_db2_testcontainer_known_vendor_types_are_supported_by_default() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 known vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Db2 known vendor type test: CONNECTORX_DB2_TESTCONTAINER is not set",
         );
         return;
     }
@@ -587,8 +583,8 @@ fn test_db2_testcontainer_decfloat_fallback_preserves_strings() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 DECFLOAT fallback test: CONNECTORX_DB2_TESTCONTAINER is not set"
+        test_db::skip(
+            "skipping Db2 DECFLOAT fallback test: CONNECTORX_DB2_TESTCONTAINER is not set",
         );
         return;
     }
@@ -650,7 +646,7 @@ fn test_db2_get_arrow_route() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 get_arrow test: DB2_URL is not set");
+        test_db::skip("skipping Db2 get_arrow test: DB2_URL is not set");
         return;
     };
 
@@ -671,7 +667,7 @@ fn test_db2_pre_execution_query_failure_is_reported() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 pre-execution failure test: DB2_URL is not set");
+        test_db::skip("skipping Db2 pre-execution failure test: DB2_URL is not set");
         return;
     };
 
@@ -692,7 +688,7 @@ fn test_db2_partition_query() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 partition test: DB2_URL is not set");
+        test_db::skip("skipping Db2 partition test: DB2_URL is not set");
         return;
     };
 
@@ -776,9 +772,7 @@ fn test_db2_testcontainer_query_wrapping_count_range_and_partition() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 query wrapping test: CONNECTORX_DB2_TESTCONTAINER is not set"
-        );
+        test_db::skip("skipping Db2 query wrapping test: CONNECTORX_DB2_TESTCONTAINER is not set");
         return;
     }
 
@@ -832,9 +826,7 @@ fn test_db2_testcontainer_query_wrapping_cte_partition() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     if !use_db2_testcontainer() {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 CTE partition test: CONNECTORX_DB2_TESTCONTAINER is not set"
-        );
+        test_db::skip("skipping Db2 CTE partition test: CONNECTORX_DB2_TESTCONTAINER is not set");
         return;
     }
 
@@ -947,7 +939,7 @@ fn test_db2_fast_path_decimal_precision_and_scale() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some(conn) = db2_url() else {
-        eprintln!("CONNECTORX_SKIP: skipping Db2 fast-path decimal test: DB2_URL is not set");
+        test_db::skip("skipping Db2 fast-path decimal test: DB2_URL is not set");
         return;
     };
 

@@ -49,6 +49,19 @@ static CLICKHOUSE_INIT: Once = Once::new();
 #[cfg(feature = "src_oracle")]
 static ORACLE_INIT: Once = Once::new();
 
+/// Reports a skipped live-database test.
+///
+/// Skips print a `CONNECTORX_SKIP:` marker so CI summaries can count them. When
+/// `CONNECTORX_FAIL_ON_SKIP` is set (as in the testcontainer CI jobs), a skip is
+/// a test failure instead, so missing coverage can never pass silently.
+#[allow(dead_code)]
+pub fn skip(reason: &str) {
+    if env::var_os("CONNECTORX_FAIL_ON_SKIP").is_some() {
+        panic!("CONNECTORX_FAIL_ON_SKIP is set but test would skip: {}", reason);
+    }
+    eprintln!("CONNECTORX_SKIP: {reason}");
+}
+
 fn scripts_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../scripts")
 }

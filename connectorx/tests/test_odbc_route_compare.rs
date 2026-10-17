@@ -100,8 +100,8 @@ fn test_db2_dedicated_and_generic_odbc_routes_match_basic_arrow() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some((dedicated, generic)) = db2_route_pair() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 route comparison test: DB2_URL and DB2_GENERIC_ODBC_URL or DB2_ODBC_CONN are not set"
+        test_db::skip(
+            "skipping Db2 route comparison test: DB2_URL and DB2_GENERIC_ODBC_URL or DB2_ODBC_CONN are not set"
         );
         return;
     };
@@ -119,8 +119,8 @@ fn test_db2_dedicated_and_generic_odbc_partition_routes_match() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some((dedicated, generic)) = db2_route_pair() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Db2 route partition comparison test: DB2_URL and DB2_GENERIC_ODBC_URL or DB2_ODBC_CONN are not set"
+        test_db::skip(
+            "skipping Db2 route partition comparison test: DB2_URL and DB2_GENERIC_ODBC_URL or DB2_ODBC_CONN are not set"
         );
         return;
     };
@@ -138,8 +138,8 @@ fn test_sybase_dedicated_and_generic_odbc_routes_match_basic_arrow() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some((dedicated, generic)) = sybase_route_pair() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase route comparison test: SYBASE_URL and SYBASE_GENERIC_ODBC_URL or SYBASE_ODBC_CONN are not set"
+        test_db::skip(
+            "skipping Sybase route comparison test: SYBASE_URL and SYBASE_GENERIC_ODBC_URL or SYBASE_ODBC_CONN are not set"
         );
         return;
     };
@@ -157,8 +157,8 @@ fn test_sybase_dedicated_and_generic_odbc_partition_routes_match() {
     let _ = env_logger::builder().is_test(true).try_init();
 
     let Some((dedicated, generic)) = sybase_route_pair() else {
-        eprintln!(
-            "CONNECTORX_SKIP: skipping Sybase route partition comparison test: SYBASE_URL and SYBASE_GENERIC_ODBC_URL or SYBASE_ODBC_CONN are not set"
+        test_db::skip(
+            "skipping Sybase route partition comparison test: SYBASE_URL and SYBASE_GENERIC_ODBC_URL or SYBASE_ODBC_CONN are not set"
         );
         return;
     };
