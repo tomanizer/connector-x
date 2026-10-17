@@ -2129,6 +2129,70 @@ where
     Ok(bytes_to_str::<E>(trim_ascii(bytes), "Decimal")?.parse::<Decimal>()?)
 }
 
+/// Parses plain decimal text (`[+-]digits[.digits]`) into the `i128` mantissa of
+/// an Arrow `Decimal128(precision, scale)` value without going through
+/// `rust_decimal`, which is limited to 28 significant digits.
+///
+/// Values are never rounded: extra fraction digits beyond `scale` must be zeros,
+/// and the integer part must fit in `precision - scale` digits.
+pub(crate) fn parse_decimal_mantissa<E>(bytes: &[u8], precision: u8, scale: u8) -> Result<i128, E>
+where
+    E: OdbcCoreError,
+{
+    let invalid = |reason: &str| {
+        E::parse_value(
+            format!("{} ({reason})", bytes_to_string(bytes)),
+            "Decimal128",
+        )
+    };
+    if precision == 0 || precision > 38 || scale > precision {
+        return Err(invalid("unsupported Decimal128 precision/scale"));
+    }
+
+    let text = trim_ascii(bytes);
+    let (negative, digits) = match text.split_first() {
+        Some((b'-', rest)) => (true, rest),
+        Some((b'+', rest)) => (false, rest),
+        _ => (false, text),
+    };
+    let (int_part, frac_part) = match digits.iter().position(|b| *b == b'.') {
+        Some(dot) => (&digits[..dot], &digits[dot + 1..]),
+        None => (digits, &digits[..0]),
+    };
+    if (int_part.is_empty() && frac_part.is_empty())
+        || !int_part.iter().all(u8::is_ascii_digit)
+        || !frac_part.iter().all(u8::is_ascii_digit)
+    {
+        return Err(invalid("not a plain decimal number"));
+    }
+
+    let scale = usize::from(scale);
+    let (kept_frac, extra_frac) = frac_part.split_at(frac_part.len().min(scale));
+    if extra_frac.iter().any(|b| *b != b'0') {
+        return Err(invalid("more fraction digits than the column scale"));
+    }
+    let int_digits = match int_part.iter().position(|b| *b != b'0') {
+        Some(first) => &int_part[first..],
+        None => &int_part[..0],
+    };
+    if int_digits.len() > usize::from(precision) - scale {
+        return Err(invalid(
+            "more integer digits than the column precision allows",
+        ));
+    }
+
+    // At most 38 digits in total, so this cannot overflow i128.
+    let mut mantissa: i128 = 0;
+    for digit in int_digits
+        .iter()
+        .chain(kept_frac)
+        .chain(std::iter::repeat(&b'0').take(scale - kept_frac.len()))
+    {
+        mantissa = mantissa * 10 + i128::from(digit - b'0');
+    }
+    Ok(if negative { -mantissa } else { mantissa })
+}
+
 pub(crate) fn parse_date<E>(bytes: &[u8]) -> Result<NaiveDate, E>
 where
     E: OdbcCoreError,
@@ -2839,6 +2903,90 @@ mod tests {
             "i64",
         ));
         assert_eq!(ty, "i64");
+    }
+
+    #[test]
+    fn parses_decimal_text_into_exact_decimal128_mantissas() {
+        let parse = |text: &[u8], precision, scale| {
+            parse_decimal_mantissa::<TestError>(text, precision, scale)
+        };
+
+        assert_eq!(parse(b"123.45", 5, 2).unwrap(), 12345);
+        assert_eq!(parse(b" -0.000 ", 10, 3).unwrap(), 0);
+        assert_eq!(parse(b"+.5", 3, 2).unwrap(), 50);
+        assert_eq!(parse(b"7.", 3, 1).unwrap(), 70);
+        assert_eq!(parse(b"000042.10", 6, 2).unwrap(), 4210);
+        // Extra fraction digits are accepted only when they are zeros.
+        assert_eq!(parse(b"1.500000", 5, 2).unwrap(), 150);
+
+        // Beyond rust_decimal's 28 significant digits: DECIMAL(31,6) and (38,x).
+        assert_eq!(
+            parse(b"1234567890123456789012345.123456", 31, 6).unwrap(),
+            1234567890123456789012345123456_i128
+        );
+        assert_eq!(
+            parse(b"-99999999999999999999999999999999999999", 38, 0).unwrap(),
+            -99999999999999999999999999999999999999_i128
+        );
+        assert_eq!(
+            parse(b"1234567890123456789012345678.0123456789", 38, 10).unwrap(),
+            12345678901234567890123456780123456789_i128
+        );
+        // 28 / 29 significant digit boundary.
+        assert_eq!(
+            parse(b"9999999999999999999999999999", 28, 0).unwrap(),
+            9999999999999999999999999999_i128
+        );
+        assert_eq!(
+            parse(b"99999999999999999999999999999", 29, 0).unwrap(),
+            99999999999999999999999999999_i128
+        );
+    }
+
+    #[test]
+    fn rejects_decimal_text_that_would_need_rounding_or_overflow() {
+        let parse = |text: &[u8], precision, scale| {
+            parse_decimal_mantissa::<TestError>(text, precision, scale)
+        };
+
+        assert!(parse(b"1.235", 5, 2).is_err(), "must not round");
+        assert!(parse(b"1000", 5, 2).is_err(), "integer part exceeds p-s");
+        assert!(parse(b"999", 5, 2).is_ok());
+        assert!(parse(b"", 5, 2).is_err());
+        assert!(parse(b"-", 5, 2).is_err());
+        assert!(parse(b".", 5, 2).is_err());
+        assert!(parse(b"1.2.3", 5, 2).is_err());
+        assert!(parse(b"12a", 5, 2).is_err());
+        assert!(
+            parse(b"1", 39, 0).is_err(),
+            "Decimal128 max precision is 38"
+        );
+        assert!(parse(b"1", 2, 3).is_err(), "scale cannot exceed precision");
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn decimal_arrays_preserve_values_wider_than_rust_decimal() {
+        use arrow::array::{Array, Decimal128Array};
+
+        let column = OdbcColumn::Bytes(vec![
+            Some(b"1234567890123456789012345.123456".to_vec()),
+            Some(b"-0.000001".to_vec()),
+            None,
+        ]);
+        let array = build_decimal_array_from_owned::<TestError>(&column, 3, true, 31, 6).unwrap();
+        let array = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+        assert_eq!(array.value(0), 1234567890123456789012345123456_i128);
+        assert_eq!(array.value(1), -1);
+        assert!(array.is_null(2));
+        assert_eq!(array.precision(), 31);
+        assert_eq!(array.scale(), 6);
+
+        // Exponent notation still goes through rust_decimal.
+        let column = OdbcColumn::Bytes(vec![Some(b"1.5E+2".to_vec())]);
+        let array = build_decimal_array_from_owned::<TestError>(&column, 1, false, 10, 2).unwrap();
+        let array = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+        assert_eq!(array.value(0), 15000);
     }
 
     #[test]
@@ -3621,9 +3769,26 @@ fn append_decimal<E: OdbcCoreError>(
 fn append_decimal_value<E: OdbcCoreError>(
     builder: &mut Decimal128Builder,
     bytes: &[u8],
+    precision: u8,
     scale: i8,
 ) -> Result<(), E> {
-    append_decimal::<E>(builder, parse_decimal::<E>(bytes)?, scale)
+    if scale < 0 {
+        return Err(ConnectorXError::cannot_produce::<Decimal>(Some(format!(
+            "negative decimal scale {scale}"
+        )))
+        .into());
+    }
+    let trimmed = trim_ascii(bytes);
+    if trimmed.iter().any(|b| matches!(b, b'e' | b'E')) {
+        // Exponent notation (e.g. DECFLOAT-style text) keeps the rust_decimal path.
+        return append_decimal::<E>(builder, parse_decimal::<E>(trimmed)?, scale);
+    }
+    builder.append_value(parse_decimal_mantissa::<E>(
+        trimmed,
+        precision,
+        scale as u8,
+    )?);
+    Ok(())
 }
 
 // local macro used by the array builder functions below
@@ -3846,7 +4011,9 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
         AnySlice::Text(view) => {
             for row_index in 0..nrows {
                 match view.get(row_index) {
-                    Some(bytes) => append_decimal_value::<E>(&mut builder, bytes, scale)?,
+                    Some(bytes) => {
+                        append_decimal_value::<E>(&mut builder, bytes, precision, scale)?
+                    }
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
                         builder.append_null();
@@ -3866,7 +4033,7 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
                             row_index,
                             replace_invalid_utf16,
                         )?;
-                        append_decimal_value::<E>(&mut builder, s.as_bytes(), scale)?;
+                        append_decimal_value::<E>(&mut builder, s.as_bytes(), precision, scale)?;
                     }
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
@@ -3878,13 +4045,20 @@ pub(crate) fn build_decimal_array<E: OdbcCoreError>(
         other => {
             for row_index in 0..nrows {
                 match odbc_cell_from_column(other, row_index) {
-                    Some(cell) => {
-                        let decimal = match &cell {
-                            OdbcValue::Bytes(bytes) => parse_decimal::<E>(bytes.as_ref())?,
-                            _ => parse_decimal::<E>(cell.to_utf8_string().as_bytes())?,
-                        };
-                        append_decimal::<E>(&mut builder, decimal, scale)?;
-                    }
+                    Some(cell) => match &cell {
+                        OdbcValue::Bytes(bytes) => append_decimal_value::<E>(
+                            &mut builder,
+                            bytes.as_ref(),
+                            precision,
+                            scale,
+                        )?,
+                        _ => append_decimal_value::<E>(
+                            &mut builder,
+                            cell.to_utf8_string().as_bytes(),
+                            precision,
+                            scale,
+                        )?,
+                    },
                     None => {
                         require_nullable::<E>(nullable, "Decimal")?;
                         builder.append_null();
@@ -4258,11 +4432,14 @@ pub(crate) fn build_decimal_array_from_owned<E: OdbcCoreError>(
     for row_index in 0..nrows {
         match column.cell(row_index) {
             Some(OdbcValue::Bytes(bytes)) => {
-                append_decimal_value::<E>(&mut builder, bytes.as_ref(), scale)?
+                append_decimal_value::<E>(&mut builder, bytes.as_ref(), precision, scale)?
             }
-            Some(cell) => {
-                append_decimal_value::<E>(&mut builder, cell.to_utf8_string().as_bytes(), scale)?
-            }
+            Some(cell) => append_decimal_value::<E>(
+                &mut builder,
+                cell.to_utf8_string().as_bytes(),
+                precision,
+                scale,
+            )?,
             None => {
                 require_nullable::<E>(nullable, "Decimal")?;
                 builder.append_null();

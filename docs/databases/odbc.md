@@ -164,7 +164,7 @@ Timeout enforcement ultimately depends on the ODBC driver. When a driver reports
 
 ## Performance
 
-The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and narrow text columns use text buffers for driver compatibility; ODBC wide-character metadata uses wide text buffers and is decoded as UTF-16.
+The ODBC reader fetches rows in batches and binds primitive, binary, and temporal columns with typed ODBC buffers. Decimal and narrow text columns use text buffers for driver compatibility; ODBC wide-character metadata uses wide text buffers and is decoded as UTF-16. On the Arrow paths, decimal text is converted directly into the `Decimal128(precision, scale)` mantissa, so values up to 38 digits (for example Db2 `DECIMAL(31,6)` or Sybase `NUMERIC(38,10)`) are exact. Values are never rounded: a value with non-zero digits beyond the column scale, or more integer digits than `precision - scale`, is rejected with a parse error. Exponent notation is still accepted through the `rust_decimal` fallback, which is limited to 28 significant digits.
 
 ConnectorX uses the process-wide ODBC environment provided by `odbc-api` and shares it across generic ODBC, Db2, and Sybase connections. Each active query still uses its own ODBC connection, but concurrent ODBC connections are capped per source instance so partitioned reads do not open unbounded connections.
 

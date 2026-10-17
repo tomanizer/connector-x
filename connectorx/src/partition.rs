@@ -725,7 +725,7 @@ fn clickhouse_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i
     (min_v, max_v)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "src_sqlite"))]
 mod tests {
     use super::*;
 
