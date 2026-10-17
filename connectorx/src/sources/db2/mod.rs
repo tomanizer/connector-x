@@ -555,6 +555,12 @@ fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<Stri
     if queries.len() <= 1 {
         return None;
     }
+    // Partitioned CTE queries carry their own top-level WITH clause; combining
+    // them repeats the CTE names (SQL0340N), so run those partitions separately.
+    if queries.iter().any(|query| starts_with_cte(query.as_str())) {
+        log::debug!("Db2 partition queries use common table expressions; not collapsing them");
+        return None;
+    }
 
     let mut query = String::new();
     for (idx, part) in queries.iter().enumerate() {
@@ -572,6 +578,14 @@ fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<Stri
         queries.len()
     );
     Some(vec![CXQuery::Wrapped(query)])
+}
+
+#[cfg(feature = "dst_arrow")]
+fn starts_with_cte(query: &str) -> bool {
+    let query = query.trim_start();
+    query.len() > 4
+        && query[..4].eq_ignore_ascii_case("with")
+        && query[4..].starts_with(|c: char| c.is_whitespace())
 }
 
 #[cfg(feature = "dst_arrow")]
@@ -672,6 +686,19 @@ mod tests {
 
         assert!(db2_arrow_queries(&queries, Db2PartitionMode::Parallel).is_none());
         assert!(db2_arrow_queries(&queries[..1], Db2PartitionMode::Union).is_none());
+    }
+
+    #[test]
+    fn union_mode_does_not_collapse_cte_partitions() {
+        let queries = vec![
+            CXQuery::naked("WITH q AS (SELECT id FROM t) SELECT * FROM (SELECT * FROM q) AS p WHERE 0 <= p.id AND p.id < 5"),
+            CXQuery::naked("WITH q AS (SELECT id FROM t) SELECT * FROM (SELECT * FROM q) AS p WHERE 5 <= p.id AND p.id < 10"),
+        ];
+        assert!(db2_arrow_queries(&queries, Db2PartitionMode::Union).is_none());
+        assert!(!starts_with_cte("without_cte_table"));
+        assert!(starts_with_cte(
+            "  with\nq as (select 1 from t) select * from q"
+        ));
     }
 
     #[test]
