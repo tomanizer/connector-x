@@ -303,20 +303,22 @@ jobs:
           pip install twine
           pip install packaging -U
 
+      # The `connectorx` name on PyPI belongs to upstream sfu-db/connector-x.
+      # Forks must not publish over it; rename the package before enabling this.
       - name: Upload to PyPI site
-        if: github.ref == 'refs/heads/release'
+        if: github.ref == 'refs/heads/release' && github.repository == 'sfu-db/connector-x'
         env:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
           find . -type f \( -name '*.whl' -o -name '*.tar.gz' \) -print0 | while IFS= read -r -d '' file; do
-            twine upload --non-interactive -u __token__ -p "$PYPI_TOKEN" "$file" || continue
+            twine upload --non-interactive --skip-existing -u __token__ -p "$PYPI_TOKEN" "$file"
           done
 
       - name: Upload to PyPI test site
-        if: github.ref == 'refs/heads/prerelease'
+        if: github.ref == 'refs/heads/prerelease' && github.repository == 'sfu-db/connector-x'
         env:
           PYPI_TEST_TOKEN: ${{ secrets.PYPI_TEST_TOKEN }}
         run: |
           find . -type f \( -name '*.whl' -o -name '*.tar.gz' \) -print0 | while IFS= read -r -d '' file; do
-            twine upload --non-interactive --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$PYPI_TEST_TOKEN" "$file" --verbose || continue
+            twine upload --non-interactive --skip-existing --repository-url https://test.pypi.org/legacy/ -u __token__ -p "$PYPI_TEST_TOKEN" "$file" --verbose
           done
