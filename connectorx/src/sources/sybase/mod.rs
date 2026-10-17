@@ -800,7 +800,7 @@ fn build_sybase_binary_array_from_owned<E: odbc_core::OdbcCoreError>(
 
 fn parse_hex_bytes_generic<E: odbc_core::OdbcCoreError>(bytes: &[u8]) -> Result<Vec<u8>, E> {
     let bytes = odbc_core::trim_ascii(bytes);
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(E::parse_value(
             odbc_core::bytes_to_string(bytes),
             "hex bytes",
@@ -837,10 +837,10 @@ pub fn sybase_conn_string(conn: &str) -> String {
 
     let mut ret = format!(
         "Driver={};Server={};Port={};TDS_Version={};UID={};PWD={};",
-        odbc_conn_value(&driver),
+        odbc_conn_value(driver),
         odbc_conn_value(&host),
         port,
-        odbc_conn_value(&tds_version),
+        odbc_conn_value(tds_version),
         odbc_conn_value(&username),
         odbc_conn_value(&password)
     );

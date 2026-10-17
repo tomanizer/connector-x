@@ -1100,6 +1100,7 @@ impl OdbcColumn {
             AnySlice::WText(view) => {
                 let values = self.ensure_bytes();
                 values.resize_with(nrows, || None);
+                #[allow(clippy::needless_range_loop)] // the None arm assigns values[row_index]
                 for row_index in 0..nrows {
                     match view.get(row_index) {
                         Some(chars) => {
@@ -1476,6 +1477,7 @@ fn fill_byte_column<'a>(
     mut get: impl FnMut(usize) -> Option<&'a [u8]>,
 ) {
     values.resize_with(nrows, || None);
+    #[allow(clippy::needless_range_loop)] // the None arm assigns values[row_index]
     for row_index in 0..nrows {
         match get(row_index) {
             Some(bytes) => {
@@ -1706,6 +1708,9 @@ where
     Ok(environment()?)
 }
 
+/// Column names, mapped types, and bound-buffer lengths for a result set.
+pub(crate) type OdbcColumnLayout<T> = (Vec<String>, Vec<T>, Vec<usize>);
+
 pub(crate) fn fetch_metadata<T, E, F>(
     source_name: &'static str,
     conn: &str,
@@ -1715,7 +1720,7 @@ pub(crate) fn fetch_metadata<T, E, F>(
     execution_options: OdbcExecutionOptions,
     pre_execution_queries: Option<&[String]>,
     map_type: F,
-) -> Result<(Vec<String>, Vec<T>, Vec<usize>), E>
+) -> Result<OdbcColumnLayout<T>, E>
 where
     E: OdbcCoreError,
     T: OdbcTypePolicy,
@@ -1859,8 +1864,7 @@ where
     let batch = cursor.fetch()?.ok_or_else(E::get_nrows_failed)?;
     let raw_value = batch.at(0, 0).ok_or_else(E::get_nrows_failed)?;
     let parsed_value = parse_i64_with_ty::<E>(raw_value, "usize")?;
-    Ok(usize::try_from(parsed_value)
-        .map_err(|_| E::parse_value(bytes_to_string(raw_value), "usize"))?)
+    usize::try_from(parsed_value).map_err(|_| E::parse_value(bytes_to_string(raw_value), "usize"))
 }
 
 pub(crate) fn fetch_i64_pair<E>(
@@ -2262,7 +2266,7 @@ where
     for digit in int_digits
         .iter()
         .chain(kept_frac)
-        .chain(std::iter::repeat(&b'0').take(scale - kept_frac.len()))
+        .chain(std::iter::repeat_n(&b'0', scale - kept_frac.len()))
     {
         mantissa = mantissa * 10 + i128::from(digit - b'0');
     }

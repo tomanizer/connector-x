@@ -136,7 +136,7 @@ fn trailing_clause_len(tokens: &[Token], dialect: OdbcWrapDialect) -> Option<usi
     let n = tokens.len();
     let tail = |k: usize| -> Option<&[Token]> { n.checked_sub(k).map(|s| &tokens[s..]) };
     let words = |k: usize, pattern: &[&[&str]]| -> bool {
-        tail(k).map_or(false, |t| {
+        tail(k).is_some_and(|t| {
             t.iter().zip(pattern).all(|(tok, options)| {
                 options.iter().any(|w| {
                     *w == "#" && tok.text.bytes().all(|b| b.is_ascii_digit()) || tok.is_word(w)
