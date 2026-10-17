@@ -411,9 +411,9 @@ pub(crate) fn db2_get_arrow(
 ) -> OutResult<ArrowDestination> {
     let options = Db2Options::from_env();
     validate_db2_options(&options)?;
-    let optimized_queries = db2_union_all_queries(queries);
-    let queries = optimized_queries.as_deref().unwrap_or(queries);
     let params = url_query_pairs(conn)?;
+    let optimized_queries = db2_arrow_queries(queries, db2_partition_mode(&params)?);
+    let queries = optimized_queries.as_deref().unwrap_or(queries);
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
@@ -457,7 +457,8 @@ pub(crate) fn db2_record_batch_iter(
     pre_execution_queries: Option<&[String]>,
 ) -> OutResult<Box<dyn RecordBatchIterator>> {
     let options = Db2Options::from_env();
-    let optimized_queries = db2_union_all_queries(queries);
+    let params = url_query_pairs(conn)?;
+    let optimized_queries = db2_arrow_queries(queries, db2_partition_mode(&params)?);
     let queries = optimized_queries.as_deref().unwrap_or(queries);
     odbc_core::validate_batch_and_buffer_limits(
         Db2TypeSystem::source_name(),
@@ -466,7 +467,6 @@ pub(crate) fn db2_record_batch_iter(
         Db2TypeSystem::max_str_len_env(),
         options.max_str_len,
     )?;
-    let params = url_query_pairs(conn)?;
     let conn_str = db2_conn_string(&conn[..])?;
     let unknown_type_fallback_to_varchar = options.unknown_type_fallback_to_varchar;
     let profile_config = Db2ProfileConfig::from_env_and_params(Some(&params))?;
@@ -501,6 +501,56 @@ pub(crate) fn db2_record_batch_iter(
 
 odbc_core::impl_odbc_arrow_policy!(Db2TypeSystem);
 
+pub(crate) const DB2_PARTITION_MODE_PARAM: &str = "db2_partition_mode";
+const DB2_PARTITION_MODE_ENV: &str = "DB2_PARTITION_MODE";
+
+/// How the Db2 Arrow paths execute partitioned queries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Db2PartitionMode {
+    /// Collapse all partition queries into one `UNION ALL` query on a single
+    /// connection, letting Db2 parallelise server-side.
+    #[default]
+    Union,
+    /// Run each partition query on its own connection, concurrently (bounded by
+    /// `max_connections`), like the generic ODBC route.
+    Parallel,
+}
+
+impl Db2PartitionMode {
+    pub fn from_name(name: &str) -> anyhow::Result<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "union" | "union_all" | "union-all" => Ok(Self::Union),
+            "parallel" | "concurrent" => Ok(Self::Parallel),
+            other => Err(anyhow!(
+                "{DB2_PARTITION_MODE_PARAM} must be one of union or parallel; got {other:?}"
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn db2_partition_mode(params: &[(String, String)]) -> anyhow::Result<Db2PartitionMode> {
+    if let Some(value) = param_value(params, DB2_PARTITION_MODE_PARAM) {
+        return Db2PartitionMode::from_name(value);
+    }
+    match std::env::var(DB2_PARTITION_MODE_ENV) {
+        Ok(value) => Db2PartitionMode::from_name(&value),
+        Err(_) => Ok(Db2PartitionMode::default()),
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
+fn db2_arrow_queries(
+    queries: &[CXQuery<String>],
+    mode: Db2PartitionMode,
+) -> Option<Vec<CXQuery<String>>> {
+    match mode {
+        Db2PartitionMode::Union => db2_union_all_queries(queries),
+        Db2PartitionMode::Parallel => None,
+    }
+}
+
+#[cfg(feature = "dst_arrow")]
 fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<String>>> {
     if queries.len() <= 1 {
         return None;
@@ -524,6 +574,7 @@ fn db2_union_all_queries(queries: &[CXQuery<String>]) -> Option<Vec<CXQuery<Stri
     Some(vec![CXQuery::Wrapped(query)])
 }
 
+#[cfg(feature = "dst_arrow")]
 fn trim_sql_terminator(query: &str) -> &str {
     let query = query.trim();
     query.strip_suffix(';').unwrap_or(query).trim_end()
@@ -570,6 +621,7 @@ pub fn db2_conn_string(conn: &str) -> String {
     for (key, value) in &params {
         if !is_connector_option_key(key)
             && !is_db2_profile_option_key(key)
+            && !key.eq_ignore_ascii_case(DB2_PARTITION_MODE_PARAM)
             && !key.eq_ignore_ascii_case("driver")
             && !key.eq_ignore_ascii_case("protocol")
         {
@@ -585,6 +637,51 @@ pub fn db2_conn_string(conn: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partition_mode_parses_names_and_defaults_to_union() {
+        assert_eq!(Db2PartitionMode::default(), Db2PartitionMode::Union);
+        assert_eq!(
+            Db2PartitionMode::from_name(" Parallel ").unwrap(),
+            Db2PartitionMode::Parallel
+        );
+        assert_eq!(
+            Db2PartitionMode::from_name("union_all").unwrap(),
+            Db2PartitionMode::Union
+        );
+        assert!(Db2PartitionMode::from_name("serial").is_err());
+
+        let params = vec![(DB2_PARTITION_MODE_PARAM.to_string(), "parallel".to_string())];
+        assert_eq!(
+            db2_partition_mode(&params).unwrap(),
+            Db2PartitionMode::Parallel
+        );
+    }
+
+    #[test]
+    fn partition_mode_controls_union_all_collapsing() {
+        let queries = vec![
+            CXQuery::naked("select * from t where 0 <= id and id < 5;"),
+            CXQuery::naked("select * from t where 5 <= id and id < 10"),
+        ];
+
+        let union = db2_arrow_queries(&queries, Db2PartitionMode::Union).unwrap();
+        assert_eq!(union.len(), 1);
+        assert!(union[0].as_str().contains(" union all "));
+        assert!(!union[0].as_str().contains(';'));
+
+        assert!(db2_arrow_queries(&queries, Db2PartitionMode::Parallel).is_none());
+        assert!(db2_arrow_queries(&queries[..1], Db2PartitionMode::Union).is_none());
+    }
+
+    #[test]
+    fn partition_mode_is_not_passed_to_the_odbc_driver() {
+        let conn = db2_conn_string(
+            "db2://db2inst1:password@127.0.0.1:50000/testdb?db2_partition_mode=parallel",
+        )
+        .unwrap();
+        assert!(!conn.to_ascii_lowercase().contains("partition_mode"));
+    }
 
     #[test]
     fn with_options_sets_instance_limits() {

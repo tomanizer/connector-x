@@ -59,7 +59,7 @@ Additional URL query parameters are appended to the ODBC connection string, so s
 
 `replace_invalid_utf16=true` and `replace_invalid_utf8=true` are ConnectorX-only URL options. They are not passed to the Db2 ODBC driver. By default, ConnectorX rejects invalid UTF-16 returned through ODBC wide text buffers and invalid UTF-8 returned through narrow text buffers; use these options only when you explicitly want invalid sequences replaced with U+FFFD.
 
-`max_connections=N`, `login_timeout_secs=N`, `query_timeout_secs=N`, and `lob_strategy=bounded|piecewise` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
+`max_connections=N`, `login_timeout_secs=N`, `query_timeout_secs=N`, `lob_strategy=bounded|piecewise`, and `db2_partition_mode=union|parallel` are also ConnectorX-only URL options. `login_timeout_secs` configures the ODBC login timeout, and `query_timeout_secs` configures the statement timeout used for metadata, row-count, partition-range, and data-fetch queries. Both timeout values must be positive integers in seconds. Driver support varies, but standard ODBC timeout diagnostics are returned as typed ConnectorX timeout errors.
 
 Db2 URL query parameter names are decoded and matched case-insensitively. Duplicate query parameter names are rejected with an error instead of using first-wins or last-wins behavior. First-class Db2 URL parameters are `driver`, `protocol`, `replace_invalid_utf16`, `replace_invalid_utf8`, `max_connections`, `login_timeout_secs`, `query_timeout_secs`, `lob_strategy`, `db2_profile`, and `replication_key_columns`; other non-duplicate parameters are passed through to the Db2 ODBC driver connection string. `db2_profile` and `replication_key_columns` are ConnectorX-only planning/diagnostic options and are not passed to the Db2 ODBC driver.
 
@@ -160,6 +160,15 @@ ConnectorX generates DB2 SQL for row counts, partition min/max ranges, and parti
 * `FETCH FIRST n ROWS ONLY` in the source query
 
 Queries that use DB2 syntax outside these tested shapes may still rely on ConnectorX's string-composition fallback when `sqlparser` cannot parse the source SQL. Keep partition columns projected by the source query, and prefer simple integer partition keys for partitioned extraction.
+
+### Partition execution mode
+
+On the Arrow and Arrow stream paths, `db2_partition_mode` (URL option) or `DB2_PARTITION_MODE` (environment default) controls how the generated partition queries run:
+
+* `union` (default): all partition queries are combined into one `UNION ALL` query and executed on a single connection, so Db2 can plan and parallelise the whole scan server-side. `partition_num` still determines the generated predicates, but ConnectorX opens only one connection.
+* `parallel`: each partition query runs on its own connection concurrently, bounded by `max_connections`, like the generic ODBC route.
+
+Which mode is faster depends on the server, the accelerator (for example IDAA), and the network; benchmark both with `scripts/odbc_driver_comparison.py`. The non-Arrow `Db2Source` dispatcher path always runs partitions separately.
 
 ## Db2 Profiles And Replication Keys
 
