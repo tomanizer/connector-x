@@ -176,7 +176,7 @@ where
 
     #[throws(SybaseSourceError)]
     fn result_rows(&mut self) -> Option<usize> {
-        self.state.result_rows(odbc_core::OdbcSqlDialect::MsSql)?
+        self.state.result_rows(odbc_core::OdbcSqlDialect::Sybase)?
     }
 
     fn names(&self) -> Vec<String> {
@@ -190,7 +190,7 @@ where
     #[throws(SybaseSourceError)]
     fn partition(self) -> Vec<Self::Partition> {
         self.state
-            .partition(odbc_core::OdbcSqlDialect::MsSql)
+            .partition(odbc_core::OdbcSqlDialect::Sybase)
             .into_iter()
             .map(SybaseSourcePartition::new)
             .collect()

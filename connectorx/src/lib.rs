@@ -165,6 +165,9 @@ pub mod source_router;
 pub mod sources;
 #[doc(hidden)]
 pub mod sql;
+#[cfg(any(feature = "src_db2", feature = "src_sybase"))]
+#[doc(hidden)]
+pub mod sql_odbc;
 pub mod transports;
 #[doc(hidden)]
 pub mod utils;

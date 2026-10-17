@@ -23,7 +23,7 @@ use odbc_api::{
     DataType, Environment, Nullability, Nullable, ResultSetMetadata,
 };
 use rust_decimal::{Decimal, Error as DecimalParseError};
-use sqlparser::dialect::{Dialect, GenericDialect, MsSqlDialect};
+use sqlparser::dialect::GenericDialect;
 
 use crate::{
     errors::ConnectorXError,
@@ -413,10 +413,12 @@ pub trait OdbcTypePolicy: TypeSystem + Copy + Debug {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OdbcSqlDialect {
-    #[cfg_attr(not(any(feature = "src_odbc", feature = "src_db2")), allow(dead_code))]
+    #[cfg_attr(not(feature = "src_odbc"), allow(dead_code))]
     Generic,
+    #[cfg_attr(not(feature = "src_db2"), allow(dead_code))]
+    Db2,
     #[cfg_attr(not(feature = "src_sybase"), allow(dead_code))]
-    MsSql,
+    Sybase,
 }
 
 impl OdbcSqlDialect {
@@ -431,30 +433,29 @@ impl OdbcSqlDialect {
     where
         E: OdbcCoreError,
     {
-        match self {
-            Self::Generic => fetch_count(
-                source_name,
-                conn,
-                query,
-                &GenericDialect {},
-                connection_limiter,
-                execution_options,
-            ),
-            Self::MsSql => fetch_count(
-                source_name,
-                conn,
-                query,
-                &MsSqlDialect {},
-                connection_limiter,
-                execution_options,
-            ),
-        }
+        let cquery = self.count_query(&CXQuery::Naked(query.to_string()))?;
+        fetch_count_query(
+            source_name,
+            conn,
+            cquery.as_str(),
+            connection_limiter,
+            execution_options,
+        )
     }
 
     fn count_query(self, query: &CXQuery<String>) -> Result<CXQuery<String>, ConnectorXError> {
         match self {
             Self::Generic => count_query(query, &GenericDialect {}),
-            Self::MsSql => count_query(query, &MsSqlDialect {}),
+            #[cfg(feature = "src_db2")]
+            Self::Db2 => {
+                crate::sql_odbc::odbc_count_query(query, crate::sql_odbc::OdbcWrapDialect::Db2)
+            }
+            #[cfg(feature = "src_sybase")]
+            Self::Sybase => {
+                crate::sql_odbc::odbc_count_query(query, crate::sql_odbc::OdbcWrapDialect::Sybase)
+            }
+            #[allow(unreachable_patterns)]
+            _ => count_query(query, &GenericDialect {}),
         }
     }
 }
@@ -1812,29 +1813,6 @@ where
         column_buffer_max_lens: buffer_max_lens,
         data_types,
     })
-}
-
-pub(crate) fn fetch_count<E, D>(
-    source_name: &'static str,
-    conn: &str,
-    query: &str,
-    dialect: &D,
-    connection_limiter: &Arc<OdbcConnectionLimiter>,
-    execution_options: OdbcExecutionOptions,
-) -> Result<usize, E>
-where
-    E: OdbcCoreError,
-    D: Dialect,
-{
-    let cxq = CXQuery::Naked(query.to_string());
-    let cquery = count_query(&cxq, dialect)?;
-    fetch_count_query(
-        source_name,
-        conn,
-        cquery.as_str(),
-        connection_limiter,
-        execution_options,
-    )
 }
 
 pub(crate) fn fetch_count_query<E>(

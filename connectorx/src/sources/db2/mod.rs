@@ -185,7 +185,7 @@ where
 
     #[throws(Db2SourceError)]
     fn result_rows(&mut self) -> Option<usize> {
-        self.state.result_rows(odbc_core::OdbcSqlDialect::Generic)?
+        self.state.result_rows(odbc_core::OdbcSqlDialect::Db2)?
     }
 
     fn names(&self) -> Vec<String> {
@@ -199,7 +199,7 @@ where
     #[throws(Db2SourceError)]
     fn partition(self) -> Vec<Self::Partition> {
         self.state
-            .partition(odbc_core::OdbcSqlDialect::Generic)
+            .partition(odbc_core::OdbcSqlDialect::Db2)
             .into_iter()
             .map(Db2SourcePartition::new)
             .collect()

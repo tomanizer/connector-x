@@ -159,7 +159,7 @@ ConnectorX generates DB2 SQL for row counts, partition min/max ranges, and parti
 * `ORDER BY` in the source query
 * `FETCH FIRST n ROWS ONLY` in the source query
 
-Queries that use DB2 syntax outside these tested shapes may still rely on ConnectorX's string-composition fallback when `sqlparser` cannot parse the source SQL. Keep partition columns projected by the source query, and prefer simple integer partition keys for partitioned extraction.
+Trailing Db2 isolation and cursor clauses (`WITH UR|CS|RS|RR`, `FOR READ ONLY`, `FOR FETCH ONLY`, `OPTIMIZE FOR n ROWS`) are split off before parsing and re-appended to the outer generated count, range, and partition queries, because Db2 does not allow them inside a nested table expression and `sqlparser` cannot parse them. Queries that use DB2 syntax outside these tested shapes may still rely on ConnectorX's string-composition fallback when `sqlparser` cannot parse the source SQL. Keep partition columns projected by the source query, and prefer simple integer partition keys for partitioned extraction.
 
 ### Partition execution mode
 

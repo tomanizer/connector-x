@@ -33,7 +33,12 @@ use crate::sources::sybase::{
 use crate::sources::trino::TrinoDialect;
 #[cfg(feature = "src_sqlite")]
 use crate::sql::get_partition_range_query_sep;
+#[allow(unused_imports)]
 use crate::sql::{get_partition_range_query, single_col_partition_query, CXQuery};
+#[cfg(any(feature = "src_db2", feature = "src_sybase"))]
+use crate::sql_odbc::{
+    odbc_partition_range_query, odbc_single_col_partition_query, OdbcWrapDialect,
+};
 use anyhow::anyhow;
 use fehler::{throw, throws};
 #[cfg(feature = "src_bigquery")]
@@ -52,9 +57,9 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 #[cfg(feature = "src_clickhouse")]
 use sqlparser::dialect::ClickHouseDialect;
-#[cfg(any(feature = "src_db2", feature = "src_odbc"))]
+#[cfg(feature = "src_odbc")]
 use sqlparser::dialect::GenericDialect;
-#[cfg(any(feature = "src_mssql_common", feature = "src_sybase"))]
+#[cfg(feature = "src_mssql_common")]
 use sqlparser::dialect::MsSqlDialect;
 #[cfg(feature = "src_mysql")]
 use sqlparser::dialect::MySqlDialect;
@@ -247,11 +252,11 @@ pub fn get_part_query(
         }
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => {
-            single_col_partition_query(query, col, lower, upper, &MsSqlDialect {})?
+            odbc_single_col_partition_query(query, col, lower, upper, OdbcWrapDialect::Sybase)?
         }
         #[cfg(feature = "src_db2")]
         SourceType::Db2 => {
-            single_col_partition_query(query, col, lower, upper, &GenericDialect {})?
+            odbc_single_col_partition_query(query, col, lower, upper, OdbcWrapDialect::Db2)?
         }
         #[cfg(feature = "src_odbc")]
         SourceType::Odbc => {
@@ -584,7 +589,7 @@ fn mssql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
 fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let execution_options = sybase_execution_options(conn.as_str(), SybaseOptions::from_env())?;
     let conn = sybase_conn_string(conn.as_str())?;
-    let range_query = get_partition_range_query(query, col, &MsSqlDialect {})?;
+    let range_query = odbc_partition_range_query(query, col, OdbcWrapDialect::Sybase)?;
     sybase_fetch_i64_pair(&conn, range_query.as_str(), col, execution_options)?
 }
 
@@ -593,7 +598,7 @@ fn sybase_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) 
 fn db2_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let execution_options = db2_execution_options(conn.as_str(), Db2Options::from_env())?;
     let conn = db2_conn_string(conn.as_str())?;
-    let range_query = get_partition_range_query(query, col, &GenericDialect {})?;
+    let range_query = odbc_partition_range_query(query, col, OdbcWrapDialect::Db2)?;
     db2_fetch_i64_pair(&conn, range_query.as_str(), col, execution_options)?
 }
 

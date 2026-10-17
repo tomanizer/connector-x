@@ -18,6 +18,7 @@ use connectorx::{
     prelude::*,
     sources::sybase::{sybase_conn_string, SybaseOptions, SybaseSource, SybaseTypeSystem},
     sql::{count_query, get_partition_range_query, single_col_partition_query, CXQuery},
+    sql_odbc::{odbc_count_query, OdbcWrapDialect},
     transports::SybaseArrowTransport,
 };
 use odbc_api::{
@@ -1326,6 +1327,64 @@ fn test_sybase_testcontainer_query_wrapping_count_range_and_partition() {
     let rows = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
     assert_eq!(rows, 4);
     assert_partition_trade_ids(&batches);
+}
+
+#[test]
+fn test_sybase_testcontainer_partitioning_keeps_lock_hints_top_and_isolation() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        test_db::skip(
+            "skipping Sybase lock hint/TOP/isolation partition test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
+        );
+        return;
+    }
+
+    let conn = test_db::sybase_odbc_url();
+    let source_conn = parse_source(&conn, None).unwrap();
+
+    // HOLDLOCK used to be re-printed as a table alias, and a trailing ORDER BY /
+    // AT ISOLATION clause cannot live inside a derived table.
+    let hinted = "select [TradeId] as TradeId, trade_label \
+                  from dbo.cx_odbc_partition_edge holdlock \
+                  where [TradeId] is not null and [TradeId] <= 4 \
+                  order by [TradeId] at isolation read committed";
+    let count = odbc_count_query(&CXQuery::naked(hinted), OdbcWrapDialect::Sybase).unwrap();
+    let destination = get_arrow(&source_conn, None, &[count], None).unwrap();
+    assert_single_i64(destination.arrow().unwrap(), 4);
+
+    let part = PartitionQuery::new(hinted, "TradeId", None, None, 2);
+    let queries = partition(&part, &source_conn).unwrap();
+    assert_eq!(queries.len(), 2);
+    for query in &queries {
+        assert!(query.as_str().contains(" holdlock "), "{}", query.as_str());
+        assert!(
+            query.as_str().ends_with("at isolation read committed"),
+            "{}",
+            query.as_str()
+        );
+    }
+    let destination = get_arrow(&source_conn, Some(hinted.to_string()), &queries, None).unwrap();
+    assert_partition_trade_ids(&destination.arrow().unwrap());
+
+    // ASE ignores TOP inside derived tables (a wrapped TOP 3 counts all 4 rows),
+    // so wrapping a TOP query for partitioning fails up front instead of
+    // returning a different row set.
+    let top = "select top 3 [TradeId] as TradeId from dbo.cx_odbc_partition_edge \
+               where [TradeId] is not null and [TradeId] <= 4";
+    let part = PartitionQuery::new(top, "TradeId", Some(1), Some(4), 2);
+    let err = partition(&part, &source_conn).unwrap_err().to_string();
+    assert!(err.contains("ignores TOP inside derived tables"), "{}", err);
+
+    // Unpartitioned Arrow reads pass the TOP query through unchanged.
+    let destination = get_arrow(&source_conn, None, &[CXQuery::naked(top)], None).unwrap();
+    let rows = destination
+        .arrow()
+        .unwrap()
+        .iter()
+        .map(RecordBatch::num_rows)
+        .sum::<usize>();
+    assert_eq!(rows, 3);
 }
 
 #[test]

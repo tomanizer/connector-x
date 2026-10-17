@@ -160,7 +160,13 @@ See the ODBC-family type matrix in `docs/databases/odbc.md` for the shared runti
 
 ## Query Wrapping And Partitioning
 
-Sybase count, partition-range, and partition predicates are generated with ConnectorX's T-SQL-compatible wrapping path. The live Sybase tests cover schema-qualified tables, bracketed identifiers, reserved-word columns, nested subqueries, `union all`, `convert(datetime, ...)`, and nullable partition columns. ASE rejects `ORDER BY` in derived tables, so ConnectorX only relies on order stripping for unordered partition wrappers; avoid `top` plus `order by` in partitioned Sybase source queries unless the target ASE server and ODBC driver are validated with that exact shape.
+Sybase count, partition-range, and partition predicates wrap the source query as an opaque derived table: ConnectorX does not parse and re-print Sybase SQL, so lock hints such as `holdlock`, bracketed identifiers, and `convert(...)` calls reach the server exactly as written. The live Sybase tests cover schema-qualified tables, bracketed identifiers, reserved-word columns, nested subqueries, `union all`, `convert(datetime, ...)`, `holdlock`, and nullable partition columns.
+
+Rules for wrapped (counted or partitioned) Sybase queries:
+
+* A top-level `ORDER BY` is removed, because ASE rejects it inside derived tables and row order does not matter for counts, ranges, or unordered partitions.
+* Trailing `at isolation ...`, `for read only`, and `for browse` clauses are moved to the outer generated query.
+* Queries with a top-level `TOP` are rejected. ASE ignores `TOP` inside derived tables (against ASE 16 a wrapped `top 3` counted every row), so partitioning would silently return a different row set. Read such queries without `partition_on`, or move `TOP` into an outer query.
 
 ## Performance Tuning
 
