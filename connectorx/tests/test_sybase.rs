@@ -1031,6 +1031,35 @@ fn test_sybase_testcontainer_binary_image_and_rowversion_fast_path() {
 }
 
 #[test]
+fn test_sybase_testcontainer_binary_image_piecewise_lob_path() {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    if !use_sybase_testcontainer() {
+        test_db::skip(
+            "skipping Sybase binary/image piecewise test: CONNECTORX_SYBASE_TESTCONTAINER is not set",
+        );
+        return;
+    }
+
+    // The image column makes the piecewise SQLGetData path apply to every column,
+    // including the hex-encoded varbinary ones.
+    let mut conn = test_db::sybase_odbc_url();
+    conn.push(if conn.contains('?') { '&' } else { '?' });
+    conn.push_str("lob_strategy=piecewise");
+    let source_conn = parse_source(&conn, None).unwrap();
+    let queries = [CXQuery::naked(
+        "select fixed_bytes, variable_bytes, image_bytes, row_version \
+         from dbo.cx_odbc_binary_edge order by id",
+    )];
+    let destination = get_arrow(&source_conn, None, &queries, None).unwrap();
+
+    let mut batches = destination.arrow().unwrap();
+    assert_eq!(batches.len(), 1);
+    let rb = batches.pop().unwrap();
+    assert_sybase_binary_edge_batch(&rb);
+}
+
+#[test]
 fn test_sybase_testcontainer_unicode_text_transport() {
     let _ = env_logger::builder().is_test(true).try_init();
 

@@ -1221,7 +1221,7 @@ impl OdbcColumn {
         }
     }
 
-    fn bytes(&self, row_index: usize) -> Option<Option<&[u8]>> {
+    pub(crate) fn bytes(&self, row_index: usize) -> Option<Option<&[u8]>> {
         match self {
             Self::Bytes(values) => Some(values.get(row_index).and_then(Option::as_deref)),
             Self::Unsupported => Some(None),

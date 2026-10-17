@@ -412,14 +412,13 @@ use {
     crate::{
         destinations::arrow::ArrowTypeSystem,
         sources::odbc_core::{
-            build_binary_array_from_owned, build_bool_array, build_bool_array_from_owned,
-            build_date32_array, build_date32_array_from_owned, build_decimal_array,
-            build_decimal_array_from_owned, build_float32_array, build_float32_array_from_owned,
-            build_float64_array, build_float64_array_from_owned, build_int64_array,
-            build_int64_array_from_owned, build_string_array, build_string_array_from_owned,
-            build_time64_micro_array, build_time64_micro_array_from_owned,
-            build_timestamp_micro_array, build_timestamp_micro_array_from_owned, require_nullable,
-            OdbcArrowPolicy, OdbcColumn,
+            build_bool_array, build_bool_array_from_owned, build_date32_array,
+            build_date32_array_from_owned, build_decimal_array, build_decimal_array_from_owned,
+            build_float32_array, build_float32_array_from_owned, build_float64_array,
+            build_float64_array_from_owned, build_int64_array, build_int64_array_from_owned,
+            build_string_array, build_string_array_from_owned, build_time64_micro_array,
+            build_time64_micro_array_from_owned, build_timestamp_micro_array,
+            build_timestamp_micro_array_from_owned, require_nullable, OdbcArrowPolicy, OdbcColumn,
         },
     },
     arrow::array::{ArrayRef, LargeBinaryBuilder},
@@ -686,7 +685,9 @@ impl OdbcArrowPolicy for SybaseTypeSystem {
                 column_name,
                 replace_invalid_utf8,
             ),
-            SybaseTypeSystem::Binary(..) => build_binary_array_from_owned(column, nrows, nullable),
+            SybaseTypeSystem::Binary(..) => {
+                build_sybase_binary_array_from_owned(column, nrows, nullable)
+            }
             SybaseTypeSystem::Date(..) => build_date32_array_from_owned(column, nrows, nullable),
             SybaseTypeSystem::Time(..) => {
                 build_time64_micro_array_from_owned(column, nrows, nullable)
@@ -763,6 +764,40 @@ fn build_sybase_binary_array<E: odbc_core::OdbcCoreError>(
 }
 
 /// Decode an ASCII hex byte string (e.g. `b"ABCD"`) into raw bytes (`[0xAB, 0xCD]`).
+/// Builds a binary array from piecewise-fetched cells.
+///
+/// Sybase binary columns are always fetched through text buffers (see
+/// `buffer_desc`), so FreeTDS hands back hex text that must be decoded here just
+/// like in `build_sybase_binary_array`.
+#[cfg(feature = "dst_arrow")]
+fn build_sybase_binary_array_from_owned<E: odbc_core::OdbcCoreError>(
+    column: &OdbcColumn,
+    nrows: usize,
+    nullable: bool,
+) -> Result<ArrayRef, E> {
+    let mut builder = LargeBinaryBuilder::with_capacity(nrows, nrows * 8);
+    for row_index in 0..nrows {
+        match column.bytes(row_index) {
+            Some(Some(hex_text)) => {
+                builder.append_value(parse_hex_bytes_generic::<E>(hex_text)?);
+            }
+            Some(None) => {
+                require_nullable::<E>(nullable, "Vec<u8>")?;
+                builder.append_null();
+            }
+            None => {
+                return Err(
+                    crate::errors::ConnectorXError::cannot_produce::<Vec<u8>>(Some(
+                        "Sybase piecewise binary column was not fetched as hex text".to_string(),
+                    ))
+                    .into(),
+                );
+            }
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 fn parse_hex_bytes_generic<E: odbc_core::OdbcCoreError>(bytes: &[u8]) -> Result<Vec<u8>, E> {
     let bytes = odbc_core::trim_ascii(bytes);
     if bytes.len() % 2 != 0 {
@@ -1006,6 +1041,37 @@ mod tests {
             .clone();
         assert_eq!(array.value(0), &[0x00_u8, 0x7f, 0x80, 0xff]);
         assert!(array.is_null(1));
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn piecewise_binary_cells_are_hex_decoded_like_bounded_cells() {
+        use arrow::array::{Array, LargeBinaryArray};
+
+        // Piecewise LOB reads fetch Sybase binary through SQLGetData text, so the
+        // owned cells hold FreeTDS hex just like the bounded text buffers.
+        let column = OdbcColumn::Bytes(vec![Some(b"007F80FF".to_vec()), None]);
+        let array = SybaseTypeSystem::Binary(true)
+            .build_arrow_array_from_owned::<SybaseSourceError>(
+                &column,
+                2,
+                0,
+                Some("payload"),
+                false,
+            )
+            .unwrap();
+        let array = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+        assert_eq!(array.value(0), &[0x00_u8, 0x7f, 0x80, 0xff]);
+        assert!(array.is_null(1));
+    }
+
+    #[cfg(feature = "dst_arrow")]
+    #[test]
+    fn piecewise_binary_cells_reject_invalid_hex() {
+        let column = OdbcColumn::Bytes(vec![Some(b"0G".to_vec())]);
+        assert!(SybaseTypeSystem::Binary(false)
+            .build_arrow_array_from_owned::<SybaseSourceError>(&column, 1, 0, None, false)
+            .is_err());
     }
 
     #[cfg(feature = "dst_arrow")]

@@ -57,7 +57,10 @@ static ORACLE_INIT: Once = Once::new();
 #[allow(dead_code)]
 pub fn skip(reason: &str) {
     if env::var_os("CONNECTORX_FAIL_ON_SKIP").is_some() {
-        panic!("CONNECTORX_FAIL_ON_SKIP is set but test would skip: {}", reason);
+        panic!(
+            "CONNECTORX_FAIL_ON_SKIP is set but test would skip: {}",
+            reason
+        );
     }
     eprintln!("CONNECTORX_SKIP: {reason}");
 }
