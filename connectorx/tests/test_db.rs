@@ -107,6 +107,22 @@ fn escape_odbc_braced_value(value: &str) -> String {
     value.replace('}', "}}")
 }
 
+/// The IBM CLI driver treats braces around plain values (`Hostname={host}`) as
+/// part of the value, so only brace values that need it, like `db2_conn_string`.
+#[cfg(feature = "src_db2")]
+fn db2_conn_value(value: &str) -> String {
+    if value.is_empty()
+        || value.trim() != value
+        || value
+            .bytes()
+            .any(|byte| matches!(byte, b';' | b'{' | b'}' | b'=') || byte.is_ascii_whitespace())
+    {
+        format!("{{{}}}", escape_odbc_braced_value(value))
+    } else {
+        value.to_string()
+    }
+}
+
 #[cfg(feature = "src_sybase")]
 fn sybase_conn_with_utf8_charset(conn: &str) -> String {
     let lower = conn.to_ascii_lowercase();
@@ -384,10 +400,10 @@ pub fn db2_odbc_url() -> String {
         }
 
         let odbc_conn = format!(
-            "Driver={{{escaped_driver}}};Hostname={{{}}};Port={port};Protocol=TCPIP;Database={{{}}};UID=db2inst1;PWD={{{}}};",
-            escape_odbc_braced_value(host_for_url),
-            escape_odbc_braced_value(&database),
-            escape_odbc_braced_value(&password)
+            "Driver={{{escaped_driver}}};Hostname={};Port={port};Protocol=TCPIP;Database={};UID=db2inst1;PWD={};",
+            db2_conn_value(host_for_url),
+            db2_conn_value(&database),
+            db2_conn_value(&password)
         );
         wait_for_odbc_query(
             &odbc_conn,
