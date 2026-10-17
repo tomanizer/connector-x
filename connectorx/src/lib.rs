@@ -1,4 +1,5 @@
 #![allow(clippy::upper_case_acronyms)]
+#![warn(missing_docs)]
 
 //! # ConnectorX
 //!
@@ -49,7 +50,7 @@
 //! ```
 //! ## How does ConnectorX download the data?
 //!
-//! Upon receiving the query, e.g. SELECT * FROM lineitem, ConnectorX will first issue a LIMIT 1 query SELECT * FROM lineitem LIMIT 1 to get the schema of the result set.
+//! Upon receiving the query, e.g. SELECT * FROM lineitem, ConnectorX will first issue a LIMIT 0 query SELECT * FROM lineitem LIMIT 0 to get the schema of the result set.
 //!
 //! Then, if partition_on is specified, ConnectorX will issue `SELECT MIN($partition_on), MAX($partition_on) FROM (SELECT * FROM lineitem)` to know the range of the partition column.
 //! After that, the original query is split into partitions based on the min/max information, e.g. `SELECT * FROM (SELECT * FROM lineitem) WHERE $partition_on > 0 AND $partition_on < 10000`.
@@ -198,7 +199,7 @@ pub mod prelude {
     pub use crate::sources::db2::Db2Source;
     #[cfg(feature = "src_dummy")]
     pub use crate::sources::dummy::DummySource;
-    #[cfg(feature = "src_mssql")]
+    #[cfg(feature = "src_mssql_common")]
     pub use crate::sources::mssql::MsSQLSource;
     #[cfg(feature = "src_mysql")]
     pub use crate::sources::mysql::MySQLSource;

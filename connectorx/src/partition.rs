@@ -1,3 +1,4 @@
+use std::convert::TryFrom;
 #[cfg(feature = "src_clickhouse")]
 use std::sync::Arc;
 
@@ -11,10 +12,10 @@ use crate::sources::clickhouse::{ClickHouseSource, ClickHouseSourceError};
 use crate::sources::db2::{
     db2_conn_string, db2_execution_options, fetch_i64_pair as db2_fetch_i64_pair, Db2Options,
 };
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_tiberius")]
 use crate::sources::mssql::{mssql_config, FloatN, IntN, MsSQLTypeSystem};
 #[cfg(feature = "src_mysql")]
-use crate::sources::mysql::{MySQLSourceError, MySQLTypeSystem};
+use crate::sources::mysql::{build_opts, MySQLTypeSystem};
 #[cfg(feature = "src_odbc")]
 use crate::sources::odbc::{
     fetch_i64_pair as odbc_fetch_i64_pair, odbc_conn_string, odbc_execution_options, OdbcOptions,
@@ -38,7 +39,7 @@ use fehler::{throw, throws};
 #[cfg(feature = "src_bigquery")]
 use gcp_bigquery_client;
 #[cfg(feature = "src_mysql")]
-use r2d2_mysql::mysql::{prelude::Queryable, Opts, Pool, Row};
+use r2d2_mysql::mysql::{prelude::Queryable, Pool, Row};
 #[cfg(feature = "src_sqlite")]
 use rusqlite::{types::Type, Connection};
 #[cfg(feature = "src_postgres")]
@@ -53,7 +54,7 @@ use serde_json::Value as JsonValue;
 use sqlparser::dialect::ClickHouseDialect;
 #[cfg(any(feature = "src_db2", feature = "src_odbc"))]
 use sqlparser::dialect::GenericDialect;
-#[cfg(any(feature = "src_mssql", feature = "src_sybase"))]
+#[cfg(any(feature = "src_mssql_common", feature = "src_sybase"))]
 use sqlparser::dialect::MsSqlDialect;
 #[cfg(feature = "src_mysql")]
 use sqlparser::dialect::MySqlDialect;
@@ -61,11 +62,15 @@ use sqlparser::dialect::MySqlDialect;
 use sqlparser::dialect::PostgreSqlDialect;
 #[cfg(feature = "src_sqlite")]
 use sqlparser::dialect::SQLiteDialect;
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_tiberius")]
 use tiberius::Client;
-#[cfg(any(feature = "src_bigquery", feature = "src_mssql", feature = "src_trino"))]
+#[cfg(any(
+    feature = "src_bigquery",
+    feature = "src_mssql_tiberius",
+    feature = "src_trino"
+))]
 use tokio::{net::TcpStream, runtime::Runtime};
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_tiberius")]
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use url::Url;
 
@@ -91,7 +96,18 @@ impl PartitionQuery {
 
 pub fn partition(part: &PartitionQuery, source_conn: &SourceConn) -> OutResult<Vec<CXQuery>> {
     let mut queries = vec![];
-    let num = part.num as i64;
+
+    if part.num == 0 {
+        throw!(anyhow!("partition count (num) must be greater than zero"));
+    }
+
+    let num = i64::try_from(part.num).map_err(|_| {
+        anyhow!(
+            "partition count (num) is too large to represent safely: {}",
+            part.num
+        )
+    })?;
+
     let (min, max) = match (part.min, part.max) {
         (None, None) => get_col_range(source_conn, &part.query, &part.column)?,
         (Some(min), Some(max)) => (min, max),
@@ -100,13 +116,60 @@ pub fn partition(part: &PartitionQuery, source_conn: &SourceConn) -> OutResult<V
         )),
     };
 
-    let partition_size = (max - min + 1) / num;
+    if max < min {
+        throw!(anyhow!(
+            "partition range is invalid: max ({}) must be greater than or equal to min ({})",
+            max,
+            min
+        ));
+    }
 
-    for i in 0..num {
-        let lower = min + i * partition_size;
-        let upper = match i == num - 1 {
-            true => max + 1,
-            false => min + (i + 1) * partition_size,
+    let range_len = max
+        .checked_sub(min)
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| {
+            anyhow!(
+                "partition range overflow: min={}, max={} is too large",
+                min,
+                max
+            )
+        })?;
+
+    let partition_size = range_len / num;
+
+    let final_upper = max.checked_add(1).ok_or_else(|| {
+        anyhow!(
+            "partition upper bound overflow: max={} cannot be incremented safely",
+            max
+        )
+    })?;
+
+    for i in 0i64..num {
+        let lower = i
+            .checked_mul(partition_size)
+            .and_then(|offset| min.checked_add(offset))
+            .ok_or_else(|| {
+                anyhow!(
+                    "partition lower bound overflow: min={}, step={}, partition_size={}",
+                    min,
+                    i,
+                    partition_size
+                )
+            })?;
+        let upper = if i == num - 1 {
+            final_upper
+        } else {
+            (i + 1)
+                .checked_mul(partition_size)
+                .and_then(|offset| min.checked_add(offset))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "partition upper bound overflow: min={}, step={}, partition_size={}",
+                        min,
+                        i + 1,
+                        partition_size
+                    )
+                })?
         };
         let partition_query = get_part_query(source_conn, &part.query, &part.column, lower, upper)?;
         queries.push(partition_query);
@@ -122,8 +185,23 @@ pub fn get_col_range(source_conn: &SourceConn, query: &str, col: &str) -> OutRes
         SourceType::SQLite => sqlite_get_partition_range(&source_conn.conn, query, col),
         #[cfg(feature = "src_mysql")]
         SourceType::MySQL => mysql_get_partition_range(&source_conn.conn, query, col),
-        #[cfg(feature = "src_mssql")]
+        #[cfg(all(feature = "src_mssql_tiberius", not(feature = "src_mssql_tds")))]
         SourceType::MsSQL => mssql_get_partition_range(&source_conn.conn, query, col),
+        #[cfg(all(feature = "src_mssql_tiberius", feature = "src_mssql_tds"))]
+        SourceType::MsSQL => match crate::sources::mssql::active_driver() {
+            crate::sources::mssql::MsSQLDriverKind::Tiberius => {
+                mssql_get_partition_range(&source_conn.conn, query, col)
+            }
+            crate::sources::mssql::MsSQLDriverKind::MssqlTds => Ok(
+                crate::sources::mssql::tds_get_partition_range(&source_conn.conn, query, col)?,
+            ),
+        },
+        #[cfg(all(feature = "src_mssql_tds", not(feature = "src_mssql_tiberius")))]
+        SourceType::MsSQL => Ok(crate::sources::mssql::tds_get_partition_range(
+            &source_conn.conn,
+            query,
+            col,
+        )?),
         #[cfg(feature = "src_sybase")]
         SourceType::Sybase => sybase_get_partition_range(&source_conn.conn, query, col),
         #[cfg(feature = "src_db2")]
@@ -163,7 +241,7 @@ pub fn get_part_query(
         SourceType::MySQL => {
             single_col_partition_query(query, col, lower, upper, &MySqlDialect {})?
         }
-        #[cfg(feature = "src_mssql")]
+        #[cfg(feature = "src_mssql_common")]
         SourceType::MsSQL => {
             single_col_partition_query(query, col, lower, upper, &MsSqlDialect {})?
         }
@@ -309,15 +387,18 @@ fn sqlite_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) 
 #[cfg(feature = "src_mysql")]
 #[throws(ConnectorXOutError)]
 fn mysql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
-    let pool = Pool::new(Opts::from_url(conn.as_str()).map_err(MySQLSourceError::MySQLUrlError)?)?;
+    let pool = Pool::new(build_opts(conn.as_str())?)?;
     let mut conn = pool.get_conn()?;
     let range_query = get_partition_range_query(query, col, &MySqlDialect {})?;
     let row: Row = conn
         .query_first(range_query)?
         .ok_or_else(|| anyhow!("mysql range: no row returns"))?;
 
-    let col_type =
-        MySQLTypeSystem::from((&row.columns()[0].column_type(), &row.columns()[0].flags()));
+    let col_type = MySQLTypeSystem::from((
+        &row.columns()[0].column_type(),
+        &row.columns()[0].flags(),
+        row.columns()[0].character_set(),
+    ));
 
     let (min_v, max_v) = match col_type {
         MySQLTypeSystem::Tiny(_) => {
@@ -434,7 +515,7 @@ fn mysql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     (min_v, max_v)
 }
 
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_tiberius")]
 #[throws(ConnectorXOutError)]
 fn mssql_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
     let rt = Runtime::new().expect("Failed to create runtime");
@@ -573,31 +654,12 @@ fn bigquery_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64
 #[cfg(feature = "src_trino")]
 #[throws(ConnectorXOutError)]
 fn trino_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i64) {
-    use prusto::{auth::Auth, ClientBuilder};
-
-    use crate::sources::trino::{TrinoDialect, TrinoPartitionQueryResult};
+    use crate::sources::trino::{build_client_from_url, TrinoDialect, TrinoPartitionQueryResult};
 
     let rt = Runtime::new().expect("Failed to create runtime");
 
-    let username = match conn.username() {
-        "" => "connectorx",
-        username => username,
-    };
-
-    let builder = ClientBuilder::new(username, conn.host().unwrap().to_owned())
-        .port(conn.port().unwrap_or(8080))
-        .ssl(prusto::ssl::Ssl { root_cert: None })
-        .secure(conn.scheme() == "trino+https")
-        .catalog(conn.path_segments().unwrap().last().unwrap_or("hive"));
-
-    let builder = match conn.password() {
-        None => builder,
-        Some(password) => builder.auth(Auth::Basic(username.to_owned(), Some(password.to_owned()))),
-    };
-
-    let client = builder
-        .build()
-        .map_err(|e| anyhow!("Failed to build client: {}", e))?;
+    let client =
+        build_client_from_url(conn).map_err(|e| anyhow!("Failed to build Trino client: {}", e))?;
 
     let range_query = get_partition_range_query(query, col, &TrinoDialect {})?;
     let query_result = rt.block_on(client.get_all::<TrinoPartitionQueryResult>(range_query));
@@ -652,7 +714,7 @@ fn clickhouse_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i
         .map_err(|e| anyhow!("Failed to parse min max response: {}", e))?;
 
     let (min_v, max_v) = if let Some(row) = parsed.data.first() {
-        let min_v = row.get(0).and_then(|v| v.as_i64()).unwrap_or(0);
+        let min_v = row.first().and_then(|v| v.as_i64()).unwrap_or(0);
         let max_v = row.get(1).and_then(|v| v.as_i64()).unwrap_or(0);
 
         (min_v, max_v)
@@ -661,4 +723,229 @@ fn clickhouse_get_partition_range(conn: &Url, query: &str, col: &str) -> (i64, i
     };
 
     (min_v, max_v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a `SourceConn` backed by SQLite, which does not require a live
+    /// database connection to generate partition queries (the SQL is
+    /// generated purely from the parsed dialect).
+    fn sqlite_source_conn() -> SourceConn {
+        SourceConn::new(
+            SourceType::SQLite,
+            Url::parse("sqlite://test.db").unwrap(),
+            "binary".to_string(),
+        )
+    }
+
+    fn queries_as_strings(queries: &[CXQuery]) -> Vec<String> {
+        queries.iter().map(|q| q.to_string()).collect()
+    }
+
+    #[test]
+    fn partitions_evenly_divisible_range() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(0), Some(9), 2);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 2);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("0 <=") && strings[0].contains("< 5"));
+        assert!(strings[1].contains("5 <=") && strings[1].contains("< 10"));
+    }
+
+    #[test]
+    fn partitions_range_not_evenly_divisible() {
+        // Range [0, 10] has 11 values split across 3 partitions: sizes 3, 3, 3 with
+        // remainder handled by the last partition absorbing everything up to max + 1.
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(0), Some(10), 3);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 3);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("0 <=") && strings[0].contains("< 3"));
+        assert!(strings[1].contains("3 <=") && strings[1].contains("< 6"));
+        // Last partition always goes up to max + 1, regardless of even division.
+        assert!(strings[2].contains("6 <=") && strings[2].contains("< 11"));
+    }
+
+    #[test]
+    fn single_partition_covers_whole_range() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(5), Some(15), 1);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 1);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("5 <=") && strings[0].contains("< 16"));
+    }
+
+    #[test]
+    fn min_equals_max_single_row_range() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(7), Some(7), 1);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 1);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("7 <=") && strings[0].contains("< 8"));
+    }
+
+    #[test]
+    fn negative_range_partitions_correctly() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(-10), Some(-1), 2);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 2);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("-10 <=") && strings[0].contains("< -5"));
+        assert!(strings[1].contains("-5 <=") && strings[1].contains("< 0"));
+    }
+
+    #[test]
+    fn partially_specified_range_returns_error() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(0), None, 2);
+        let source_conn = sqlite_source_conn();
+        let result = partition(&part, &source_conn);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn zero_partitions_returns_error_on_division_by_zero() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(0), Some(9), 0);
+        let source_conn = sqlite_source_conn();
+        let result = partition(&part, &source_conn);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("partition count (num) must be greater than zero"));
+    }
+
+    #[test]
+    fn inverted_range_returns_error() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(10), Some(0), 2);
+        let source_conn = sqlite_source_conn();
+        let result = partition(&part, &source_conn);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("partition range is invalid"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn more_partitions_than_range_values_preserves_partition_count() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(0), Some(1), 4);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 4);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("0 <=") && strings[0].contains("< 0"));
+        assert!(strings[1].contains("0 <=") && strings[1].contains("< 0"));
+        assert!(strings[2].contains("0 <=") && strings[2].contains("< 0"));
+        assert!(strings[3].contains("0 <=") && strings[3].contains("< 2"));
+    }
+
+    #[test]
+    fn large_range_does_not_overflow_with_small_num() {
+        // Sanity check that reasonably large but safe ranges partition correctly
+        // without overflow for a small number of partitions.
+        let part = PartitionQuery::new(
+            "SELECT * FROM test",
+            "id",
+            Some(0),
+            Some(1_000_000_000_000),
+            4,
+        );
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 4);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("0 <="));
+        assert!(strings[3].contains("< 1000000000001"));
+    }
+
+    #[test]
+    fn many_small_partitions_produce_correct_count_and_bounds() {
+        let part = PartitionQuery::new("SELECT * FROM test", "id", Some(1), Some(100), 10);
+        let source_conn = sqlite_source_conn();
+        let queries = partition(&part, &source_conn).unwrap();
+
+        assert_eq!(queries.len(), 10);
+        let strings = queries_as_strings(&queries);
+        assert!(strings[0].contains("1 <=") && strings[0].contains("< 11"));
+        assert!(strings[9].contains("91 <=") && strings[9].contains("< 101"));
+    }
+
+    #[test]
+    fn partition_range_overflow() {
+        // (max - min + 1) overflows i64 when min is i64::MIN and max is i64::MAX
+        let part = PartitionQuery::new(
+            "SELECT * FROM test",
+            "id",
+            Some(i64::MIN),
+            Some(i64::MAX),
+            2,
+        );
+        let source_conn = sqlite_source_conn();
+        let res = partition(&part, &source_conn);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("partition range overflow"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn partition_upper_overflow_at_i64_max() {
+        // max is i64::MAX; range_len is 6 (does not overflow),
+        // but max + 1 for the partition upper bound overflows i64.
+        let part = PartitionQuery::new(
+            "SELECT * FROM test",
+            "id",
+            Some(i64::MAX - 5),
+            Some(i64::MAX),
+            1,
+        );
+        let source_conn = sqlite_source_conn();
+        let res = partition(&part, &source_conn);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("partition upper bound overflow"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn partition_upper_overflow_multi_partition() {
+        // Multi-partition where first partition succeeds but last partition overflows max + 1
+        let part = PartitionQuery::new(
+            "SELECT * FROM test",
+            "id",
+            Some(i64::MAX - 5),
+            Some(i64::MAX),
+            2,
+        );
+        let source_conn = sqlite_source_conn();
+        let res = partition(&part, &source_conn);
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("partition upper bound overflow"),
+            "unexpected error message: {}",
+            err
+        );
+    }
 }

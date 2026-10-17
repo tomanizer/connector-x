@@ -14,7 +14,7 @@ jobs:
   benchmark:
     runs-on: [self-hosted, linux, x64, connectorx-benchmark]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install tools
         run: |
@@ -24,11 +24,9 @@ jobs:
           DEBIAN_FRONTEND: noninteractive
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt
-          default: true
 
       - name: Install other dependent tools
         run: |

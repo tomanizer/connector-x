@@ -529,7 +529,7 @@ fn test_odbc_testcontainer_arrow_stream_route() {
     let queries = [CXQuery::naked(
         "select id, name from cx_odbc_test order by id",
     )];
-    let mut iter = new_record_batch_iter(&source_conn, None, &queries, 1, None);
+    let mut iter = new_record_batch_iter(&source_conn, None, &queries, 1, None).unwrap();
     let (schema_batch, names) = iter.get_schema();
     assert_eq!(schema_batch.num_columns(), 2);
     assert_eq!(names, &["id".to_string(), "name".to_string()]);

@@ -267,6 +267,37 @@ pub fn count_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<St
 }
 
 #[throws(ConnectorXError)]
+pub fn limit0_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<String> {
+    trace!("Incoming query: {}", sql);
+
+    let sql = match Parser::parse_sql(dialect, sql.as_str()) {
+        Ok(mut ast) => {
+            if ast.len() != 1 {
+                throw!(ConnectorXError::SqlQueryNotSupported(sql.to_string()));
+            }
+
+            match &mut ast[0] {
+                Statement::Query(q) => {
+                    q.limit = Some(Expr::Value(Value::Number("0".to_string(), false)));
+                }
+                _ => throw!(ConnectorXError::SqlQueryNotSupported(sql.to_string())),
+            };
+
+            format!("{}", ast[0])
+        }
+        Err(e) => {
+            warn!("parser error: {:?}, manually compose query string", e);
+            format!("{} LIMIT 0", sql.as_str())
+        }
+    };
+
+    debug!("Transformed limit 0 query: {}", sql);
+    CXQuery::Wrapped(sql)
+}
+
+/// Like limit0_query but with LIMIT 1. Used by SQLite where schema inference
+/// requires at least one row when decl_type is not available.
+#[throws(ConnectorXError)]
 pub fn limit1_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<String> {
     trace!("Incoming query: {}", sql);
 
@@ -297,10 +328,10 @@ pub fn limit1_query<T: Dialect>(sql: &CXQuery<String>, dialect: &T) -> CXQuery<S
 
 #[throws(ConnectorXError)]
 #[cfg(feature = "src_oracle")]
-pub fn limit1_query_oracle(sql: &CXQuery<String>) -> CXQuery<String> {
+pub fn limit0_query_oracle(sql: &CXQuery<String>) -> CXQuery<String> {
     trace!("Incoming oracle query: {}", sql);
 
-    CXQuery::Wrapped(format!("SELECT * FROM ({}) WHERE rownum = 1", sql))
+    CXQuery::Wrapped(format!("SELECT * FROM ({}) WHERE 1=0", sql))
 
     // let ast = Parser::parse_sql(&OracleDialect {}, sql.as_str())?;
     // if ast.len() != 1 {
@@ -374,8 +405,6 @@ pub fn single_col_partition_query<T: Dialect>(
                 .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                 .clone();
 
-            let ast_part: Statement;
-
             let lb = Expr::BinaryOp {
                 left: Box::new(Expr::Value(Value::Number(lower.to_string(), false))),
                 op: BinaryOperator::LtEq,
@@ -410,7 +439,7 @@ pub fn single_col_partition_query<T: Dialect>(
                 query.order_by.clear();
             }
 
-            ast_part = wrap_query(
+            let ast_part: Statement = wrap_query(
                 &mut query,
                 vec![SelectItem::Wildcard(WildcardAdditionalOptions::default())],
                 Some(selection),
@@ -473,7 +502,6 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                 .as_query()
                 .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                 .clone();
-            let ast_range: Statement;
 
             if query.limit.is_none() && query.offset.is_none() && query.fetch.is_none() {
                 query.order_by = vec![]; // only omit orderby when there is no limit, offset, or fetch in the query
@@ -502,7 +530,7 @@ pub fn get_partition_range_query<T: Dialect>(sql: &str, col: &str, dialect: &T) 
                     special: false,
                 })),
             ];
-            ast_range = wrap_query(&mut query, projection, None, table_alias);
+            let ast_range: Statement = wrap_query(&mut query, projection, None, table_alias);
             format!("{}", ast_range)
         }
         Err(e) => {
@@ -537,9 +565,6 @@ pub fn get_partition_range_query_sep<T: Dialect>(
                 .as_query()
                 .ok_or_else(|| ConnectorXError::SqlQueryNotSupported(sql.to_string()))?
                 .clone();
-
-            let ast_range_min: Statement;
-            let ast_range_max: Statement;
 
             query.order_by = vec![];
             let min_proj = vec![SelectItem::UnnamedExpr(Expr::Function(Function {
@@ -586,8 +611,10 @@ pub fn get_partition_range_query_sep<T: Dialect>(
                 order_by: vec![],
                 special: false,
             }))];
-            ast_range_min = wrap_query(&mut query.clone(), min_proj, None, RANGE_TMP_TAB_NAME);
-            ast_range_max = wrap_query(&mut query, max_proj, None, RANGE_TMP_TAB_NAME);
+            let ast_range_min: Statement =
+                wrap_query(&mut query.clone(), min_proj, None, RANGE_TMP_TAB_NAME);
+            let ast_range_max: Statement =
+                wrap_query(&mut query, max_proj, None, RANGE_TMP_TAB_NAME);
             (format!("{}", ast_range_min), format!("{}", ast_range_max))
         }
         Err(e) => {
@@ -609,4 +636,124 @@ pub fn get_partition_range_query_sep<T: Dialect>(
         sql_min, sql_max
     );
     (sql_min, sql_max)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        count_query, get_partition_range_query, get_partition_range_query_sep, limit0_query,
+        limit1_query, single_col_partition_query, CXQuery,
+    };
+    use crate::errors::ConnectorXError;
+    use sqlparser::dialect::{GenericDialect, MsSqlDialect};
+
+    #[test]
+    fn preserves_query_variant_and_maps_values() {
+        let naked = CXQuery::naked("select 1");
+        assert_eq!(naked.as_str(), "select 1");
+        assert!(matches!(naked.map(|query| query.len()), CXQuery::Naked(8)));
+        assert_eq!(
+            CXQuery::Wrapped("select 1".to_string()).to_string(),
+            "select 1"
+        );
+    }
+
+    #[test]
+    fn unwraps_successful_and_failed_query_results() {
+        let naked: CXQuery<Result<&str, &str>> = CXQuery::Naked(Ok("select 1"));
+        assert_eq!(naked.result().unwrap().as_str(), "select 1");
+
+        let wrapped: CXQuery<Result<&str, &str>> = CXQuery::Wrapped(Err("bad"));
+        assert!(matches!(wrapped.result(), Err("bad")));
+    }
+
+    #[test]
+    fn transforms_count_and_limit_queries() {
+        let query = CXQuery::naked("SELECT id FROM items ORDER BY id");
+        let dialect = GenericDialect {};
+        assert!(count_query(&query, &dialect)
+            .unwrap()
+            .as_str()
+            .to_ascii_lowercase()
+            .contains("count"));
+        assert!(limit0_query(&query, &dialect)
+            .unwrap()
+            .as_str()
+            .contains("LIMIT 0"));
+        assert!(limit1_query(&query, &dialect)
+            .unwrap()
+            .as_str()
+            .contains("LIMIT 1"));
+    }
+
+    #[test]
+    fn uses_fallback_for_unparseable_limit_query() {
+        let query = CXQuery::naked("SELECT FROM");
+        assert_eq!(
+            limit0_query(&query, &GenericDialect {}).unwrap().as_str(),
+            "SELECT FROM LIMIT 0"
+        );
+        assert_eq!(
+            limit1_query(&query, &GenericDialect {}).unwrap().as_str(),
+            "SELECT FROM LIMIT 1"
+        );
+    }
+
+    #[test]
+    fn rejects_multiple_and_non_select_queries() {
+        let dialect = GenericDialect {};
+        assert!(matches!(
+            count_query(&CXQuery::naked("SELECT 1; SELECT 2"), &dialect),
+            Err(ConnectorXError::SqlQueryNotSupported(_))
+        ));
+        assert!(matches!(
+            limit0_query(&CXQuery::naked("INSERT INTO items VALUES (1)"), &dialect),
+            Err(ConnectorXError::SqlQueryNotSupported(_))
+        ));
+    }
+
+    #[test]
+    fn creates_partition_and_range_queries() {
+        let dialect = GenericDialect {};
+        let partition = single_col_partition_query(
+            "SELECT id, value FROM items ORDER BY id",
+            "id",
+            10,
+            20,
+            &dialect,
+        )
+        .unwrap();
+        assert!(partition.contains("CXTMPTAB_PART"));
+        assert!(partition.contains("10"));
+        assert!(partition.contains("20"));
+        assert!(!partition.contains("ORDER BY id"));
+
+        let range =
+            get_partition_range_query("SELECT id FROM items ORDER BY id", "id", &dialect).unwrap();
+        let range_lower = range.to_ascii_lowercase();
+        assert!(range_lower.contains("min"));
+        assert!(range_lower.contains("max"));
+        assert!(range.contains("CXTMPTAB_RANGE"));
+
+        let (min, max) =
+            get_partition_range_query_sep("SELECT id FROM items ORDER BY id", "id", &dialect)
+                .unwrap();
+        assert!(min.to_ascii_lowercase().contains("min"));
+        assert!(min.contains("CXTMPTAB_RANGE"));
+        assert!(max.to_ascii_lowercase().contains("max"));
+        assert!(max.contains("CXTMPTAB_RANGE"));
+    }
+
+    #[test]
+    fn clears_mssql_ordering_only_when_safe() {
+        let query = single_col_partition_query(
+            "SELECT id FROM items ORDER BY id",
+            "id",
+            0,
+            1,
+            &MsSqlDialect {},
+        )
+        .unwrap();
+        assert!(!query.contains("ORDER BY id"));
+    }
 }

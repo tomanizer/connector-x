@@ -12,7 +12,7 @@ use crate::{
     sources::{
         clickhouse::typesystem::DataType, PartitionParser, Produce, Source, SourcePartition,
     },
-    sql::{count_query, limit1_query, CXQuery},
+    sql::{count_query, limit0_query, CXQuery},
 };
 use anyhow::anyhow;
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
@@ -57,7 +57,10 @@ impl ClickHouseSource {
             url.port().unwrap_or(8123)
         );
 
-        let mut client = Client::default().with_url(&base_url);
+        // clickhouse 0.13 decodes LZ4 only; newer servers default to ZSTD.
+        let mut client = Client::default()
+            .with_url(&base_url)
+            .with_option("network_compression_method", "lz4");
 
         let database = url.path().trim_start_matches('/');
         if !database.is_empty() {
@@ -116,7 +119,7 @@ where
         assert!(!self.queries.is_empty());
 
         let first_query = &self.queries[0];
-        let l1query = limit1_query(first_query, &ClickHouseDialect {})?;
+        let l1query = limit0_query(first_query, &ClickHouseDialect {})?;
 
         let describe_query = format!("DESCRIBE ({})", l1query.as_str());
 

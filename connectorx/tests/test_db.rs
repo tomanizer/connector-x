@@ -2,12 +2,16 @@ use std::{
     env,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
-    sync::Once,
+    sync::{Once, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
-#[cfg(any(feature = "src_mssql", feature = "src_trino", feature = "src_oracle"))]
+#[cfg(any(
+    feature = "src_mssql_common",
+    feature = "src_trino",
+    feature = "src_oracle"
+))]
 use std::fs;
 
 use testcontainers::{
@@ -17,7 +21,7 @@ use testcontainers::{
 };
 
 #[cfg(any(
-    feature = "src_mssql",
+    feature = "src_mssql_common",
     feature = "src_oracle",
     feature = "src_db2",
     feature = "src_sybase"
@@ -27,17 +31,16 @@ use testcontainers::core::{CmdWaitFor, ExecCommand};
 #[cfg(any(feature = "src_odbc", feature = "src_db2", feature = "src_sybase"))]
 use odbc_api::{environment, ConnectionOptions};
 
-#[cfg(feature = "src_postgres")]
-static POSTGRES_INIT: Once = Once::new();
 #[cfg(feature = "src_odbc")]
 static POSTGRES_ODBC_INIT: Once = Once::new();
 #[cfg(feature = "src_db2")]
 static DB2_ODBC_INIT: Once = Once::new();
 #[cfg(feature = "src_sybase")]
 static SYBASE_ODBC_INIT: Once = Once::new();
+static POSTGRES_URL_CACHE: OnceLock<Result<String, String>> = OnceLock::new();
 #[cfg(feature = "src_mysql")]
 static MYSQL_INIT: Once = Once::new();
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_common")]
 static MSSQL_INIT: Once = Once::new();
 #[cfg(feature = "src_trino")]
 static TRINO_INIT: Once = Once::new();
@@ -148,9 +151,17 @@ fn wait_for_odbc_query(conn: &str, query: &str, timeout: Duration, label: &str) 
 
 #[cfg(feature = "src_postgres")]
 pub fn postgres_url() -> String {
-    POSTGRES_INIT.call_once(|| {
-        if env::var("POSTGRES_URL").is_ok() {
-            return;
+    if let Ok(url) = env::var("POSTGRES_URL") {
+        return url;
+    }
+
+    let result = POSTGRES_URL_CACHE.get_or_init(|| {
+        let sock = PathBuf::from("/var/run/docker.sock");
+        if !sock.exists() {
+            return Err(format!(
+                "postgres testcontainer unavailable: docker socket not found at {}. Start Docker or set POSTGRES_URL explicitly.",
+                sock.display()
+            ));
         }
 
         let init_script = scripts_dir().join("postgres.sql");
@@ -168,25 +179,29 @@ pub fn postgres_url() -> String {
                 "/docker-entrypoint-initdb.d/postgres.sql".to_string(),
             ));
 
-        let container = image.start().expect("start postgres testcontainer");
+        let container = image
+            .start()
+            .map_err(|e| format!("start postgres testcontainer: {e}"))?;
         let host = container
             .get_host()
-            .expect("get postgres container host")
+            .map_err(|e| format!("get postgres container host: {e}"))?
             .to_string();
         let port = container
             .get_host_port_ipv4(5432)
-            .expect("get postgres exposed port");
+            .map_err(|e| format!("get postgres exposed port: {e}"))?;
 
-        env::set_var(
-            "POSTGRES_URL",
-            format!("postgresql://postgres:postgres@{host}:{port}/postgres"),
-        );
+        let url = format!("postgresql://postgres:postgres@{host}:{port}/postgres");
+        env::set_var("POSTGRES_URL", &url);
 
         // Keep the container alive for the test process lifetime.
         std::mem::forget(container);
+        Ok(url)
     });
 
-    env::var("POSTGRES_URL").expect("POSTGRES_URL must be set")
+    match result {
+        Ok(url) => url.clone(),
+        Err(msg) => panic!("{msg}", msg = msg),
+    }
 }
 
 #[cfg(feature = "src_odbc")]
@@ -498,10 +513,16 @@ pub fn mysql_url() -> String {
         }
 
         let init_script = scripts_dir().join("mysql.sql");
-        let image = GenericImage::new("ghcr.io/wangxiaoying/mysql", "latest")
+        let image = GenericImage::new("mysql", "8.0.25")
             .with_exposed_port(3306.tcp())
             .with_wait_for(WaitFor::message_on_stderr("ready for connections"))
             .with_startup_timeout(Duration::from_secs(180))
+            .with_cmd([
+                "--character-set-server=utf8mb4",
+                "--collation-server=utf8mb4_unicode_ci",
+                "--skip-character-set-client-handshake",
+                "--init-connect=SET NAMES utf8mb4",
+            ])
             .with_env_var("MYSQL_ROOT_PASSWORD", "mysql")
             .with_env_var("MYSQL_DATABASE", "mysql")
             .with_env_var("LANG", "C.UTF-8")
@@ -538,7 +559,7 @@ pub fn mysql_url() -> String {
     env::var("MYSQL_URL").expect("MYSQL_URL must be set")
 }
 
-#[cfg(feature = "src_mssql")]
+#[cfg(feature = "src_mssql_common")]
 pub fn mssql_url() -> String {
     MSSQL_INIT.call_once(|| {
         if env::var("MSSQL_URL").is_ok() {
@@ -557,7 +578,7 @@ pub fn mssql_url() -> String {
         )
         .expect("write patched mssql sql");
 
-        let image = GenericImage::new("mcr.microsoft.com/mssql/server", "2022-CU12-ubuntu-22.04")
+        let image = GenericImage::new("mcr.microsoft.com/mssql/server", "2025-latest")
             .with_exposed_port(1433.tcp())
             .with_wait_for(WaitFor::seconds(60))
             .with_startup_timeout(Duration::from_secs(180))

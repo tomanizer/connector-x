@@ -253,7 +253,9 @@ def test_trino_types_binary(trino_url: str) -> None:
         data={
             "test_boolean": pd.Series([True, False, None], dtype="boolean"),
             "test_int": pd.Series([123, 321, None], dtype="Int64"),
-            "test_bigint": pd.Series([1000, 2000, None], dtype="Int64"),
+            "test_bigint": pd.Series(
+                [-9223372036854775808, 9223372036854775807, None], dtype="Int64"
+            ),
             "test_real": pd.Series([123.456, 123.456, None], dtype="float64"),
             "test_double": pd.Series([123.4567890123, 123.4567890123, None], dtype="float64"),
             "test_decimal": pd.Series([1234567890.12, 1234567890.12, None], dtype="float64"),
@@ -265,6 +267,22 @@ def test_trino_types_binary(trino_url: str) -> None:
         },
     )
     assert_frame_equal(df, expected, check_names=True)
+
+
+def test_trino_bigint_arrow(trino_url: str) -> None:
+    import pyarrow as pa
+
+    query = (
+        "select test_bigint from test.test_types "
+        "where test_bigint is not null order by test_int"
+    )
+    table = read_sql(trino_url, query, return_type="arrow")
+
+    assert table.schema.field("test_bigint").type == pa.int64()
+    assert table.to_pandas()["test_bigint"].tolist() == [
+        -9223372036854775808,
+        9223372036854775807,
+    ]
 
 
 def test_empty_result(trino_url: str) -> None:
@@ -305,3 +323,38 @@ def test_empty_result_on_some_partition(trino_url: str) -> None:
         },
     )
     assert_frame_equal(df, expected, check_names=True)
+
+
+def test_trino_complex_types(trino_url: str) -> None:
+    """Test that ARRAY, MAP, and ROW columns are returned as JSON strings."""
+    import json
+
+    query = "SELECT * FROM test.test_complex_types ORDER BY test_int"
+    df = read_sql(trino_url, query)
+
+    assert df.shape == (3, 4)
+    assert df["test_int"].dtype == "Int64"
+    # Complex types are serialized as JSON strings in a Utf8 column
+    assert df["test_array"].dtype == "object"
+    assert df["test_map"].dtype == "object"
+    assert df["test_row"].dtype == "object"
+
+    # Row 1: ARRAY['rust','python'], MAP(['team'],['data']), ROW('123 Main','SF')
+    arr = json.loads(df["test_array"].iloc[0])
+    assert arr == ["rust", "python"]
+
+    m = json.loads(df["test_map"].iloc[0])
+    assert m == {"team": "data"}
+
+    # Trino REST API serializes ROW as a JSON array of field values (ordered)
+    row = json.loads(df["test_row"].iloc[0])
+    assert row == ["123 Main", "SF"]
+
+    # Row 2: single-element array
+    arr2 = json.loads(df["test_array"].iloc[1])
+    assert arr2 == ["java"]
+
+    # Row 3: multi-element map
+    m3 = json.loads(df["test_map"].iloc[2])
+    assert m3["org"] == "platform"
+    assert m3["level"] == "senior"
